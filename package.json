@@ -1,0 +1,17 @@
+{
+  "name": "sabri",
+  "version": "1.0.0",
+  "description": "AI-powered audio tour guide",
+  "main": "app.js",
+  "scripts": {
+    "start": "http-server -c-1 -p 8080",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "http-server": "^14.1.1"
+  }
+}

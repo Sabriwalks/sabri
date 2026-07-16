@@ -1,0 +1,233 @@
+:root {
+  --bg: #0f1923;
+  --bg-elevated: #16232e;
+  --gold: #c9a84c;
+  --gold-glow: rgba(201, 168, 76, 0.45);
+  --gold-soft: rgba(201, 168, 76, 0.12);
+  --white: #ffffff;
+  --text-secondary: #8a97a3;
+  --border: rgba(255, 255, 255, 0.06);
+  --font-serif: Georgia, "Iowan Old Style", "Palatino Linotype", "Times New Roman", serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: radial-gradient(circle at 50% 0%, #142230 0%, var(--bg) 55%);
+  color: var(--white);
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 100vh;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: calc(env(safe-area-inset-top) + 28px) 24px calc(env(safe-area-inset-bottom) + 24px);
+  gap: 28px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* Header */
+
+.app-header {
+  text-align: center;
+}
+
+.logo {
+  font-family: var(--font-serif);
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+
+/* Location + pulse */
+
+.location-section {
+  text-align: center;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.location-name {
+  font-family: var(--font-serif);
+  font-weight: 500;
+  font-size: 32px;
+  line-height: 1.25;
+  color: var(--white);
+  max-width: 320px;
+}
+
+.pulse {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  margin: 24px auto 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pulse-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid var(--gold);
+  opacity: 0;
+  animation: pulse-ring 2.8s cubic-bezier(0.16, 0.8, 0.3, 1) infinite;
+}
+
+.pulse-ring--delay {
+  animation-delay: 1.4s;
+}
+
+.pulse-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--gold);
+  box-shadow: 0 0 22px var(--gold-glow);
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.5);
+    opacity: 0.5;
+  }
+  70% {
+    opacity: 0.12;
+  }
+  100% {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+}
+
+.status-text {
+  font-size: 14px;
+  color: var(--text-secondary);
+  letter-spacing: 0.01em;
+}
+
+/* Player card */
+
+.player-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  padding: 24px;
+}
+
+.now-playing {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+
+.story-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--white);
+  margin-top: 8px;
+}
+
+.story-description {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.progress-track {
+  margin-top: 22px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.progress-fill {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--gold);
+  transition: width 0.3s ease;
+}
+
+.controls {
+  margin-top: 20px;
+  display: flex;
+  justify-content: center;
+}
+
+.control-btn {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: none;
+  background: var(--gold);
+  color: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 24px var(--gold-glow);
+}
+
+.control-btn:active {
+  transform: scale(0.96);
+}
+
+/* Footer */
+
+.app-footer {
+  text-align: center;
+}
+
+.tap-hint {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 14px;
+  letter-spacing: 0.02em;
+}
+
+.start-btn {
+  width: 100%;
+  padding: 18px;
+  border: none;
+  border-radius: 18px;
+  background: var(--gold);
+  color: var(--bg);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  box-shadow: 0 10px 30px var(--gold-glow);
+}
+
+.start-btn:active {
+  transform: scale(0.98);
+  opacity: 0.95;
+}
