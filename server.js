@@ -78,6 +78,12 @@ function pickMostInterestingPlace(results) {
   };
 }
 
-app.listen(PORT, () => {
-  console.log(`Sabri server running at http://127.0.0.1:${PORT}`);
-});
+// Vercel imports this file and calls the exported Express app directly as
+// a serverless function, so only start a listening server for local dev.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Sabri server running at http://127.0.0.1:${PORT}`);
+  });
+}
+
+module.exports = app;
