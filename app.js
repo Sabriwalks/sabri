@@ -10,8 +10,21 @@ const pauseBtn = document.getElementById("pause-btn");
 
 let watchId = null;
 let lastPosition = null;
+let placeAbortController = null;
 
 const SIGNIFICANT_MOVE_METERS = 15;
+const NEARBY_RADIUS_METERS = 30;
+
+const PLACE_TYPE_LABELS = {
+  tourist_attraction: "Tourist Attraction",
+  place_of_worship: "Place of Worship",
+  museum: "Museum",
+  park: "Park",
+  natural_feature: "Natural Feature",
+  neighborhood: "Neighborhood",
+  premise: "Premise",
+  establishment: "Establishment",
+};
 
 startBtn.addEventListener("click", startTour);
 playBtn.addEventListener("click", play);
@@ -43,14 +56,45 @@ function onLocation(position) {
   }
   lastPosition = { latitude, longitude };
 
-  // TODO: replace with a real neighborhood name from the Google Maps
-  // Geocoding API once that integration is wired up.
   locationName.textContent = `${latitude.toFixed(4)}°, ${longitude.toFixed(4)}°`;
   statusText.textContent = "Location found. Finding nearby places...";
 
-  // TODO: call Google Maps Places API to find nearby points of interest,
-  // then call the Anthropic API to generate a narration, then call
-  // startStory(title, description) once the narration is ready to play.
+  findNearbyPlace(latitude, longitude);
+}
+
+async function findNearbyPlace(latitude, longitude) {
+  if (placeAbortController) {
+    placeAbortController.abort();
+  }
+  placeAbortController = new AbortController();
+
+  try {
+    const response = await fetch(
+      `/api/places?lat=${latitude}&lng=${longitude}&radius=${NEARBY_RADIUS_METERS}`,
+      { signal: placeAbortController.signal }
+    );
+    const data = await response.json();
+
+    if (!response.ok || !data.place) {
+      statusText.textContent = "Exploring the area...";
+      return;
+    }
+
+    const typeLabel = PLACE_TYPE_LABELS[data.place.primaryType] || data.place.primaryType;
+    locationName.textContent = `${data.place.name} - ${typeLabel}`;
+    statusText.textContent = "Generating your story...";
+
+    generateNarration(data.place);
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    statusText.textContent = "Couldn't check nearby places.";
+  }
+}
+
+function generateNarration(place) {
+  // TODO: call the Anthropic API to generate a spoken narration for this
+  // place, then call startStory(place.name, narrationText) once it's ready.
+  console.log("generateNarration stub called with:", place);
 }
 
 function onLocationError(error) {

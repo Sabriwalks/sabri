@@ -4,14 +4,15 @@
   "description": "AI-powered audio tour guide",
   "main": "app.js",
   "scripts": {
-    "start": "http-server -c-1 -p 8080",
+    "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
-  "devDependencies": {
-    "http-server": "^14.1.1"
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
   }
 }

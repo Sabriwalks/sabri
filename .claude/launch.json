@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "sabri",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["start"],
+      "runtimeExecutable": "C:\\Program Files\\nodejs\\node.exe",
+      "runtimeArgs": ["sabri/server.js"],
       "port": 8080
     }
   ]
