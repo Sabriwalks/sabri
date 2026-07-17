@@ -12,7 +12,14 @@ let watchId = null;
 let lastPosition = null;
 let placeAbortController = null;
 let geocodeAbortController = null;
+let narrateAbortController = null;
 let hasActivePlace = false;
+
+const DEFAULT_USER_PROFILE = {
+  interests: ["history", "culture", "local stories"],
+  pace: "walking",
+  language: "en",
+};
 
 const SIGNIFICANT_MOVE_METERS = 15;
 // Temporarily widened for testing outside dense tourist areas.
@@ -132,10 +139,32 @@ async function findNearbyPlace(latitude, longitude) {
   }
 }
 
-function generateNarration(place) {
-  // TODO: call the Anthropic API to generate a spoken narration for this
-  // place, then call startStory(place.name, narrationText) once it's ready.
-  console.log("generateNarration stub called with:", place);
+async function generateNarration(place) {
+  if (narrateAbortController) {
+    narrateAbortController.abort();
+  }
+  narrateAbortController = new AbortController();
+
+  try {
+    const response = await fetch("/api/narrate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ place, userProfile: DEFAULT_USER_PROFILE }),
+      signal: narrateAbortController.signal,
+    });
+    const data = await response.json();
+
+    if (!response.ok || !data.narration) {
+      statusText.textContent = "Couldn't generate your story.";
+      return;
+    }
+
+    statusText.textContent = "Playing your story...";
+    startStory(place.name, data.narration);
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    statusText.textContent = "Couldn't generate your story.";
+  }
 }
 
 function onLocationError(error) {

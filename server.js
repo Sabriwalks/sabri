@@ -1,10 +1,47 @@
 const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 const express = require("express");
+const Anthropic = require("@anthropic-ai/sdk");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+
+const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+
+const SABRI_SYSTEM_PROMPT =
+  "You are Sabri, a warm, knowledgeable, and engaging personal tour guide. " +
+  "You are like that one brilliant friend who knows everything about everywhere. " +
+  "You tell stories, not facts. You bring places to life with history, culture, " +
+  "human stories, and local flavor. You are never dry or encyclopedic. You speak " +
+  "conversationally, with warmth and occasional humor. You keep each narration to " +
+  "3-4 paragraphs - enough to be rich but short enough to hold attention while " +
+  "walking. You always end with something that makes the listener want to look " +
+  "around and notice something specific.";
+
+const PLACE_TYPE_LABELS = {
+  synagogue: "synagogue",
+  church: "church",
+  mosque: "mosque",
+  tourist_attraction: "tourist attraction",
+  place_of_worship: "place of worship",
+  museum: "museum",
+  park: "park",
+  natural_feature: "natural feature",
+  cemetery: "cemetery",
+  stadium: "stadium",
+  neighborhood: "neighborhood",
+  library: "library",
+  school: "school",
+  bakery: "bakery",
+  cafe: "cafe",
+  restaurant: "restaurant",
+  supermarket: "supermarket",
+  hospital: "hospital",
+  premise: "premise",
+  establishment: "establishment",
+};
 
 // Ordered by how "interesting" a place type is; lower index wins when a
 // nearby result matches more than one of these. Synagogue/church/mosque are
@@ -32,6 +69,7 @@ const ALLOWED_PLACE_TYPES = [
   "establishment",
 ];
 
+app.use(express.json());
 app.use(express.static(__dirname));
 
 app.get("/api/places", async (req, res) => {
@@ -93,6 +131,44 @@ app.get("/api/geocode", async (req, res) => {
     res.json({ locationName: extractLocationName(data.results || []) });
   } catch (error) {
     res.status(502).json({ error: "Failed to reach Google Geocoding API." });
+  }
+});
+
+app.post("/api/narrate", async (req, res) => {
+  const { place, userProfile } = req.body || {};
+
+  if (!place || !place.name || !place.primaryType) {
+    return res.status(400).json({ error: "A place with name and primaryType is required." });
+  }
+
+  if (!ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
+  }
+
+  // userProfile is accepted for future personalization (interests, pace,
+  // language, etc.) but isn't folded into the prompt yet.
+  void userProfile;
+
+  const typeLabel = PLACE_TYPE_LABELS[place.primaryType] || place.primaryType;
+  const vicinity = place.vicinity || "the area";
+
+  try {
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1024,
+      system: SABRI_SYSTEM_PROMPT,
+      messages: [
+        {
+          role: "user",
+          content: `I am standing near ${place.name}, a ${typeLabel} in ${vicinity}. Tell me about this place in your signature style.`,
+        },
+      ],
+    });
+
+    const narration = message.content.find((block) => block.type === "text")?.text || "";
+    res.json({ narration });
+  } catch (error) {
+    res.status(502).json({ error: "Failed to generate narration." });
   }
 });
 
