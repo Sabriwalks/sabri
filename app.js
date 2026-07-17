@@ -11,17 +11,32 @@ const pauseBtn = document.getElementById("pause-btn");
 let watchId = null;
 let lastPosition = null;
 let placeAbortController = null;
+let geocodeAbortController = null;
+let hasActivePlace = false;
 
 const SIGNIFICANT_MOVE_METERS = 15;
-const NEARBY_RADIUS_METERS = 30;
+// Temporarily widened for testing outside dense tourist areas.
+const NEARBY_RADIUS_METERS = 150;
 
 const PLACE_TYPE_LABELS = {
+  synagogue: "Synagogue",
+  church: "Church",
+  mosque: "Mosque",
   tourist_attraction: "Tourist Attraction",
   place_of_worship: "Place of Worship",
   museum: "Museum",
   park: "Park",
   natural_feature: "Natural Feature",
+  cemetery: "Cemetery",
+  stadium: "Stadium",
   neighborhood: "Neighborhood",
+  library: "Library",
+  school: "School",
+  bakery: "Bakery",
+  cafe: "Cafe",
+  restaurant: "Restaurant",
+  supermarket: "Supermarket",
+  hospital: "Hospital",
   premise: "Premise",
   establishment: "Establishment",
 };
@@ -55,11 +70,36 @@ function onLocation(position) {
     return;
   }
   lastPosition = { latitude, longitude };
+  hasActivePlace = false;
 
   locationName.textContent = `${latitude.toFixed(4)}°, ${longitude.toFixed(4)}°`;
   statusText.textContent = "Location found. Finding nearby places...";
 
+  reverseGeocode(latitude, longitude);
   findNearbyPlace(latitude, longitude);
+}
+
+async function reverseGeocode(latitude, longitude) {
+  if (geocodeAbortController) {
+    geocodeAbortController.abort();
+  }
+  geocodeAbortController = new AbortController();
+
+  try {
+    const response = await fetch(`/api/geocode?lat=${latitude}&lng=${longitude}`, {
+      signal: geocodeAbortController.signal,
+    });
+    const data = await response.json();
+
+    // A specific nearby place (set by findNearbyPlace) is more precise than
+    // a general area name, so don't clobber it if one's already showing.
+    if (response.ok && data.locationName && !hasActivePlace) {
+      locationName.textContent = data.locationName;
+    }
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    // Leave the coordinates fallback in place if geocoding fails.
+  }
 }
 
 async function findNearbyPlace(latitude, longitude) {
@@ -80,6 +120,7 @@ async function findNearbyPlace(latitude, longitude) {
       return;
     }
 
+    hasActivePlace = true;
     const typeLabel = PLACE_TYPE_LABELS[data.place.primaryType] || data.place.primaryType;
     locationName.textContent = `${data.place.name} - ${typeLabel}`;
     statusText.textContent = "Generating your story...";
