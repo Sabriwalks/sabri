@@ -12,8 +12,9 @@ let watchId = null;
 let lastPosition = null;
 let placeAbortController = null;
 let geocodeAbortController = null;
-let narrateAbortController = null;
 let hasActivePlace = false;
+let isNarrating = false;
+let currentPlaceId = null;
 
 const DEFAULT_USER_PROFILE = {
   interests: ["history", "culture", "local stories"],
@@ -130,8 +131,15 @@ async function findNearbyPlace(latitude, longitude) {
     hasActivePlace = true;
     const typeLabel = PLACE_TYPE_LABELS[data.place.primaryType] || data.place.primaryType;
     locationName.textContent = `${data.place.name} - ${typeLabel}`;
-    statusText.textContent = "Generating your story...";
 
+    // Never interrupt an in-flight narration, and never re-narrate a place
+    // we've already told the story of — only a genuinely new place, once
+    // the previous narration has finished, triggers a new one.
+    if (isNarrating || data.place.placeId === currentPlaceId) {
+      return;
+    }
+
+    statusText.textContent = "Generating your story...";
     generateNarration(data.place);
   } catch (error) {
     if (error.name === "AbortError") return;
@@ -140,17 +148,13 @@ async function findNearbyPlace(latitude, longitude) {
 }
 
 async function generateNarration(place) {
-  if (narrateAbortController) {
-    narrateAbortController.abort();
-  }
-  narrateAbortController = new AbortController();
+  isNarrating = true;
 
   try {
     const response = await fetch("/api/narrate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ place, userProfile: DEFAULT_USER_PROFILE }),
-      signal: narrateAbortController.signal,
     });
     const data = await response.json();
 
@@ -159,11 +163,13 @@ async function generateNarration(place) {
       return;
     }
 
+    currentPlaceId = place.placeId;
     statusText.textContent = "Playing your story...";
     startStory(place.name, data.narration);
   } catch (error) {
-    if (error.name === "AbortError") return;
     statusText.textContent = "Couldn't generate your story.";
+  } finally {
+    isNarrating = false;
   }
 }
 
