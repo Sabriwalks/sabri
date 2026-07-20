@@ -12,9 +12,13 @@ let watchId = null;
 let lastPosition = null;
 let placeAbortController = null;
 let geocodeAbortController = null;
+let speakAbortController = null;
 let hasActivePlace = false;
 let isNarrating = false;
 let currentPlaceId = null;
+
+let audioContext = null;
+let currentAudioSource = null;
 
 const DEFAULT_USER_PROFILE = {
   interests: ["history", "culture", "local stories"],
@@ -50,8 +54,15 @@ const PLACE_TYPE_LABELS = {
 };
 
 startBtn.addEventListener("click", startTour);
-playBtn.addEventListener("click", play);
-pauseBtn.addEventListener("click", pause);
+playBtn.addEventListener("click", (event) => {
+  event.stopPropagation();
+  togglePlayback();
+});
+pauseBtn.addEventListener("click", (event) => {
+  event.stopPropagation();
+  togglePlayback();
+});
+playerCard.addEventListener("click", togglePlayback);
 
 function startTour() {
   if (!("geolocation" in navigator)) {
@@ -164,12 +175,79 @@ async function generateNarration(place) {
     }
 
     currentPlaceId = place.placeId;
-    statusText.textContent = "Playing your story...";
     startStory(place.name, data.narration);
+    speakNarration(data.narration);
   } catch (error) {
     statusText.textContent = "Couldn't generate your story.";
   } finally {
     isNarrating = false;
+  }
+}
+
+async function speakNarration(text) {
+  if (speakAbortController) {
+    speakAbortController.abort();
+  }
+  speakAbortController = new AbortController();
+
+  try {
+    const response = await fetch("/api/speak", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+      signal: speakAbortController.signal,
+    });
+
+    if (!response.ok) {
+      statusText.textContent = "Couldn't load audio for your story.";
+      return;
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+
+    if (!audioContext) {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioContext.state === "suspended") {
+      await audioContext.resume();
+    }
+
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+    if (currentAudioSource) {
+      currentAudioSource.onended = null;
+      currentAudioSource.stop();
+    }
+
+    const source = audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioContext.destination);
+    source.onended = () => {
+      statusText.textContent = "Move to discover more...";
+      pause();
+    };
+
+    currentAudioSource = source;
+    source.start();
+    statusText.textContent = "Playing...";
+    play();
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    statusText.textContent = "Couldn't load audio for your story.";
+  }
+}
+
+function togglePlayback() {
+  if (!audioContext || !currentAudioSource) return;
+
+  if (audioContext.state === "running") {
+    audioContext.suspend();
+    pause();
+    statusText.textContent = "Paused";
+  } else if (audioContext.state === "suspended") {
+    audioContext.resume();
+    play();
+    statusText.textContent = "Playing...";
   }
 }
 

@@ -1,14 +1,18 @@
 const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
+const { Readable } = require("stream");
 const express = require("express");
 const Anthropic = require("@anthropic-ai/sdk");
+const OpenAI = require("openai");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 const SABRI_SYSTEM_PROMPT =
   "You are Sabri, a warm, knowledgeable, and engaging personal tour guide. " +
@@ -169,6 +173,31 @@ app.post("/api/narrate", async (req, res) => {
     res.json({ narration });
   } catch (error) {
     res.status(502).json({ error: "Failed to generate narration." });
+  }
+});
+
+app.post("/api/speak", async (req, res) => {
+  const { text } = req.body || {};
+
+  if (!text) {
+    return res.status(400).json({ error: "text is required." });
+  }
+
+  if (!OPENAI_API_KEY) {
+    return res.status(500).json({ error: "OPENAI_API_KEY is not configured on the server." });
+  }
+
+  try {
+    const speech = await openai.audio.speech.create({
+      model: "tts-1",
+      voice: "onyx",
+      input: text,
+    });
+
+    res.setHeader("Content-Type", "audio/mpeg");
+    Readable.fromWeb(speech.body).pipe(res);
+  } catch (error) {
+    res.status(502).json({ error: "Failed to generate speech." });
   }
 });
 
