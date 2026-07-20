@@ -33,10 +33,11 @@ body {
   flex-direction: column;
   justify-content: space-between;
   min-height: 100vh;
+  min-height: 100dvh;
   max-width: 480px;
   margin: 0 auto;
-  padding: calc(env(safe-area-inset-top) + 28px) 24px calc(env(safe-area-inset-bottom) + 24px);
-  gap: 28px;
+  padding: calc(env(safe-area-inset-top) + 18px) 24px calc(env(safe-area-inset-bottom) + 18px);
+  gap: 16px;
 }
 
 .hidden {
@@ -63,6 +64,7 @@ body {
 .location-section {
   text-align: center;
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -73,17 +75,17 @@ body {
 .location-name {
   font-family: var(--font-serif);
   font-weight: 500;
-  font-size: 32px;
+  font-size: 26px;
   line-height: 1.25;
   color: var(--white);
-  max-width: 320px;
+  max-width: 300px;
 }
 
 .pulse {
   position: relative;
-  width: 88px;
-  height: 88px;
-  margin: 24px auto 8px;
+  width: 64px;
+  height: 64px;
+  margin: 14px auto 6px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -162,6 +164,13 @@ body {
   margin-top: 4px;
 }
 
+.story-description--fallback {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--white);
+  line-height: 1.6;
+}
+
 .progress-track {
   margin-top: 22px;
   height: 4px;
@@ -210,13 +219,13 @@ body {
 .tap-hint {
   font-size: 13px;
   color: var(--text-secondary);
-  margin-bottom: 14px;
+  margin-bottom: 8px;
   letter-spacing: 0.02em;
 }
 
 .start-btn {
   width: 100%;
-  padding: 18px;
+  padding: 16px;
   border: none;
   border-radius: 18px;
   background: var(--gold);

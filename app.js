@@ -27,8 +27,7 @@ const DEFAULT_USER_PROFILE = {
 };
 
 const SIGNIFICANT_MOVE_METERS = 15;
-// Temporarily widened for testing outside dense tourist areas.
-const NEARBY_RADIUS_METERS = 150;
+const NEARBY_RADIUS_METERS = 30;
 
 const PLACE_TYPE_LABELS = {
   synagogue: "Synagogue",
@@ -53,7 +52,14 @@ const PLACE_TYPE_LABELS = {
   establishment: "Establishment",
 };
 
-startBtn.addEventListener("click", startTour);
+startBtn.addEventListener("click", () => {
+  // iOS Safari only allows creating/resuming an AudioContext from directly
+  // inside a user gesture handler. Unlocking it here (once) means every
+  // later location-triggered narration can reuse and resume this same
+  // context without a fresh tap.
+  unlockAudioContext();
+  startTour();
+});
 playBtn.addEventListener("click", (event) => {
   event.stopPropagation();
   togglePlayback();
@@ -63,6 +69,17 @@ pauseBtn.addEventListener("click", (event) => {
   togglePlayback();
 });
 playerCard.addEventListener("click", togglePlayback);
+
+function unlockAudioContext() {
+  if (!audioContext) {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    audioContext = new AudioContextClass();
+  }
+  if (audioContext.state === "suspended") {
+    audioContext.resume();
+  }
+}
 
 function startTour() {
   if (!("geolocation" in navigator)) {
@@ -205,8 +222,12 @@ async function speakNarration(text) {
 
     const arrayBuffer = await response.arrayBuffer();
 
+    // The AudioContext is created and unlocked once, on the Start Tour tap
+    // (a direct user gesture) — iOS Safari refuses to play audio through a
+    // context that was created or first resumed outside of one. If it's
+    // missing here, that gesture never happened, so fall back to text.
     if (!audioContext) {
-      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      throw new Error("AudioContext was never unlocked by a user gesture.");
     }
     if (audioContext.state === "suspended") {
       await audioContext.resume();
@@ -233,7 +254,10 @@ async function speakNarration(text) {
     play();
   } catch (error) {
     if (error.name === "AbortError") return;
-    statusText.textContent = "Couldn't load audio for your story.";
+    // Audio didn't play — make sure the story is still readable front and
+    // center rather than leaving the user with nothing.
+    statusText.textContent = "Audio unavailable — read your story below.";
+    placeDescription.classList.add("story-description--fallback");
   }
 }
 
@@ -284,6 +308,7 @@ function distanceInMeters(a, b) {
 function startStory(title, description) {
   placeName.textContent = title;
   placeDescription.textContent = description;
+  placeDescription.classList.remove("story-description--fallback");
   playerCard.classList.remove("hidden");
   play();
 }
