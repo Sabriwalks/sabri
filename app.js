@@ -15,10 +15,25 @@ let geocodeAbortController = null;
 let speakAbortController = null;
 let hasActivePlace = false;
 let isNarrating = false;
-let currentPlaceId = null;
 
 let audioContext = null;
 let currentAudioSource = null;
+
+// Three-tier location state. orientationCenter/isOriented track whether
+// we've given the user a neighborhood orientation for their current 100m
+// "cell"; narratedPlaceIds ensures nothing (neighborhood or specific) is
+// ever narrated twice in a session.
+let orientationCenter = null;
+let isOriented = false;
+const narratedPlaceIds = new Set();
+
+// Pacing: once a narration finishes, wait for both a time and a distance
+// threshold before the next one can start, so narrations never jumble
+// together while walking at a normal pace.
+let lastNarrationEndTime = 0;
+let lastNarrationPosition = null;
+const NARRATION_COOLDOWN_MS = 10000;
+const NARRATION_COOLDOWN_METERS = 10;
 
 const DEFAULT_USER_PROFILE = {
   interests: ["history", "culture", "local stories"],
@@ -27,7 +42,21 @@ const DEFAULT_USER_PROFILE = {
 };
 
 const SIGNIFICANT_MOVE_METERS = 15;
-const NEARBY_RADIUS_METERS = 30;
+const ORIENTATION_RADIUS_METERS = 100;
+const SPECIFIC_RADIUS_METERS = 15;
+
+const NEIGHBORHOOD_PLACE_TYPES = ["neighborhood", "locality", "sublocality"];
+const SPECIFIC_PLACE_TYPES = [
+  "synagogue",
+  "church",
+  "mosque",
+  "tourist_attraction",
+  "museum",
+  "park",
+  "cemetery",
+  "premise",
+  "establishment",
+];
 
 const PLACE_TYPE_LABELS = {
   synagogue: "Synagogue",
@@ -41,6 +70,8 @@ const PLACE_TYPE_LABELS = {
   cemetery: "Cemetery",
   stadium: "Stadium",
   neighborhood: "Neighborhood",
+  locality: "Neighborhood",
+  sublocality: "Neighborhood",
   library: "Library",
   school: "School",
   bakery: "Bakery",
@@ -106,13 +137,13 @@ function onLocation(position) {
     return;
   }
   lastPosition = { latitude, longitude };
-  hasActivePlace = false;
 
-  locationName.textContent = `${latitude.toFixed(4)}°, ${longitude.toFixed(4)}°`;
-  statusText.textContent = "Location found. Finding nearby places...";
+  if (!hasActivePlace) {
+    locationName.textContent = `${latitude.toFixed(4)}°, ${longitude.toFixed(4)}°`;
+  }
 
   reverseGeocode(latitude, longitude);
-  findNearbyPlace(latitude, longitude);
+  checkForNarration(latitude, longitude);
 }
 
 async function reverseGeocode(latitude, longitude) {
@@ -127,8 +158,8 @@ async function reverseGeocode(latitude, longitude) {
     });
     const data = await response.json();
 
-    // A specific nearby place (set by findNearbyPlace) is more precise than
-    // a general area name, so don't clobber it if one's already showing.
+    // A narrated place's name is more precise than a general area name, so
+    // don't clobber it once one's already showing.
     if (response.ok && data.locationName && !hasActivePlace) {
       locationName.textContent = data.locationName;
     }
@@ -138,51 +169,103 @@ async function reverseGeocode(latitude, longitude) {
   }
 }
 
-async function findNearbyPlace(latitude, longitude) {
+// Entry point for the three-tier flow: never interrupt a playing narration,
+// respect the pacing cooldown, then decide whether we need a fresh
+// neighborhood orientation (STEP 1) or can zoom into something specific
+// (STEP 2).
+async function checkForNarration(latitude, longitude) {
+  if (isNarrating) return;
+
+  if (lastNarrationEndTime > 0) {
+    const cooledDown = Date.now() - lastNarrationEndTime >= NARRATION_COOLDOWN_MS;
+    const movedEnough =
+      !lastNarrationPosition ||
+      distanceInMeters(lastNarrationPosition, { latitude, longitude }) >= NARRATION_COOLDOWN_METERS;
+
+    if (!cooledDown || !movedEnough) {
+      statusText.textContent = "Keep walking, discovering...";
+      return;
+    }
+  }
+
+  const needsOrientation =
+    !orientationCenter || distanceInMeters(orientationCenter, { latitude, longitude }) > ORIENTATION_RADIUS_METERS;
+
+  if (needsOrientation) {
+    orientationCenter = { latitude, longitude };
+    isOriented = false;
+  }
+
+  if (!isOriented) {
+    await runNeighborhoodOrientation(latitude, longitude);
+    return;
+  }
+
+  await runSpecificZoomIn(latitude, longitude);
+}
+
+// STEP 1 - orient the user to the neighborhood they've just arrived in.
+async function runNeighborhoodOrientation(latitude, longitude) {
+  statusText.textContent = "Getting your bearings...";
+
+  const place = await fetchNearbyPlace(latitude, longitude, ORIENTATION_RADIUS_METERS, NEIGHBORHOOD_PLACE_TYPES);
+  isOriented = true;
+
+  if (!place || narratedPlaceIds.has(place.placeId)) {
+    statusText.textContent = "Keep walking, discovering...";
+    return;
+  }
+
+  await narrateAndSpeak(place, "neighborhood", { latitude, longitude });
+}
+
+// STEP 2 - once oriented and still within range, look for something
+// specific worth stopping for.
+async function runSpecificZoomIn(latitude, longitude) {
+  const place = await fetchNearbyPlace(latitude, longitude, SPECIFIC_RADIUS_METERS, SPECIFIC_PLACE_TYPES);
+
+  if (!place || narratedPlaceIds.has(place.placeId)) {
+    // STEP 3 - nothing new nearby; keep watching as the user walks.
+    statusText.textContent = "Keep walking, discovering...";
+    return;
+  }
+
+  await narrateAndSpeak(place, "specific", { latitude, longitude });
+}
+
+async function fetchNearbyPlace(latitude, longitude, radius, types) {
   if (placeAbortController) {
     placeAbortController.abort();
   }
   placeAbortController = new AbortController();
 
   try {
-    const response = await fetch(
-      `/api/places?lat=${latitude}&lng=${longitude}&radius=${NEARBY_RADIUS_METERS}`,
-      { signal: placeAbortController.signal }
-    );
+    const params = new URLSearchParams({
+      lat: String(latitude),
+      lng: String(longitude),
+      radius: String(radius),
+      types: types.join(","),
+    });
+    const response = await fetch(`/api/places?${params.toString()}`, {
+      signal: placeAbortController.signal,
+    });
     const data = await response.json();
-
-    if (!response.ok || !data.place) {
-      statusText.textContent = "Exploring the area...";
-      return;
-    }
-
-    hasActivePlace = true;
-    const typeLabel = PLACE_TYPE_LABELS[data.place.primaryType] || data.place.primaryType;
-    locationName.textContent = `${data.place.name} - ${typeLabel}`;
-
-    // Never interrupt an in-flight narration, and never re-narrate a place
-    // we've already told the story of — only a genuinely new place, once
-    // the previous narration has finished, triggers a new one.
-    if (isNarrating || data.place.placeId === currentPlaceId) {
-      return;
-    }
-
-    statusText.textContent = "Generating your story...";
-    generateNarration(data.place);
+    return response.ok ? data.place || null : null;
   } catch (error) {
-    if (error.name === "AbortError") return;
-    statusText.textContent = "Couldn't check nearby places.";
+    return null;
   }
 }
 
-async function generateNarration(place) {
+async function narrateAndSpeak(place, tier, triggerPosition) {
   isNarrating = true;
+  lastNarrationPosition = triggerPosition;
+  statusText.textContent = tier === "neighborhood" ? "Getting your bearings..." : "Generating your story...";
 
   try {
     const response = await fetch("/api/narrate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ place, userProfile: DEFAULT_USER_PROFILE }),
+      body: JSON.stringify({ place, tier, userProfile: DEFAULT_USER_PROFILE }),
     });
     const data = await response.json();
 
@@ -191,16 +274,24 @@ async function generateNarration(place) {
       return;
     }
 
-    currentPlaceId = place.placeId;
+    narratedPlaceIds.add(place.placeId);
+    hasActivePlace = true;
+    const typeLabel = PLACE_TYPE_LABELS[place.primaryType] || place.primaryType;
+    locationName.textContent = `${place.name} - ${typeLabel}`;
+
     startStory(place.name, data.narration);
-    speakNarration(data.narration);
+    await speakNarration(data.narration);
   } catch (error) {
     statusText.textContent = "Couldn't generate your story.";
   } finally {
     isNarrating = false;
+    lastNarrationEndTime = Date.now();
   }
 }
 
+// Resolves once playback has genuinely finished (or failed) — awaiting this
+// is what keeps isNarrating true for the whole time audio is playing, not
+// just while it's being generated.
 async function speakNarration(text) {
   if (speakAbortController) {
     speakAbortController.abort();
@@ -243,15 +334,19 @@ async function speakNarration(text) {
     const source = audioContext.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(audioContext.destination);
-    source.onended = () => {
-      statusText.textContent = "Move to discover more...";
-      pause();
-    };
-
     currentAudioSource = source;
-    source.start();
+
     statusText.textContent = "Playing...";
     play();
+
+    await new Promise((resolve) => {
+      source.onended = () => {
+        statusText.textContent = "Move to discover more...";
+        pause();
+        resolve();
+      };
+      source.start();
+    });
   } catch (error) {
     if (error.name === "AbortError") return;
     // Audio didn't play — make sure the story is still readable front and

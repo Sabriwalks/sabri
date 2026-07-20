@@ -22,7 +22,23 @@ const SABRI_SYSTEM_PROMPT =
   "conversationally, with warmth and occasional humor. You keep each narration to " +
   "3-4 paragraphs - enough to be rich but short enough to hold attention while " +
   "walking. You always end with something that makes the listener want to look " +
-  "around and notice something specific.";
+  "around and notice something specific. Never include stage directions, action " +
+  "descriptions, or text in asterisks like *takes a deep breath* or *pauses*. " +
+  "Never describe what you are doing - just do it. You are speaking directly to " +
+  "the listener, not writing a script. Write only the words that will be spoken " +
+  "out loud.";
+
+const TIER_GUIDANCE = {
+  neighborhood:
+    "For this narration, you are giving a warm welcome to a neighborhood or " +
+    "area, not a single site. Paint broad strokes: who lives here, what the " +
+    "character and rhythm of the streets feel like, what kind of place this " +
+    "is. End with something like \"as you walk you might notice...\" to point " +
+    "the listener toward small details worth noticing as they explore on foot.",
+  specific:
+    "For this narration, you are zoomed in on one exact place. Go deep: rich " +
+    "detail, human stories, and history specific to this location.",
+};
 
 const PLACE_TYPE_LABELS = {
   synagogue: "synagogue",
@@ -36,6 +52,8 @@ const PLACE_TYPE_LABELS = {
   cemetery: "cemetery",
   stadium: "stadium",
   neighborhood: "neighborhood",
+  locality: "neighborhood",
+  sublocality: "neighborhood",
   library: "library",
   school: "school",
   bakery: "bakery",
@@ -80,6 +98,9 @@ app.get("/api/places", async (req, res) => {
   const lat = parseFloat(req.query.lat);
   const lng = parseFloat(req.query.lng);
   const radius = parseFloat(req.query.radius) || 30;
+  const requestedTypes = req.query.types
+    ? req.query.types.split(",").map((type) => type.trim()).filter(Boolean)
+    : null;
 
   if (Number.isNaN(lat) || Number.isNaN(lng)) {
     return res.status(400).json({ error: "lat and lng query params are required." });
@@ -102,7 +123,7 @@ app.get("/api/places", async (req, res) => {
       return res.status(502).json({ error: `Google Places API error: ${data.status}` });
     }
 
-    res.json({ place: pickMostInterestingPlace(data.results || []) });
+    res.json({ place: pickMostInterestingPlace(data.results || [], requestedTypes) });
   } catch (error) {
     res.status(502).json({ error: "Failed to reach Google Places API." });
   }
@@ -139,7 +160,7 @@ app.get("/api/geocode", async (req, res) => {
 });
 
 app.post("/api/narrate", async (req, res) => {
-  const { place, userProfile } = req.body || {};
+  const { place, tier, userProfile } = req.body || {};
 
   if (!place || !place.name || !place.primaryType) {
     return res.status(400).json({ error: "A place with name and primaryType is required." });
@@ -153,6 +174,8 @@ app.post("/api/narrate", async (req, res) => {
   // language, etc.) but isn't folded into the prompt yet.
   void userProfile;
 
+  const resolvedTier = tier === "neighborhood" ? "neighborhood" : "specific";
+  const systemPrompt = `${SABRI_SYSTEM_PROMPT}\n\n${TIER_GUIDANCE[resolvedTier]}`;
   const typeLabel = PLACE_TYPE_LABELS[place.primaryType] || place.primaryType;
   const vicinity = place.vicinity || "the area";
 
@@ -160,7 +183,7 @@ app.post("/api/narrate", async (req, res) => {
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 1024,
-      system: SABRI_SYSTEM_PROMPT,
+      system: systemPrompt,
       messages: [
         {
           role: "user",
@@ -225,12 +248,13 @@ function extractLocationName(results) {
   return results[0]?.formatted_address || null;
 }
 
-function pickMostInterestingPlace(results) {
+function pickMostInterestingPlace(results, allowedTypes) {
+  const types = allowedTypes && allowedTypes.length ? allowedTypes : ALLOWED_PLACE_TYPES;
   let best = null;
   let bestPriority = Infinity;
 
   for (const result of results) {
-    const priority = ALLOWED_PLACE_TYPES.findIndex((type) => result.types?.includes(type));
+    const priority = types.findIndex((type) => result.types?.includes(type));
     if (priority === -1) continue;
     if (priority < bestPriority) {
       bestPriority = priority;
@@ -244,7 +268,7 @@ function pickMostInterestingPlace(results) {
     name: best.name,
     vicinity: best.vicinity || null,
     types: best.types || [],
-    primaryType: ALLOWED_PLACE_TYPES[bestPriority],
+    primaryType: types[bestPriority],
     rating: best.rating ?? null,
     placeId: best.place_id,
   };
