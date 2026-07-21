@@ -34,7 +34,6 @@
     <footer class="app-footer">
       <p class="tap-hint">Tap to talk</p>
       <button id="start-btn" class="start-btn">Start Tour</button>
-      <button id="install-btn" class="install-btn hidden">Add to Home Screen</button>
     </footer>
   </div>
 
@@ -147,6 +146,46 @@
        with the screen locked / app backgrounded, and for Media Session
        (lock-screen title/artwork + AirPods play/pause) to attach to it. -->
   <audio id="audio-player" playsinline webkit-playsinline style="display:none"></audio>
+
+  <!-- PWA install banner. iOS Safari has no beforeinstallprompt event, so it
+       gets manual step-by-step instructions instead; on Android/Chrome the
+       same shell shows a real "Install" button wired to the native prompt. -->
+  <div id="install-banner" class="install-banner" role="dialog" aria-live="polite">
+    <button id="install-banner-close" class="install-banner-close" aria-label="Close">✕</button>
+
+    <div class="install-banner-main">
+      <div class="install-banner-logo" aria-hidden="true">S</div>
+      <div class="install-banner-copy">
+        <p class="install-banner-title">Install Sabri on your home screen for the best experience</p>
+
+        <ol class="install-banner-steps" data-ios-only>
+          <li>
+            <span class="install-banner-share-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 3v11" stroke-linecap="round" />
+                <path d="M7.5 7.5L12 3l4.5 4.5" stroke-linecap="round" stroke-linejoin="round" />
+                <rect x="5" y="11.5" width="14" height="9" rx="2" />
+              </svg>
+            </span>
+            Tap the Share button at the bottom of your browser
+          </li>
+          <li>Scroll down and tap "Add to Home Screen"</li>
+          <li>Tap "Add" in the top right</li>
+        </ol>
+      </div>
+    </div>
+
+    <div class="install-banner-actions">
+      <button id="install-banner-cta" class="install-banner-cta">Got it</button>
+    </div>
+
+    <div class="install-banner-arrow" data-ios-only aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 5v14" stroke-linecap="round" />
+        <path d="M6 13l6 6 6-6" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

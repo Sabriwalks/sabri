@@ -13,7 +13,10 @@ const speedButtons = document.querySelectorAll(".speed-btn");
 const playBtn = document.getElementById("play-btn");
 const pauseBtn = document.getElementById("pause-btn");
 const audioPlayer = document.getElementById("audio-player");
-const installBtn = document.getElementById("install-btn");
+const installBanner = document.getElementById("install-banner");
+const installBannerClose = document.getElementById("install-banner-close");
+const installBannerCta = document.getElementById("install-banner-cta");
+const installBannerIosOnly = document.querySelectorAll("[data-ios-only]");
 const micBtn = document.getElementById("mic-btn");
 const askSubtitle = document.getElementById("ask-subtitle");
 const settingsBtn = document.getElementById("settings-btn");
@@ -218,7 +221,7 @@ function closeSettings() {
   settingsOverlay.classList.add("hidden");
 }
 
-// --- PWA: service worker + install prompt ---
+// --- PWA: service worker ---
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
@@ -226,24 +229,80 @@ if ("serviceWorker" in navigator) {
   });
 }
 
+// --- PWA install banner ---
+// iOS Safari never fires beforeinstallprompt, so there's no way to trigger
+// a native install flow there — instead we show manual step-by-step
+// instructions. On Android/Chrome, the same banner shell shows a real
+// "Install" button wired to the native prompt (the old behavior, just
+// presented through this banner instead of a standalone pill button).
+
+const INSTALL_BANNER_DISMISSED_KEY = "sabri-install-banner-dismissed";
+const isIosSafari = /iphone|ipad|ipod/i.test(navigator.userAgent) && !window.MSStream;
+const isStandalone = window.navigator.standalone === true;
+
 let deferredInstallPrompt = null;
+
+function isInstallBannerDismissed() {
+  try {
+    return localStorage.getItem(INSTALL_BANNER_DISMISSED_KEY) === "true";
+  } catch (error) {
+    return false;
+  }
+}
+
+function dismissInstallBanner() {
+  installBanner.classList.remove("is-visible");
+  try {
+    localStorage.setItem(INSTALL_BANNER_DISMISSED_KEY, "true");
+  } catch (error) {
+    // localStorage unavailable — banner just won't remember being dismissed.
+  }
+}
+
+function showInstallBanner() {
+  if (isInstallBannerDismissed()) return;
+  installBanner.classList.add("is-visible");
+}
+
+function configureInstallBannerForIos() {
+  installBannerIosOnly.forEach((el) => el.classList.remove("hidden"));
+  installBannerCta.textContent = "Got it";
+  installBannerCta.onclick = dismissInstallBanner;
+}
+
+function configureInstallBannerForAndroid() {
+  installBannerIosOnly.forEach((el) => el.classList.add("hidden"));
+  installBannerCta.textContent = "Install";
+  installBannerCta.onclick = async () => {
+    if (!deferredInstallPrompt) {
+      dismissInstallBanner();
+      return;
+    }
+    deferredInstallPrompt.prompt();
+    await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+    dismissInstallBanner();
+  };
+}
+
+installBannerClose.addEventListener("click", dismissInstallBanner);
+
+if (isIosSafari && !isStandalone) {
+  configureInstallBannerForIos();
+  setTimeout(showInstallBanner, 3000);
+}
 
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
   deferredInstallPrompt = event;
-  installBtn.classList.remove("hidden");
-});
-
-installBtn.addEventListener("click", async () => {
-  if (!deferredInstallPrompt) return;
-  deferredInstallPrompt.prompt();
-  await deferredInstallPrompt.userChoice;
-  deferredInstallPrompt = null;
-  installBtn.classList.add("hidden");
+  if (!isIosSafari) {
+    configureInstallBannerForAndroid();
+    showInstallBanner();
+  }
 });
 
 window.addEventListener("appinstalled", () => {
-  installBtn.classList.add("hidden");
+  dismissInstallBanner();
   deferredInstallPrompt = null;
 });
 
