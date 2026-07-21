@@ -16,7 +16,7 @@
     <section id="status-card" class="location-section">
       <h1 id="location-name" class="location-name">Nachlaot, Jerusalem</h1>
 
-      <div class="pulse" aria-hidden="true">
+      <div id="pulse" class="pulse" aria-hidden="true">
         <span class="pulse-ring"></span>
         <span class="pulse-ring pulse-ring--delay"></span>
         <span class="pulse-dot"></span>
@@ -25,10 +25,34 @@
       <p id="status-text" class="status-text">Tap start to begin your tour.</p>
     </section>
 
-    <section id="player-card" class="player-card hidden">
+    <footer class="app-footer">
+      <p class="tap-hint">Tap to talk</p>
+      <button id="start-btn" class="start-btn">Start Tour</button>
+    </footer>
+  </div>
+
+  <!-- Collapsed by default: only a peek handle with a "tap to read" hint
+       shows while walking. Tap or swipe up to reveal the full narration. -->
+  <section id="player-card" class="player-card hidden">
+    <button id="drawer-handle" class="drawer-handle" aria-label="Show story details">
+      <span class="drawer-handle-bar" aria-hidden="true"></span>
+      <span class="drawer-handle-hint">Tap to read</span>
+    </button>
+
+    <div class="drawer-content">
+      <button id="drawer-close" class="drawer-close" aria-label="Hide story details">✕</button>
+
+      <div id="place-photo" class="place-photo" aria-hidden="true"></div>
+
       <p class="now-playing">Now Playing</p>
       <h2 id="place-name" class="story-title">—</h2>
       <p id="place-description" class="story-description">—</p>
+
+      <div class="speed-controls" role="group" aria-label="Narration speed">
+        <button class="speed-btn" data-speed="0.75">0.75x</button>
+        <button class="speed-btn is-active" data-speed="1">1.0x</button>
+        <button class="speed-btn" data-speed="1.25">1.25x</button>
+      </div>
 
       <div class="progress-track">
         <div class="progress-fill"></div>
@@ -42,13 +66,13 @@
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
         </button>
       </div>
-    </section>
+    </div>
+  </section>
 
-    <footer class="app-footer">
-      <p class="tap-hint">Tap to talk</p>
-      <button id="start-btn" class="start-btn">Start Tour</button>
-    </footer>
-  </div>
+  <!-- Real playback element — required for iOS Safari to keep audio going
+       with the screen locked / app backgrounded, and for Media Session
+       (lock-screen title/artwork + AirPods play/pause) to attach to it. -->
+  <audio id="audio-player" playsinline webkit-playsinline style="display:none"></audio>
 
   <script src="app.js"></script>
 </body>

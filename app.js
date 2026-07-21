@@ -2,11 +2,17 @@ const startBtn = document.getElementById("start-btn");
 const statusCard = document.getElementById("status-card");
 const statusText = document.getElementById("status-text");
 const locationName = document.getElementById("location-name");
+const pulseEl = document.getElementById("pulse");
 const playerCard = document.getElementById("player-card");
+const drawerHandle = document.getElementById("drawer-handle");
+const drawerClose = document.getElementById("drawer-close");
+const placePhoto = document.getElementById("place-photo");
 const placeName = document.getElementById("place-name");
 const placeDescription = document.getElementById("place-description");
+const speedButtons = document.querySelectorAll(".speed-btn");
 const playBtn = document.getElementById("play-btn");
 const pauseBtn = document.getElementById("pause-btn");
+const audioPlayer = document.getElementById("audio-player");
 
 let watchId = null;
 let lastPosition = null;
@@ -16,13 +22,23 @@ let speakAbortController = null;
 let hasActivePlace = false;
 let isNarrating = false;
 
-let audioContext = null;
-let currentAudioSource = null;
+let currentAudioObjectUrl = null;
+let selectedSpeed = 1;
+let currentNeighborhoodName = null;
+
+// GPS stabilization: don't act on the raw first fix, which can be noisy.
+// Show a fast, provisional welcome immediately, but wait for a few
+// consecutive readings to agree before starting real orientation.
+let recentPositions = [];
+let gpsStabilized = false;
+let hasShownFastWelcome = false;
+const GPS_STABILIZATION_METERS = 20;
+const GPS_STABILIZATION_READINGS = 3;
 
 // Three-tier location state. orientationCenter/isOriented track whether
-// we've given the user a neighborhood orientation for their current 100m
-// "cell"; narratedPlaceIds ensures nothing (neighborhood or specific) is
-// ever narrated twice in a session.
+// we've given the user a neighborhood orientation for their current area;
+// narratedPlaceIds ensures nothing (neighborhood or specific) is ever
+// narrated twice in a session.
 let orientationCenter = null;
 let isOriented = false;
 const narratedPlaceIds = new Set();
@@ -84,11 +100,11 @@ const PLACE_TYPE_LABELS = {
 };
 
 startBtn.addEventListener("click", () => {
-  // iOS Safari only allows creating/resuming an AudioContext from directly
-  // inside a user gesture handler. Unlocking it here (once) means every
-  // later location-triggered narration can reuse and resume this same
-  // context without a fresh tap.
-  unlockAudioContext();
+  // iOS Safari only allows "unlocking" audio playback from directly inside
+  // a user gesture handler. Doing it here (once) means every later
+  // location-triggered narration can call .play() on this same element
+  // without a fresh tap, including with the screen locked.
+  unlockAudio();
   startTour();
 });
 playBtn.addEventListener("click", (event) => {
@@ -99,16 +115,84 @@ pauseBtn.addEventListener("click", (event) => {
   event.stopPropagation();
   togglePlayback();
 });
-playerCard.addEventListener("click", togglePlayback);
 
-function unlockAudioContext() {
-  if (!audioContext) {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return;
-    audioContext = new AudioContextClass();
+drawerHandle.addEventListener("click", () => {
+  playerCard.classList.add("is-open");
+});
+drawerClose.addEventListener("click", (event) => {
+  event.stopPropagation();
+  playerCard.classList.remove("is-open");
+});
+
+let drawerTouchStartY = null;
+playerCard.addEventListener(
+  "touchstart",
+  (event) => {
+    drawerTouchStartY = event.touches[0].clientY;
+  },
+  { passive: true }
+);
+playerCard.addEventListener("touchend", (event) => {
+  if (drawerTouchStartY === null) return;
+  const deltaY = event.changedTouches[0].clientY - drawerTouchStartY;
+  if (deltaY < -40) {
+    playerCard.classList.add("is-open");
+  } else if (deltaY > 40) {
+    playerCard.classList.remove("is-open");
   }
-  if (audioContext.state === "suspended") {
-    audioContext.resume();
+  drawerTouchStartY = null;
+});
+
+speedButtons.forEach((button) => {
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    selectedSpeed = parseFloat(button.dataset.speed);
+    speedButtons.forEach((b) => b.classList.remove("is-active"));
+    button.classList.add("is-active");
+  });
+});
+
+// Keep UI, status text, and the lock-screen playback indicator in sync
+// regardless of what triggered the play/pause — our own buttons, the
+// drawer, or the lock-screen/AirPods media controls.
+audioPlayer.addEventListener("play", () => {
+  play();
+  statusText.textContent = "Playing...";
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.playbackState = "playing";
+  }
+});
+audioPlayer.addEventListener("pause", () => {
+  pause();
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.playbackState = "paused";
+  }
+  if (!audioPlayer.ended) {
+    statusText.textContent = "Paused";
+  }
+});
+audioPlayer.addEventListener("ended", () => {
+  statusText.textContent = "Move to discover more...";
+});
+
+if ("mediaSession" in navigator) {
+  navigator.mediaSession.setActionHandler("play", () => {
+    audioPlayer.play().catch(() => {});
+  });
+  navigator.mediaSession.setActionHandler("pause", () => {
+    audioPlayer.pause();
+  });
+}
+
+function unlockAudio() {
+  try {
+    const playPromise = audioPlayer.play();
+    if (playPromise && typeof playPromise.catch === "function") {
+      playPromise.catch(() => {});
+    }
+    audioPlayer.pause();
+  } catch (error) {
+    // Some browsers throw synchronously when there's no src yet — harmless.
   }
 }
 
@@ -122,6 +206,12 @@ function startTour() {
     navigator.geolocation.clearWatch(watchId);
   }
 
+  recentPositions = [];
+  gpsStabilized = false;
+  hasShownFastWelcome = false;
+  lastPosition = null;
+  pulseEl.classList.remove("is-locked");
+
   statusText.textContent = "Finding your location...";
   watchId = navigator.geolocation.watchPosition(onLocation, onLocationError, {
     enableHighAccuracy: true,
@@ -132,11 +222,33 @@ function startTour() {
 
 function onLocation(position) {
   const { latitude, longitude } = position.coords;
+  const current = { latitude, longitude };
 
-  if (lastPosition && distanceInMeters(lastPosition, { latitude, longitude }) < SIGNIFICANT_MOVE_METERS) {
+  // Immediate feedback the moment any fix arrives, before GPS has settled.
+  if (!hasShownFastWelcome) {
+    hasShownFastWelcome = true;
+    locationName.textContent = `${latitude.toFixed(4)}°, ${longitude.toFixed(4)}°`;
+    showFastWelcome(latitude, longitude);
+  }
+
+  recentPositions.push(current);
+  if (recentPositions.length > GPS_STABILIZATION_READINGS) {
+    recentPositions.shift();
+  }
+
+  if (!gpsStabilized) {
+    if (recentPositions.length === GPS_STABILIZATION_READINGS && isGpsStable(recentPositions)) {
+      gpsStabilized = true;
+      pulseEl.classList.add("is-locked");
+    } else {
+      return;
+    }
+  }
+
+  if (lastPosition && distanceInMeters(lastPosition, current) < SIGNIFICANT_MOVE_METERS) {
     return;
   }
-  lastPosition = { latitude, longitude };
+  lastPosition = current;
 
   if (!hasActivePlace) {
     locationName.textContent = `${latitude.toFixed(4)}°, ${longitude.toFixed(4)}°`;
@@ -144,6 +256,33 @@ function onLocation(position) {
 
   reverseGeocode(latitude, longitude);
   checkForNarration(latitude, longitude);
+}
+
+function isGpsStable(positions) {
+  for (let i = 0; i < positions.length; i++) {
+    for (let j = i + 1; j < positions.length; j++) {
+      if (distanceInMeters(positions[i], positions[j]) > GPS_STABILIZATION_METERS) return false;
+    }
+  }
+  return true;
+}
+
+// Fires once, on the very first GPS fix, so the user sees proof the app is
+// working well before the tiered orientation/narration pipeline kicks in.
+async function showFastWelcome(latitude, longitude) {
+  try {
+    const response = await fetch(`/api/geocode?lat=${latitude}&lng=${longitude}`);
+    const data = await response.json();
+
+    if (response.ok && data.locationName) {
+      statusText.textContent = `Welcome to ${data.locationName}`;
+      if (!hasActivePlace) {
+        locationName.textContent = data.locationName;
+      }
+    }
+  } catch (error) {
+    // Leave the coordinates fallback in place if this quick check fails.
+  }
 }
 
 async function reverseGeocode(latitude, longitude) {
@@ -205,10 +344,14 @@ async function checkForNarration(latitude, longitude) {
 }
 
 // STEP 1 - orient the user to the neighborhood they've just arrived in.
+// Sorted by actual distance (not prominence) so we never grab a famous but
+// far-away neighborhood over the one the user is actually standing in.
 async function runNeighborhoodOrientation(latitude, longitude) {
   statusText.textContent = "Getting your bearings...";
 
-  const place = await fetchNearbyPlace(latitude, longitude, ORIENTATION_RADIUS_METERS, NEIGHBORHOOD_PLACE_TYPES);
+  const place = await fetchNearbyPlace(latitude, longitude, NEIGHBORHOOD_PLACE_TYPES, {
+    strategy: "nearest",
+  });
   isOriented = true;
 
   if (!place || narratedPlaceIds.has(place.placeId)) {
@@ -222,7 +365,7 @@ async function runNeighborhoodOrientation(latitude, longitude) {
 // STEP 2 - once oriented and still within range, look for something
 // specific worth stopping for.
 async function runSpecificZoomIn(latitude, longitude) {
-  const place = await fetchNearbyPlace(latitude, longitude, SPECIFIC_RADIUS_METERS, SPECIFIC_PLACE_TYPES);
+  const place = await fetchNearbyPlace(latitude, longitude, SPECIFIC_PLACE_TYPES, { radius: SPECIFIC_RADIUS_METERS });
 
   if (!place || narratedPlaceIds.has(place.placeId)) {
     // STEP 3 - nothing new nearby; keep watching as the user walks.
@@ -233,7 +376,7 @@ async function runSpecificZoomIn(latitude, longitude) {
   await narrateAndSpeak(place, "specific", { latitude, longitude });
 }
 
-async function fetchNearbyPlace(latitude, longitude, radius, types) {
+async function fetchNearbyPlace(latitude, longitude, types, options) {
   if (placeAbortController) {
     placeAbortController.abort();
   }
@@ -243,9 +386,16 @@ async function fetchNearbyPlace(latitude, longitude, radius, types) {
     const params = new URLSearchParams({
       lat: String(latitude),
       lng: String(longitude),
-      radius: String(radius),
       types: types.join(","),
     });
+    if (options.strategy) {
+      // The backend runs its own staged 150m/300m search internally for
+      // the "nearest" strategy, so no radius needs to be sent here.
+      params.set("strategy", options.strategy);
+    } else {
+      params.set("radius", String(options.radius));
+    }
+
     const response = await fetch(`/api/places?${params.toString()}`, {
       signal: placeAbortController.signal,
     });
@@ -276,10 +426,20 @@ async function narrateAndSpeak(place, tier, triggerPosition) {
 
     narratedPlaceIds.add(place.placeId);
     hasActivePlace = true;
+    if (tier === "neighborhood") {
+      currentNeighborhoodName = place.name;
+    }
+
     const typeLabel = PLACE_TYPE_LABELS[place.primaryType] || place.primaryType;
     locationName.textContent = `${place.name} - ${typeLabel}`;
 
+    const photoUrl = place.photoReference
+      ? `/api/photo?ref=${encodeURIComponent(place.photoReference)}&maxwidth=800`
+      : null;
+    applyPlacePhoto(photoUrl);
+
     startStory(place.name, data.narration);
+    updateMediaSessionMetadata(place.name, currentNeighborhoodName, photoUrl);
     await speakNarration(data.narration);
   } catch (error) {
     statusText.textContent = "Couldn't generate your story.";
@@ -289,9 +449,30 @@ async function narrateAndSpeak(place, tier, triggerPosition) {
   }
 }
 
+function applyPlacePhoto(url) {
+  // Clearing the inline style falls back to the CSS gradient placeholder.
+  placePhoto.style.backgroundImage = url ? `url("${url}")` : "";
+}
+
+function updateMediaSessionMetadata(title, neighborhoodName, photoUrl) {
+  if (!("mediaSession" in navigator)) return;
+
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title,
+    artist: "Sabri Tour Guide",
+    album: neighborhoodName || "Sabri Tour Guide",
+    artwork: photoUrl
+      ? [{ src: new URL(photoUrl, window.location.origin).href, sizes: "800x800", type: "image/jpeg" }]
+      : [],
+  });
+}
+
 // Resolves once playback has genuinely finished (or failed) — awaiting this
 // is what keeps isNarrating true for the whole time audio is playing, not
-// just while it's being generated.
+// just while it's being generated. Playback goes through the real HTML5
+// <audio> element (not the Web Audio API) because that's what iOS Safari
+// allows to keep playing with the screen locked, and what Media Session
+// needs to attach lock-screen/AirPods controls to.
 async function speakNarration(text) {
   if (speakAbortController) {
     speakAbortController.abort();
@@ -302,7 +483,7 @@ async function speakNarration(text) {
     const response = await fetch("/api/speak", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, speed: selectedSpeed }),
       signal: speakAbortController.signal,
     });
 
@@ -312,40 +493,24 @@ async function speakNarration(text) {
     }
 
     const arrayBuffer = await response.arrayBuffer();
+    const blob = new Blob([arrayBuffer], { type: "audio/mpeg" });
 
-    // The AudioContext is created and unlocked once, on the Start Tour tap
-    // (a direct user gesture) — iOS Safari refuses to play audio through a
-    // context that was created or first resumed outside of one. If it's
-    // missing here, that gesture never happened, so fall back to text.
-    if (!audioContext) {
-      throw new Error("AudioContext was never unlocked by a user gesture.");
+    if (currentAudioObjectUrl) {
+      URL.revokeObjectURL(currentAudioObjectUrl);
     }
-    if (audioContext.state === "suspended") {
-      await audioContext.resume();
-    }
-
-    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-    if (currentAudioSource) {
-      currentAudioSource.onended = null;
-      currentAudioSource.stop();
-    }
-
-    const source = audioContext.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(audioContext.destination);
-    currentAudioSource = source;
-
-    statusText.textContent = "Playing...";
-    play();
+    currentAudioObjectUrl = URL.createObjectURL(blob);
+    audioPlayer.src = currentAudioObjectUrl;
 
     await new Promise((resolve) => {
-      source.onended = () => {
-        statusText.textContent = "Move to discover more...";
-        pause();
-        resolve();
-      };
-      source.start();
+      audioPlayer.addEventListener("ended", resolve, { once: true });
+      const playPromise = audioPlayer.play();
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch(() => {
+          statusText.textContent = "Audio unavailable — read your story below.";
+          placeDescription.classList.add("story-description--fallback");
+          resolve();
+        });
+      }
     });
   } catch (error) {
     if (error.name === "AbortError") return;
@@ -357,16 +522,12 @@ async function speakNarration(text) {
 }
 
 function togglePlayback() {
-  if (!audioContext || !currentAudioSource) return;
+  if (!audioPlayer.src) return;
 
-  if (audioContext.state === "running") {
-    audioContext.suspend();
-    pause();
-    statusText.textContent = "Paused";
-  } else if (audioContext.state === "suspended") {
-    audioContext.resume();
-    play();
-    statusText.textContent = "Playing...";
+  if (audioPlayer.paused) {
+    audioPlayer.play().catch(() => {});
+  } else {
+    audioPlayer.pause();
   }
 }
 
@@ -405,7 +566,6 @@ function startStory(title, description) {
   placeDescription.textContent = description;
   placeDescription.classList.remove("story-description--fallback");
   playerCard.classList.remove("hidden");
-  play();
 }
 
 function play() {

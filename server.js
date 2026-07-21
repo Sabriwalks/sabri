@@ -14,6 +14,33 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
+// Locked TTS identity — every /api/speak call uses this voice and model, no
+// exceptions. Only `speed` is allowed to vary per-request (frontend speed
+// control), and it always falls back to this default when omitted.
+const VOICE_CONFIG = { voice: "onyx", speed: 1.0, model: "tts-1" };
+
+const HEBREW_PRONUNCIATION_GUIDE = {
+  Nachlaot: "Nakh-lah-OHT",
+  Shuk: "SHOOK",
+  "Machane Yehuda": "Mah-khah-NEH Yeh-HOO-dah",
+  Shabbat: "Shah-BAHT",
+  Kotel: "KOH-tel",
+  Knesset: "KNESS-et",
+  Mamilla: "Mah-MILL-ah",
+  Jaffa: "YAH-fah",
+  Tzahal: "Tsah-HAHL",
+  Rehavia: "Reh-hah-VEE-ah",
+  Talpiot: "Tahl-pee-OHT",
+  Katamon: "Kah-tah-MOHN",
+  Beit: "BAYT",
+  "Ein Kerem": "AYN Keh-REM",
+  "Yemin Moshe": "Yeh-MEEN Moh-SHEH",
+};
+
+const PRONUNCIATION_GUIDE_TEXT = Object.entries(HEBREW_PRONUNCIATION_GUIDE)
+  .map(([word, phonetic]) => `${word} = "${phonetic}"`)
+  .join("\n");
+
 const SABRI_SYSTEM_PROMPT =
   "You are Sabri, a warm, knowledgeable, and engaging personal tour guide. " +
   "You are like that one brilliant friend who knows everything about everywhere. " +
@@ -26,7 +53,11 @@ const SABRI_SYSTEM_PROMPT =
   "descriptions, or text in asterisks like *takes a deep breath* or *pauses*. " +
   "Never describe what you are doing - just do it. You are speaking directly to " +
   "the listener, not writing a script. Write only the words that will be spoken " +
-  "out loud.";
+  "out loud.\n\n" +
+  "When you write Hebrew or Israeli place names, spell them phonetically for " +
+  "English text-to-speech so they are pronounced correctly. Use the " +
+  "pronunciation guide provided.\n\n" +
+  `Pronunciation guide:\n${PRONUNCIATION_GUIDE_TEXT}`;
 
 const TIER_GUIDANCE = {
   neighborhood:
@@ -91,6 +122,12 @@ const ALLOWED_PLACE_TYPES = [
   "establishment",
 ];
 
+// Neighborhood-tier distance ceilings — a neighborhood name is only useful if
+// it's actually nearby. 150m is the target; 300m ("about a 2 minute walk") is
+// the absolute max before we'd rather show nothing than the wrong area.
+const NEIGHBORHOOD_PRIMARY_MAX_METERS = 150;
+const NEIGHBORHOOD_FALLBACK_MAX_METERS = 300;
+
 app.use(express.json());
 app.use(express.static(__dirname));
 
@@ -101,6 +138,7 @@ app.get("/api/places", async (req, res) => {
   const requestedTypes = req.query.types
     ? req.query.types.split(",").map((type) => type.trim()).filter(Boolean)
     : null;
+  const strategy = req.query.strategy === "nearest" ? "nearest" : "prominence";
 
   if (Number.isNaN(lat) || Number.isNaN(lng)) {
     return res.status(400).json({ error: "lat and lng query params are required." });
@@ -110,24 +148,47 @@ app.get("/api/places", async (req, res) => {
     return res.status(500).json({ error: "GOOGLE_MAPS_API_KEY is not configured on the server." });
   }
 
+  try {
+    if (strategy === "nearest") {
+      // Google's Nearby Search caps out at 20 prominence-ranked results —
+      // asking with one wide radius can push the truly closest match out
+      // of the top 20 in favor of a more "prominent" but farther one. So
+      // this has to be two separate staged requests, not one wide fetch
+      // sorted after the fact: try the tight 150m radius first, and only
+      // widen to 300m if that comes up empty.
+      const primaryResults = await fetchNearbySearch(lat, lng, NEIGHBORHOOD_PRIMARY_MAX_METERS);
+      let place = pickNearestPlace(primaryResults, requestedTypes, lat, lng, NEIGHBORHOOD_PRIMARY_MAX_METERS);
+
+      if (!place) {
+        const fallbackResults = await fetchNearbySearch(lat, lng, NEIGHBORHOOD_FALLBACK_MAX_METERS);
+        place = pickNearestPlace(fallbackResults, requestedTypes, lat, lng, NEIGHBORHOOD_FALLBACK_MAX_METERS);
+      }
+
+      return res.json({ place });
+    }
+
+    const results = await fetchNearbySearch(lat, lng, radius);
+    res.json({ place: pickMostInterestingPlace(results, requestedTypes) });
+  } catch (error) {
+    res.status(502).json({ error: "Failed to reach Google Places API." });
+  }
+});
+
+async function fetchNearbySearch(lat, lng, radius) {
   const url = new URL("https://maps.googleapis.com/maps/api/place/nearbysearch/json");
   url.searchParams.set("location", `${lat},${lng}`);
   url.searchParams.set("radius", String(radius));
   url.searchParams.set("key", GOOGLE_MAPS_API_KEY);
 
-  try {
-    const googleResponse = await fetch(url);
-    const data = await googleResponse.json();
+  const googleResponse = await fetch(url);
+  const data = await googleResponse.json();
 
-    if (data.status !== "OK" && data.status !== "ZERO_RESULTS") {
-      return res.status(502).json({ error: `Google Places API error: ${data.status}` });
-    }
-
-    res.json({ place: pickMostInterestingPlace(data.results || [], requestedTypes) });
-  } catch (error) {
-    res.status(502).json({ error: "Failed to reach Google Places API." });
+  if (data.status !== "OK" && data.status !== "ZERO_RESULTS") {
+    throw new Error(`Google Places API error: ${data.status}`);
   }
-});
+
+  return data.results || [];
+}
 
 app.get("/api/geocode", async (req, res) => {
   const lat = parseFloat(req.query.lat);
@@ -156,6 +217,37 @@ app.get("/api/geocode", async (req, res) => {
     res.json({ locationName: extractLocationName(data.results || []) });
   } catch (error) {
     res.status(502).json({ error: "Failed to reach Google Geocoding API." });
+  }
+});
+
+app.get("/api/photo", async (req, res) => {
+  const photoReference = req.query.ref;
+  const maxwidth = parseFloat(req.query.maxwidth) || 800;
+
+  if (!photoReference) {
+    return res.status(400).json({ error: "ref query param is required." });
+  }
+
+  if (!GOOGLE_MAPS_API_KEY) {
+    return res.status(500).json({ error: "GOOGLE_MAPS_API_KEY is not configured on the server." });
+  }
+
+  const url = new URL("https://maps.googleapis.com/maps/api/place/photo");
+  url.searchParams.set("maxwidth", String(maxwidth));
+  url.searchParams.set("photo_reference", photoReference);
+  url.searchParams.set("key", GOOGLE_MAPS_API_KEY);
+
+  try {
+    const googleResponse = await fetch(url);
+
+    if (!googleResponse.ok || !googleResponse.body) {
+      return res.status(502).json({ error: "Failed to fetch place photo." });
+    }
+
+    res.setHeader("Content-Type", googleResponse.headers.get("content-type") || "image/jpeg");
+    Readable.fromWeb(googleResponse.body).pipe(res);
+  } catch (error) {
+    res.status(502).json({ error: "Failed to fetch place photo." });
   }
 });
 
@@ -200,7 +292,7 @@ app.post("/api/narrate", async (req, res) => {
 });
 
 app.post("/api/speak", async (req, res) => {
-  const { text } = req.body || {};
+  const { text, speed } = req.body || {};
 
   if (!text) {
     return res.status(400).json({ error: "text is required." });
@@ -210,11 +302,18 @@ app.post("/api/speak", async (req, res) => {
     return res.status(500).json({ error: "OPENAI_API_KEY is not configured on the server." });
   }
 
+  // Voice and model are locked to VOICE_CONFIG and never vary. Speed is the
+  // one dial the frontend controls, and it's clamped to OpenAI's valid
+  // range and falls back to VOICE_CONFIG.speed when not provided.
+  const requestedSpeed = typeof speed === "number" && Number.isFinite(speed) ? speed : VOICE_CONFIG.speed;
+  const resolvedSpeed = Math.min(4.0, Math.max(0.25, requestedSpeed));
+
   try {
     const speech = await openai.audio.speech.create({
-      model: "tts-1",
-      voice: "onyx",
+      model: VOICE_CONFIG.model,
+      voice: VOICE_CONFIG.voice,
       input: text,
+      speed: resolvedSpeed,
     });
 
     res.setHeader("Content-Type", "audio/mpeg");
@@ -264,14 +363,54 @@ function pickMostInterestingPlace(results, allowedTypes) {
 
   if (!best) return null;
 
+  return toPlaceResponse(best, types[bestPriority]);
+}
+
+// Distance-first pick for the neighborhood tier: never mind how "prominent"
+// a place is — the closest matching result wins, and it's rejected outright
+// if even the closest one is further than a ~2 minute walk away.
+function pickNearestPlace(results, allowedTypes, lat, lng, maxDistanceMeters) {
+  const types = allowedTypes && allowedTypes.length ? allowedTypes : ALLOWED_PLACE_TYPES;
+
+  const candidates = results
+    .filter((result) => result.geometry?.location && result.types?.some((type) => types.includes(type)))
+    .map((result) => ({
+      result,
+      distance: distanceMeters(lat, lng, result.geometry.location.lat, result.geometry.location.lng),
+    }))
+    .sort((a, b) => a.distance - b.distance);
+
+  if (candidates.length === 0) return null;
+
+  const nearest = candidates[0];
+  if (nearest.distance > maxDistanceMeters) return null;
+
+  const primaryType = types.find((type) => nearest.result.types?.includes(type)) || nearest.result.types?.[0];
+  return toPlaceResponse(nearest.result, primaryType);
+}
+
+function toPlaceResponse(result, primaryType) {
   return {
-    name: best.name,
-    vicinity: best.vicinity || null,
-    types: best.types || [],
-    primaryType: types[bestPriority],
-    rating: best.rating ?? null,
-    placeId: best.place_id,
+    name: result.name,
+    vicinity: result.vicinity || null,
+    types: result.types || [],
+    primaryType,
+    rating: result.rating ?? null,
+    placeId: result.place_id,
+    photoReference: result.photos?.[0]?.photo_reference || null,
   };
+}
+
+function distanceMeters(lat1, lng1, lat2, lng2) {
+  const earthRadius = 6371000;
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * earthRadius * Math.asin(Math.sqrt(h));
 }
 
 // Vercel imports this file and calls the exported Express app directly as
