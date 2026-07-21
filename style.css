@@ -47,7 +47,23 @@ body {
 /* Header */
 
 .app-header {
+  position: relative;
   text-align: center;
+}
+
+.settings-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .logo {
@@ -349,4 +365,241 @@ body {
 .start-btn:active {
   transform: scale(0.98);
   opacity: 0.95;
+}
+
+.install-btn {
+  width: 100%;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--gold-soft);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.install-btn:active {
+  transform: scale(0.98);
+  background: var(--gold-soft);
+}
+
+/* Tap-to-talk mic button — floats bottom-right above the drawer/footer. */
+
+.mic-btn {
+  position: fixed;
+  right: 24px;
+  bottom: calc(env(safe-area-inset-bottom) + 84px);
+  z-index: 25;
+  width: 56px;
+  height: 56px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
+  font-size: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.mic-btn.is-available {
+  background: var(--gold);
+  color: var(--bg);
+  box-shadow: 0 8px 24px var(--gold-glow);
+}
+
+.mic-btn.is-listening {
+  background: #d64545;
+  color: #ffffff;
+  box-shadow: 0 0 0 0 rgba(214, 69, 69, 0.6);
+  animation: mic-pulse 1.2s ease-out infinite;
+}
+
+@keyframes mic-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(214, 69, 69, 0.55);
+  }
+  100% {
+    box-shadow: 0 0 0 18px rgba(214, 69, 69, 0);
+  }
+}
+
+.ask-subtitle {
+  position: fixed;
+  left: 24px;
+  right: 24px;
+  bottom: calc(env(safe-area-inset-bottom) + 150px);
+  z-index: 25;
+  padding: 12px 16px;
+  border-radius: 14px;
+  background: rgba(15, 25, 35, 0.9);
+  border: 1px solid var(--border);
+  color: var(--white);
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+/* Settings drawer — slides in from the right. */
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 29;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.settings-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  width: min(340px, 86vw);
+  background: var(--bg-elevated);
+  border-left: 1px solid var(--border);
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.45);
+  transform: translateX(100%);
+  transition: transform 0.32s cubic-bezier(0.16, 0.8, 0.3, 1);
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-drawer.is-open {
+  transform: translateX(0);
+}
+
+.settings-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(env(safe-area-inset-top) + 20px) 20px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-drawer-header h2 {
+  font-family: var(--font-serif);
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--white);
+}
+
+.settings-drawer-body {
+  padding: 20px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.settings-section {
+  margin-bottom: 28px;
+}
+
+.settings-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--gold);
+  margin-bottom: 12px;
+}
+
+.voice-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.voice-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: transparent;
+  text-align: left;
+}
+
+.voice-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--white);
+}
+
+.voice-card-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.voice-card.is-active {
+  border-color: var(--gold);
+  background: var(--gold-soft);
+}
+
+.voice-card.is-active .voice-card-name {
+  color: var(--gold);
+}
+
+.depth-options {
+  display: flex;
+  gap: 8px;
+}
+
+.depth-pill {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 4px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: transparent;
+  text-align: center;
+}
+
+.depth-pill-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--white);
+}
+
+.depth-pill-desc {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.depth-pill.is-active {
+  border-color: var(--gold);
+  background: var(--gold-soft);
+}
+
+.depth-pill.is-active .depth-pill-name {
+  color: var(--gold);
+}
+
+.language-select {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg);
+  color: var(--white);
+  font-size: 14px;
+}
+
+.settings-about {
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-about p {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
 }

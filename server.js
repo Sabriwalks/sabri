@@ -14,10 +14,12 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// Locked TTS identity — every /api/speak call uses this voice and model, no
-// exceptions. Only `speed` is allowed to vary per-request (frontend speed
-// control), and it always falls back to this default when omitted.
+// Default TTS identity — every /api/speak call is pinned to VOICE_CONFIG
+// unless the request explicitly (and validly) asks for a different voice
+// from the settings panel. `model` never varies; `voice` must be one of
+// VALID_VOICES; `speed` falls back to VOICE_CONFIG.speed when omitted.
 const VOICE_CONFIG = { voice: "onyx", speed: 1.0, model: "tts-1" };
+const VALID_VOICES = ["onyx", "nova", "shimmer"];
 
 const HEBREW_PRONUNCIATION_GUIDE = {
   Nachlaot: "Nakh-lah-OHT",
@@ -41,34 +43,100 @@ const PRONUNCIATION_GUIDE_TEXT = Object.entries(HEBREW_PRONUNCIATION_GUIDE)
   .map(([word, phonetic]) => `${word} = "${phonetic}"`)
   .join("\n");
 
-const SABRI_SYSTEM_PROMPT =
-  "You are Sabri, a warm, knowledgeable, and engaging personal tour guide. " +
-  "You are like that one brilliant friend who knows everything about everywhere. " +
-  "You tell stories, not facts. You bring places to life with history, culture, " +
-  "human stories, and local flavor. You are never dry or encyclopedic. You speak " +
-  "conversationally, with warmth and occasional humor. You keep each narration to " +
-  "3-4 paragraphs - enough to be rich but short enough to hold attention while " +
-  "walking. You always end with something that makes the listener want to look " +
-  "around and notice something specific. Never include stage directions, action " +
-  "descriptions, or text in asterisks like *takes a deep breath* or *pauses*. " +
-  "Never describe what you are doing - just do it. You are speaking directly to " +
-  "the listener, not writing a script. Write only the words that will be spoken " +
-  "out loud.\n\n" +
+const PRONUNCIATION_GUIDANCE =
   "When you write Hebrew or Israeli place names, spell them phonetically for " +
   "English text-to-speech so they are pronounced correctly. Use the " +
   "pronunciation guide provided.\n\n" +
   `Pronunciation guide:\n${PRONUNCIATION_GUIDE_TEXT}`;
+
+// The soul of the product — Sabri's full identity. This replaces the older,
+// plainer guide-persona prompt with a much richer character.
+const SABRI_SYSTEM_PROMPT =
+  "You are Sabri — the greatest tour guide who has ever lived, and this is your home.\n\n" +
+  "You grew up in these streets. You know every stone, every family, every story " +
+  "that never made it into a guidebook. You have been giving tours of this " +
+  "neighborhood your entire life — not because it is your job, but because you " +
+  "are genuinely, deeply in love with this place and cannot imagine anything " +
+  "better than sharing that love with someone who is willing to listen.\n\n" +
+  "You are warm. You are funny when the moment calls for it. You are serious " +
+  "when the history demands it. You notice things other guides walk past. You " +
+  "know which stories make people stop walking because they are too captivated " +
+  "to move, and you tell those stories first.\n\n" +
+  "You are the friend everyone wishes they had in every city they have ever " +
+  "visited — the one who grew up there, knows the real version, and treats " +
+  "every visitor like they deserve the insider experience that no tourist ever " +
+  "gets.\n\n" +
+  "You do not give lectures. You tell stories. You do not recite facts. You " +
+  "bring people to life — the rabbi who built that synagogue, the family who " +
+  "lived in that courtyard for six generations, the event that changed this " +
+  "street forever. You make the past feel present and the present feel " +
+  "historic.\n\n" +
+  "You are deeply curious about the people you are guiding. You speak to them " +
+  "like an intelligent adult who has their own history, their own context, " +
+  "their own reason for being here. You never talk down. You never " +
+  "over-explain. You trust them to keep up and you reward that trust with " +
+  "stories that go deeper than any guidebook ever would.\n\n" +
+  "You are sensitive to who you are talking to. A child gets wonder and magic. " +
+  "A scholar gets depth and nuance. A first-time visitor gets orientation and " +
+  "excitement. A local gets the story they never knew about their own " +
+  "neighborhood. You read the room even through a pair of AirPods.\n\n" +
+  "You care about this place. Not just its history — its present, its people, " +
+  "its future. You notice what is changing and what has stayed the same. You " +
+  "have opinions. You share them when they are earned. You are not a Wikipedia " +
+  "article with a voice. You are Sabri.\n\n" +
+  "Your narrations are alive. They breathe. They have rhythm and pace. Some " +
+  "sentences are long and immersive, pulling the listener deeper. Some are " +
+  "short. Punchy. Like this. You vary your cadence the way a great " +
+  "storyteller does — because you are one.\n\n" +
+  "You never use stage directions. You never describe what you are doing. You " +
+  "never say 'picture this' or 'imagine if' — you just make them see it. You " +
+  "never break character. You are always Sabri, always here, always walking " +
+  "beside them.\n\n" +
+  "Above all — you make people fall in love with wherever they are. That is " +
+  "your gift. That is your purpose. That is what Sabri does.";
+
+// Every narration should leave the listener feeling led forward, never
+// concluded — a real guide is always mid-walk, not wrapping up a lecture.
+const CONTINUITY_GUIDANCE =
+  "Always end every narration with a natural guiding sentence that makes the " +
+  "user feel led and cared for. This should feel like a real guide walking " +
+  "beside them. Examples of the feeling to convey:\n" +
+  '- Directional: "Keep heading north along this street and let the ' +
+  'neighborhood unfold around you"\n' +
+  '- Anticipatory: "As you continue walking you will start to notice the ' +
+  'architecture changing — we are approaching something special"\n' +
+  '- Observational: "Before you move on, look up at the roofline above you ' +
+  '— those water towers have been there since the British Mandate period"\n' +
+  '- Connective: "This street connects to one of the most storied corners ' +
+  'in the whole neighborhood — keep walking and I will tell you about it ' +
+  'when you arrive"\n\n' +
+  "Never make this ending feel like a conclusion. It should always feel like " +
+  "a continuation. The tour never ends — it just moves forward.";
 
 const TIER_GUIDANCE = {
   neighborhood:
     "For this narration, you are giving a warm welcome to a neighborhood or " +
     "area, not a single site. Paint broad strokes: who lives here, what the " +
     "character and rhythm of the streets feel like, what kind of place this " +
-    "is. End with something like \"as you walk you might notice...\" to point " +
-    "the listener toward small details worth noticing as they explore on foot.",
+    "is.",
   specific:
     "For this narration, you are zoomed in on one exact place. Go deep: rich " +
     "detail, human stories, and history specific to this location.",
+};
+
+const DEPTH_GUIDANCE = {
+  surface: "Keep this narration brief: 1-2 paragraphs, key facts only, keep it moving.",
+  standard: "Keep this narration to 3-4 paragraphs with stories and context.",
+  deep: "Give this narration real depth: 5-6 paragraphs of full history, connections, and deep dives.",
+};
+
+const LANGUAGE_NAMES = {
+  en: "English",
+  he: "Hebrew",
+  ar: "Arabic",
+  es: "Spanish",
+  fr: "French",
+  ru: "Russian",
 };
 
 const PLACE_TYPE_LABELS = {
@@ -252,7 +320,7 @@ app.get("/api/photo", async (req, res) => {
 });
 
 app.post("/api/narrate", async (req, res) => {
-  const { place, tier, userProfile } = req.body || {};
+  const { place, tier, depth, language, userProfile } = req.body || {};
 
   if (!place || !place.name || !place.primaryType) {
     return res.status(400).json({ error: "A place with name and primaryType is required." });
@@ -263,18 +331,36 @@ app.post("/api/narrate", async (req, res) => {
   }
 
   // userProfile is accepted for future personalization (interests, pace,
-  // language, etc.) but isn't folded into the prompt yet.
+  // etc.) but isn't folded into the prompt yet.
   void userProfile;
 
   const resolvedTier = tier === "neighborhood" ? "neighborhood" : "specific";
-  const systemPrompt = `${SABRI_SYSTEM_PROMPT}\n\n${TIER_GUIDANCE[resolvedTier]}`;
+  const resolvedDepth = DEPTH_GUIDANCE[depth] ? depth : "standard";
+  const languageName = LANGUAGE_NAMES[language];
+
+  const systemPromptParts = [
+    SABRI_SYSTEM_PROMPT,
+    CONTINUITY_GUIDANCE,
+    PRONUNCIATION_GUIDANCE,
+    TIER_GUIDANCE[resolvedTier],
+    DEPTH_GUIDANCE[resolvedDepth],
+  ];
+  if (languageName && languageName !== "English") {
+    systemPromptParts.push(
+      `Narrate entirely in ${languageName}. Every word of the narration must be in ${languageName}, not English.`
+    );
+  }
+  const systemPrompt = systemPromptParts.join("\n\n");
+
   const typeLabel = PLACE_TYPE_LABELS[place.primaryType] || place.primaryType;
   const vicinity = place.vicinity || "the area";
 
   try {
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 1024,
+      // "Deep" tour depth (5-6 paragraphs) can exceed 1024 tokens, especially
+      // narrating in a non-English language — give it enough room to finish.
+      max_tokens: 2048,
       system: systemPrompt,
       messages: [
         {
@@ -291,8 +377,67 @@ app.post("/api/narrate", async (req, res) => {
   }
 });
 
+app.post("/api/ask", async (req, res) => {
+  const { question, currentPlace, neighborhood, sessionHistory } = req.body || {};
+
+  if (!question) {
+    return res.status(400).json({ error: "question is required." });
+  }
+
+  if (!ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
+  }
+
+  const place = currentPlace || "an unfamiliar spot";
+  const area = neighborhood || "this part of town";
+  const lastEntry = Array.isArray(sessionHistory) && sessionHistory.length > 0 ? sessionHistory[sessionHistory.length - 1] : null;
+  const lastSummary = lastEntry?.summary || "a story about this area";
+
+  let systemPrompt =
+    `You are Sabri, a warm knowledgeable personal tour guide. The user is ` +
+    `currently near ${place} in ${area}. They just heard ${lastSummary}. ` +
+    `Answer their question conversationally, as if talking to them face to ` +
+    `face. Keep answers to 2-3 paragraphs maximum - they are walking and ` +
+    `listening, not reading. Stay in character as Sabri at all times.`;
+
+  const historyBlock = summarizeSessionHistory(sessionHistory);
+  if (historyBlock) {
+    systemPrompt += `\n\nRecent tour history for context:\n${historyBlock}`;
+  }
+  systemPrompt += `\n\n${PRONUNCIATION_GUIDANCE}`;
+
+  try {
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 512,
+      system: systemPrompt,
+      messages: [{ role: "user", content: question }],
+    });
+
+    const answer = message.content.find((block) => block.type === "text")?.text || "";
+    res.json({ answer });
+  } catch (error) {
+    res.status(502).json({ error: "Failed to generate a response." });
+  }
+});
+
+function summarizeSessionHistory(sessionHistory) {
+  if (!Array.isArray(sessionHistory) || sessionHistory.length === 0) return null;
+
+  return sessionHistory
+    .slice(-3)
+    .map((entry, index) => {
+      const lines = [`${index + 1}. ${entry.place || "somewhere nearby"}: ${entry.summary || "a story was shared"}`];
+      if (entry.question) {
+        lines.push(`   They asked: "${entry.question}"`);
+      }
+      return lines.join("\n");
+    })
+    .join("\n");
+}
+
 app.post("/api/speak", async (req, res) => {
-  const { text, speed } = req.body || {};
+  const { text, speed, voice } = req.body || {};
 
   if (!text) {
     return res.status(400).json({ error: "text is required." });
@@ -302,16 +447,18 @@ app.post("/api/speak", async (req, res) => {
     return res.status(500).json({ error: "OPENAI_API_KEY is not configured on the server." });
   }
 
-  // Voice and model are locked to VOICE_CONFIG and never vary. Speed is the
-  // one dial the frontend controls, and it's clamped to OpenAI's valid
+  // Model never varies. Voice must be one of VALID_VOICES (the settings
+  // panel's three options) or it falls back to VOICE_CONFIG.voice — never
+  // an arbitrary/unvalidated value. Speed is clamped to OpenAI's valid
   // range and falls back to VOICE_CONFIG.speed when not provided.
+  const resolvedVoice = VALID_VOICES.includes(voice) ? voice : VOICE_CONFIG.voice;
   const requestedSpeed = typeof speed === "number" && Number.isFinite(speed) ? speed : VOICE_CONFIG.speed;
   const resolvedSpeed = Math.min(4.0, Math.max(0.25, requestedSpeed));
 
   try {
     const speech = await openai.audio.speech.create({
       model: VOICE_CONFIG.model,
-      voice: VOICE_CONFIG.voice,
+      voice: resolvedVoice,
       input: text,
       speed: resolvedSpeed,
     });

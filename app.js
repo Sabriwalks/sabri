@@ -13,6 +13,16 @@ const speedButtons = document.querySelectorAll(".speed-btn");
 const playBtn = document.getElementById("play-btn");
 const pauseBtn = document.getElementById("pause-btn");
 const audioPlayer = document.getElementById("audio-player");
+const installBtn = document.getElementById("install-btn");
+const micBtn = document.getElementById("mic-btn");
+const askSubtitle = document.getElementById("ask-subtitle");
+const settingsBtn = document.getElementById("settings-btn");
+const settingsDrawer = document.getElementById("settings-drawer");
+const settingsOverlay = document.getElementById("settings-overlay");
+const settingsClose = document.getElementById("settings-close");
+const voiceCards = document.querySelectorAll(".voice-card");
+const depthPills = document.querySelectorAll(".depth-pill");
+const languageSelect = document.getElementById("language-select");
 
 let watchId = null;
 let lastPosition = null;
@@ -42,6 +52,10 @@ const GPS_STABILIZATION_READINGS = 3;
 let orientationCenter = null;
 let isOriented = false;
 const narratedPlaceIds = new Set();
+
+// Short-term memory: the last 3 places narrated (plus any question asked
+// about each), sent to /api/ask so Sabri has context of the walk so far.
+const sessionHistory = [];
 
 // Pacing: once a narration finishes, wait for both a time and a distance
 // threshold before the next one can start, so narrations never jumble
@@ -98,6 +112,142 @@ const PLACE_TYPE_LABELS = {
   premise: "Premise",
   establishment: "Establishment",
 };
+
+// --- Settings (voice / tour depth / language), persisted to localStorage ---
+
+const SETTINGS_STORAGE_KEY = "sabri-settings";
+const DEFAULT_SETTINGS = { voice: "onyx", depth: "standard", language: "en" };
+const SPEECH_RECOGNITION_LANGS = {
+  en: "en-US",
+  he: "he-IL",
+  ar: "ar-SA",
+  es: "es-ES",
+  fr: "fr-FR",
+  ru: "ru-RU",
+};
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_SETTINGS };
+    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+  } catch (error) {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch (error) {
+    // localStorage may be unavailable (private browsing) — non-fatal.
+  }
+}
+
+const settings = loadSettings();
+applySettingsToUI();
+
+function applySettingsToUI() {
+  voiceCards.forEach((card) => card.classList.toggle("is-active", card.dataset.voice === settings.voice));
+  depthPills.forEach((pill) => pill.classList.toggle("is-active", pill.dataset.depth === settings.depth));
+  if (languageSelect) languageSelect.value = settings.language;
+}
+
+voiceCards.forEach((card) => {
+  card.addEventListener("click", () => {
+    settings.voice = card.dataset.voice;
+    voiceCards.forEach((c) => c.classList.remove("is-active"));
+    card.classList.add("is-active");
+    saveSettings();
+    playVoiceSample(card.dataset.voice);
+  });
+});
+
+depthPills.forEach((pill) => {
+  pill.addEventListener("click", () => {
+    settings.depth = pill.dataset.depth;
+    depthPills.forEach((p) => p.classList.remove("is-active"));
+    pill.classList.add("is-active");
+    saveSettings();
+  });
+});
+
+if (languageSelect) {
+  languageSelect.addEventListener("change", () => {
+    settings.language = languageSelect.value;
+    saveSettings();
+  });
+}
+
+async function playVoiceSample(voice) {
+  try {
+    const response = await fetch("/api/speak", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "Welcome to Sabri, your personal guide", voice, speed: 1 }),
+    });
+    if (!response.ok) return;
+
+    const arrayBuffer = await response.arrayBuffer();
+    const blob = new Blob([arrayBuffer], { type: "audio/mpeg" });
+
+    if (currentAudioObjectUrl) {
+      URL.revokeObjectURL(currentAudioObjectUrl);
+    }
+    currentAudioObjectUrl = URL.createObjectURL(blob);
+    audioPlayer.src = currentAudioObjectUrl;
+    audioPlayer.play().catch(() => {});
+  } catch (error) {
+    // A failed sample preview isn't critical — just don't play anything.
+  }
+}
+
+settingsBtn.addEventListener("click", openSettings);
+settingsClose.addEventListener("click", closeSettings);
+settingsOverlay.addEventListener("click", closeSettings);
+
+function openSettings() {
+  settingsDrawer.classList.add("is-open");
+  settingsDrawer.setAttribute("aria-hidden", "false");
+  settingsOverlay.classList.remove("hidden");
+}
+
+function closeSettings() {
+  settingsDrawer.classList.remove("is-open");
+  settingsDrawer.setAttribute("aria-hidden", "true");
+  settingsOverlay.classList.add("hidden");
+}
+
+// --- PWA: service worker + install prompt ---
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/service-worker.js").catch(() => {});
+  });
+}
+
+let deferredInstallPrompt = null;
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+  installBtn.classList.remove("hidden");
+});
+
+installBtn.addEventListener("click", async () => {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  installBtn.classList.add("hidden");
+});
+
+window.addEventListener("appinstalled", () => {
+  installBtn.classList.add("hidden");
+  deferredInstallPrompt = null;
+});
+
+// --- Tour controls ---
 
 startBtn.addEventListener("click", () => {
   // iOS Safari only allows "unlocking" audio playback from directly inside
@@ -182,6 +332,17 @@ if ("mediaSession" in navigator) {
   navigator.mediaSession.setActionHandler("pause", () => {
     audioPlayer.pause();
   });
+  // AirPods' double-tap gesture is commonly routed to next/previous-track
+  // by the OS — there's no dedicated "double tap" Media Session action, so
+  // this is the closest standard hook available for triggering tap-to-talk
+  // hands-free. Wrapped in try/catch since not every browser supports it.
+  try {
+    navigator.mediaSession.setActionHandler("nexttrack", () => {
+      if (!isListening) startListening();
+    });
+  } catch (error) {
+    // Unsupported action type — non-fatal.
+  }
 }
 
 function unlockAudio() {
@@ -211,6 +372,7 @@ function startTour() {
   hasShownFastWelcome = false;
   lastPosition = null;
   pulseEl.classList.remove("is-locked");
+  micBtn.classList.add("is-available");
 
   statusText.textContent = "Finding your location...";
   watchId = navigator.geolocation.watchPosition(onLocation, onLocationError, {
@@ -415,7 +577,13 @@ async function narrateAndSpeak(place, tier, triggerPosition) {
     const response = await fetch("/api/narrate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ place, tier, userProfile: DEFAULT_USER_PROFILE }),
+      body: JSON.stringify({
+        place,
+        tier,
+        depth: settings.depth,
+        language: settings.language,
+        userProfile: DEFAULT_USER_PROFILE,
+      }),
     });
     const data = await response.json();
 
@@ -429,6 +597,7 @@ async function narrateAndSpeak(place, tier, triggerPosition) {
     if (tier === "neighborhood") {
       currentNeighborhoodName = place.name;
     }
+    recordHistory(place, data.narration);
 
     const typeLabel = PLACE_TYPE_LABELS[place.primaryType] || place.primaryType;
     locationName.textContent = `${place.name} - ${typeLabel}`;
@@ -447,6 +616,20 @@ async function narrateAndSpeak(place, tier, triggerPosition) {
     isNarrating = false;
     lastNarrationEndTime = Date.now();
   }
+}
+
+// Keeps the last 3 places narrated (+ any question asked about each) as
+// simple short-term memory, passed to /api/ask for conversational context.
+function recordHistory(place, narrationText) {
+  sessionHistory.push({ place: place.name, summary: summarizeForHistory(narrationText) });
+  if (sessionHistory.length > 3) {
+    sessionHistory.shift();
+  }
+}
+
+function summarizeForHistory(text) {
+  const firstSentence = text.split(/(?<=[.!?])\s/)[0] || text;
+  return firstSentence.length > 160 ? `${firstSentence.slice(0, 157)}...` : firstSentence;
 }
 
 function applyPlacePhoto(url) {
@@ -483,7 +666,7 @@ async function speakNarration(text) {
     const response = await fetch("/api/speak", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, speed: selectedSpeed }),
+      body: JSON.stringify({ text, speed: selectedSpeed, voice: settings.voice }),
       signal: speakAbortController.signal,
     });
 
@@ -576,4 +759,155 @@ function play() {
 function pause() {
   pauseBtn.classList.add("hidden");
   playBtn.classList.remove("hidden");
+}
+
+// --- Tap to talk: speech-to-text + conversational Q&A ---
+
+const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
+const recognition = SpeechRecognitionClass ? new SpeechRecognitionClass() : null;
+let isListening = false;
+let wasPlayingBeforeAsk = false;
+
+if (recognition) {
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  recognition.maxAlternatives = 1;
+} else {
+  micBtn.classList.add("hidden");
+}
+
+micBtn.addEventListener("click", () => {
+  if (isListening) return;
+  startListening();
+});
+
+function startListening() {
+  if (!recognition || isNarrating || isListening) return;
+
+  isNarrating = true; // block the tour pipeline from firing while we converse
+  isListening = true;
+  micBtn.classList.add("is-listening");
+  askSubtitle.textContent = "";
+  askSubtitle.classList.remove("hidden");
+  statusText.textContent = "Listening...";
+
+  wasPlayingBeforeAsk = !audioPlayer.paused;
+  if (wasPlayingBeforeAsk) {
+    audioPlayer.pause();
+  }
+
+  recognition.lang = SPEECH_RECOGNITION_LANGS[settings.language] || "en-US";
+
+  let finalTranscript = "";
+  const stopTimeout = setTimeout(() => {
+    try {
+      recognition.stop();
+    } catch (error) {
+      // Already stopped — harmless.
+    }
+  }, 10000);
+
+  recognition.onresult = (event) => {
+    let interim = "";
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const transcript = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        finalTranscript += transcript;
+      } else {
+        interim += transcript;
+      }
+    }
+    askSubtitle.textContent = finalTranscript || interim;
+  };
+
+  recognition.onend = () => {
+    clearTimeout(stopTimeout);
+    isListening = false;
+    micBtn.classList.remove("is-listening");
+
+    const question = finalTranscript.trim();
+    if (question) {
+      statusText.textContent = "Sabri is thinking...";
+      askSabri(question);
+    } else {
+      askSubtitle.classList.add("hidden");
+      isNarrating = false;
+      if (wasPlayingBeforeAsk) {
+        audioPlayer.play().catch(() => {});
+      } else {
+        statusText.textContent = "Keep walking, discovering...";
+      }
+    }
+  };
+
+  recognition.onerror = () => {
+    clearTimeout(stopTimeout);
+    isListening = false;
+    isNarrating = false;
+    micBtn.classList.remove("is-listening");
+    askSubtitle.classList.add("hidden");
+    statusText.textContent = "Didn't catch that — tap the mic to try again.";
+  };
+
+  try {
+    recognition.start();
+  } catch (error) {
+    isListening = false;
+    isNarrating = false;
+    micBtn.classList.remove("is-listening");
+  }
+}
+
+async function askSabri(question) {
+  try {
+    const response = await fetch("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question,
+        currentPlace: placeName.textContent !== "—" ? placeName.textContent : null,
+        neighborhood: currentNeighborhoodName,
+        sessionHistory,
+      }),
+    });
+    const data = await response.json();
+
+    if (!response.ok || !data.answer) {
+      statusText.textContent = "Sabri couldn't answer that.";
+      askSubtitle.classList.add("hidden");
+      finishAsking();
+      return;
+    }
+
+    if (sessionHistory.length > 0) {
+      sessionHistory[sessionHistory.length - 1].question = question;
+    }
+
+    askSubtitle.classList.add("hidden");
+    placeName.textContent = "Sabri";
+    placeDescription.textContent = data.answer;
+    placeDescription.classList.remove("story-description--fallback");
+    playerCard.classList.remove("hidden");
+    playerCard.classList.add("is-open");
+
+    await speakNarration(data.answer);
+
+    statusText.textContent = "Listening for your next question...";
+    setTimeout(() => {
+      if (!isListening && statusText.textContent === "Listening for your next question...") {
+        statusText.textContent = "Keep walking, discovering...";
+      }
+    }, 5000);
+  } catch (error) {
+    statusText.textContent = "Sabri couldn't answer that.";
+    askSubtitle.classList.add("hidden");
+  } finally {
+    finishAsking();
+  }
+}
+
+function finishAsking() {
+  // Let the background tour pipeline resume checking location now that the
+  // conversation has wrapped up.
+  isNarrating = false;
 }
