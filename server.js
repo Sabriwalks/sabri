@@ -49,8 +49,7 @@ const PRONUNCIATION_GUIDANCE =
   "pronunciation guide provided.\n\n" +
   `Pronunciation guide:\n${PRONUNCIATION_GUIDE_TEXT}`;
 
-// The soul of the product — Sabri's full identity. This replaces the older,
-// plainer guide-persona prompt with a much richer character.
+// The soul of the product — Sabri's full identity.
 const SABRI_SYSTEM_PROMPT =
   "You are Sabri — the greatest tour guide who has ever lived, and this is your home.\n\n" +
   "You grew up in these streets. You know every stone, every family, every story " +
@@ -121,7 +120,13 @@ const TIER_GUIDANCE = {
     "is.",
   specific:
     "For this narration, you are zoomed in on one exact place. Go deep: rich " +
-    "detail, human stories, and history specific to this location.",
+    "detail, human stories, and history specific to this location. You will " +
+    "be given the nearest points of interest along with their distance and " +
+    "whether each is in front of, to the side of, or behind the user based " +
+    "on the direction they're facing. Use this to intelligently determine " +
+    "what the user is most likely looking at or experiencing right now — " +
+    "prioritize places that are in front of the user over places that are " +
+    "merely closest. Center your narration on that one place.",
 };
 
 const DEPTH_GUIDANCE = {
@@ -196,6 +201,10 @@ const ALLOWED_PLACE_TYPES = [
 const NEIGHBORHOOD_PRIMARY_MAX_METERS = 150;
 const NEIGHBORHOOD_FALLBACK_MAX_METERS = 300;
 
+// Default search radius for /api/context's 5-nearest-places lookup.
+const CONTEXT_RADIUS_METERS = 50;
+const CONTEXT_PLACE_LIMIT = 5;
+
 app.use(express.json());
 app.use(express.static(__dirname));
 
@@ -237,6 +246,39 @@ app.get("/api/places", async (req, res) => {
 
     const results = await fetchNearbySearch(lat, lng, radius);
     res.json({ place: pickMostInterestingPlace(results, requestedTypes) });
+  } catch (error) {
+    res.status(502).json({ error: "Failed to reach Google Places API." });
+  }
+});
+
+// Returns the nearest few places (default 5) with distance, compass bearing,
+// and — when a heading is supplied — whether each one is roughly in front
+// of, to the side of, or behind the user. This lets Claude reason about
+// what the user is actually facing rather than just what's closest.
+app.get("/api/context", async (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+  const radius = parseFloat(req.query.radius) || CONTEXT_RADIUS_METERS;
+  const headingRaw = req.query.heading;
+  const heading = headingRaw !== undefined && headingRaw !== "" && !Number.isNaN(parseFloat(headingRaw))
+    ? parseFloat(headingRaw)
+    : null;
+  const requestedTypes = req.query.types
+    ? req.query.types.split(",").map((type) => type.trim()).filter(Boolean)
+    : null;
+
+  if (Number.isNaN(lat) || Number.isNaN(lng)) {
+    return res.status(400).json({ error: "lat and lng query params are required." });
+  }
+
+  if (!GOOGLE_MAPS_API_KEY) {
+    return res.status(500).json({ error: "GOOGLE_MAPS_API_KEY is not configured on the server." });
+  }
+
+  try {
+    const results = await fetchNearbySearch(lat, lng, radius);
+    const places = pickNearestPlaces(results, requestedTypes, lat, lng, heading, CONTEXT_PLACE_LIMIT);
+    res.json({ places, heading });
   } catch (error) {
     res.status(502).json({ error: "Failed to reach Google Places API." });
   }
@@ -320,65 +362,128 @@ app.get("/api/photo", async (req, res) => {
 });
 
 app.post("/api/narrate", async (req, res) => {
-  const { place, tier, depth, language, userProfile } = req.body || {};
+  const { tier, place, places, heading, depth, language, userProfile, sessionLog, correctionContext } = req.body || {};
+  const resolvedTier = tier === "neighborhood" ? "neighborhood" : "specific";
 
-  if (!place || !place.name || !place.primaryType) {
-    return res.status(400).json({ error: "A place with name and primaryType is required." });
+  if (resolvedTier === "neighborhood") {
+    if (!place || !place.name || !place.primaryType) {
+      return res.status(400).json({ error: "A place with name and primaryType is required for the neighborhood tier." });
+    }
+  } else if (!Array.isArray(places) || places.length === 0) {
+    return res.status(400).json({ error: "A non-empty places array is required for the specific tier." });
   }
 
   if (!ANTHROPIC_API_KEY) {
     return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
   }
 
-  // userProfile is accepted for future personalization (interests, pace,
-  // etc.) but isn't folded into the prompt yet.
-  void userProfile;
-
-  const resolvedTier = tier === "neighborhood" ? "neighborhood" : "specific";
   const resolvedDepth = DEPTH_GUIDANCE[depth] ? depth : "standard";
   const languageName = LANGUAGE_NAMES[language];
 
   const systemPromptParts = [
     SABRI_SYSTEM_PROMPT,
+    buildUserProfileGuidance(userProfile),
+    buildSessionLogGuidance(sessionLog),
     CONTINUITY_GUIDANCE,
     PRONUNCIATION_GUIDANCE,
     TIER_GUIDANCE[resolvedTier],
     DEPTH_GUIDANCE[resolvedDepth],
-  ];
+  ].filter(Boolean);
+
   if (languageName && languageName !== "English") {
     systemPromptParts.push(
       `Narrate entirely in ${languageName}. Every word of the narration must be in ${languageName}, not English.`
     );
   }
+  if (correctionContext) {
+    systemPromptParts.push(
+      `IMPORTANT LOCATION CORRECTION: The user has told you their actual ` +
+        `location is: "${correctionContext}". Trust this over any GPS-based ` +
+        `place names until they say otherwise.`
+    );
+  }
+
   const systemPrompt = systemPromptParts.join("\n\n");
 
-  const typeLabel = PLACE_TYPE_LABELS[place.primaryType] || place.primaryType;
-  const vicinity = place.vicinity || "the area";
-
   try {
+    if (resolvedTier === "neighborhood") {
+      const typeLabel = PLACE_TYPE_LABELS[place.primaryType] || place.primaryType;
+      const vicinity = place.vicinity || "the area";
+
+      const message = await anthropic.messages.create({
+        model: "claude-sonnet-4-6",
+        max_tokens: 2048,
+        system: systemPrompt,
+        messages: [
+          {
+            role: "user",
+            content: `I am standing near ${place.name}, a ${typeLabel} in ${vicinity}. Tell me about this place in your signature style.`,
+          },
+        ],
+      });
+
+      const narration = message.content.find((block) => block.type === "text")?.text || "";
+      return res.json({ narration, focusedPlaceId: place.placeId || null });
+    }
+
+    // Specific tier: multi-place + heading reasoning, with structured output
+    // so we know exactly which place Claude actually centered the story on.
+    const userMessage = buildSpecificUserMessage(places, heading);
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      // "Deep" tour depth (5-6 paragraphs) can exceed 1024 tokens, especially
-      // narrating in a non-English language — give it enough room to finish.
       max_tokens: 2048,
       system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: `I am standing near ${place.name}, a ${typeLabel} in ${vicinity}. Tell me about this place in your signature style.`,
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              narration: { type: "string" },
+              focusedPlaceId: { anyOf: [{ type: "string" }, { type: "null" }] },
+            },
+            required: ["narration", "focusedPlaceId"],
+            additionalProperties: false,
+          },
         },
-      ],
+      },
+      messages: [{ role: "user", content: userMessage }],
     });
 
-    const narration = message.content.find((block) => block.type === "text")?.text || "";
-    res.json({ narration });
+    const textBlock = message.content.find((block) => block.type === "text");
+    const parsed = textBlock ? JSON.parse(textBlock.text) : { narration: "", focusedPlaceId: null };
+    res.json(parsed);
   } catch (error) {
     res.status(502).json({ error: "Failed to generate narration." });
   }
 });
 
+function buildSpecificUserMessage(places, heading) {
+  const compassWord = headingToCompassWord(heading);
+  const facingLine = compassWord
+    ? `I am standing here, facing ${compassWord}.`
+    : `I am standing here (my facing direction isn't available right now).`;
+
+  const placeLines = places
+    .map((place, index) => {
+      const typeLabel = PLACE_TYPE_LABELS[place.primaryType] || place.primaryType;
+      const positionPhrase = place.relativePosition && place.relativePosition !== "unknown" ? `, ${place.relativePosition} me` : "";
+      return `${index + 1}. ${place.name} (id: ${place.placeId}) — a ${typeLabel}, ${place.distanceMeters}m away${positionPhrase}`;
+    })
+    .join("\n");
+
+  return (
+    `${facingLine} Here are the nearest points of interest:\n${placeLines}\n\n` +
+    `Based on this, determine what I am most likely looking at or experiencing ` +
+    `right now, and tell me about it in your signature style. In focusedPlaceId, ` +
+    `return the exact id of the place your narration centers on, copied exactly ` +
+    `from the list above, or null if none of them fit.`
+  );
+}
+
 app.post("/api/ask", async (req, res) => {
-  const { question, currentPlace, neighborhood, sessionHistory } = req.body || {};
+  const { question, currentPlace, neighborhood, heading, nearbyPlaces, sessionLog, userProfile, correctionContext } =
+    req.body || {};
 
   if (!question) {
     return res.status(400).json({ error: "question is required." });
@@ -390,50 +495,130 @@ app.post("/api/ask", async (req, res) => {
 
   const place = currentPlace || "an unfamiliar spot";
   const area = neighborhood || "this part of town";
-  const lastEntry = Array.isArray(sessionHistory) && sessionHistory.length > 0 ? sessionHistory[sessionHistory.length - 1] : null;
-  const lastSummary = lastEntry?.summary || "a story about this area";
 
-  let systemPrompt =
+  const systemPromptParts = [
     `You are Sabri, a warm knowledgeable personal tour guide. The user is ` +
-    `currently near ${place} in ${area}. They just heard ${lastSummary}. ` +
-    `Answer their question conversationally, as if talking to them face to ` +
-    `face. Keep answers to 2-3 paragraphs maximum - they are walking and ` +
-    `listening, not reading. Stay in character as Sabri at all times.`;
+      `currently near ${place} in ${area}. Answer their question ` +
+      `conversationally, as if talking to them face to face. Keep answers to ` +
+      `2-3 paragraphs maximum - they are walking and listening, not reading. ` +
+      `Stay in character as Sabri at all times.`,
+    buildUserProfileGuidance(userProfile),
+    buildSessionLogGuidance(sessionLog),
+  ].filter(Boolean);
 
-  const historyBlock = summarizeSessionHistory(sessionHistory);
-  if (historyBlock) {
-    systemPrompt += `\n\nRecent tour history for context:\n${historyBlock}`;
+  const compassWord = headingToCompassWord(heading);
+  if (compassWord) {
+    systemPromptParts.push(`The user is currently facing ${compassWord}.`);
   }
-  systemPrompt += `\n\n${PRONUNCIATION_GUIDANCE}`;
+
+  if (Array.isArray(nearbyPlaces) && nearbyPlaces.length > 0) {
+    const lines = nearbyPlaces
+      .map((place, index) => {
+        const positionPhrase = place.relativePosition && place.relativePosition !== "unknown" ? `, ${place.relativePosition} them` : "";
+        return `${index + 1}. ${place.name} — ${place.distanceMeters}m away${positionPhrase}`;
+      })
+      .join("\n");
+    systemPromptParts.push(`Nearby points of interest right now:\n${lines}`);
+  }
+
+  if (correctionContext) {
+    systemPromptParts.push(
+      `IMPORTANT LOCATION CORRECTION: The user has told you their actual ` +
+        `location is: "${correctionContext}". Trust this over GPS-based assumptions.`
+    );
+  }
+
+  systemPromptParts.push(
+    `If the user's question or statement indicates you have misunderstood or ` +
+      `mislabeled their location (for example, they say something like "I'm not ` +
+      `in the Armenian Quarter, I'm outside the walls"), extract a short ` +
+      `description of their corrected location into locationCorrection. ` +
+      `Otherwise set locationCorrection to null.`
+  );
+  systemPromptParts.push(PRONUNCIATION_GUIDANCE);
+
+  const systemPrompt = systemPromptParts.join("\n\n");
 
   try {
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 512,
+      max_tokens: 1024,
       system: systemPrompt,
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              answer: { type: "string" },
+              locationCorrection: { anyOf: [{ type: "string" }, { type: "null" }] },
+            },
+            required: ["answer", "locationCorrection"],
+            additionalProperties: false,
+          },
+        },
+      },
       messages: [{ role: "user", content: question }],
     });
 
-    const answer = message.content.find((block) => block.type === "text")?.text || "";
-    res.json({ answer });
+    const textBlock = message.content.find((block) => block.type === "text");
+    const parsed = textBlock ? JSON.parse(textBlock.text) : { answer: "", locationCorrection: null };
+    res.json(parsed);
   } catch (error) {
     res.status(502).json({ error: "Failed to generate a response." });
   }
 });
 
-function summarizeSessionHistory(sessionHistory) {
-  if (!Array.isArray(sessionHistory) || sessionHistory.length === 0) return null;
+// Weaves the onboarding profile into the prompt so every narration/answer
+// feels made for this specific person.
+function buildUserProfileGuidance(profile) {
+  if (!profile || typeof profile !== "object") return null;
+  const { name, reason, interests, companions, depth } = profile;
+  const hasAnything = name || reason || (Array.isArray(interests) && interests.length) || companions;
+  if (!hasAnything) return null;
 
-  return sessionHistory
-    .slice(-3)
+  const lines = ["The person you are guiding right now:"];
+  if (name) lines.push(`- Name: ${name}`);
+  if (reason) lines.push(`- Here as: ${reason}`);
+  if (Array.isArray(interests) && interests.length) lines.push(`- Interested in: ${interests.join(", ")}`);
+  if (companions) lines.push(`- Exploring with: ${companions}`);
+  if (depth) lines.push(`- Depth preference: ${depth}`);
+
+  const addressee = name || "them";
+  lines.push("");
+  lines.push(
+    `Speak directly to ${addressee}. Make every story relevant to what they ` +
+      `care about. If they are here on a spiritual journey, lean into the ` +
+      `spiritual significance. If they love hidden stories, give them the ones ` +
+      `nobody else knows. If they are with family, make it accessible and ` +
+      `wonder-filled. If they are a solo explorer, go deeper and more personal. ` +
+      `This person deserves the experience that feels made exactly for them.`
+  );
+
+  return lines.join("\n");
+}
+
+// Keeps Claude from repeating itself and lets it reference earlier stops.
+function buildSessionLogGuidance(sessionLog) {
+  if (!Array.isArray(sessionLog) || sessionLog.length === 0) return null;
+
+  const entries = sessionLog
+    .slice(-5)
     .map((entry, index) => {
-      const lines = [`${index + 1}. ${entry.place || "somewhere nearby"}: ${entry.summary || "a story was shared"}`];
-      if (entry.question) {
-        lines.push(`   They asked: "${entry.question}"`);
+      const lines = [`${index + 1}. ${entry.placeName || "somewhere nearby"}: ${entry.summary || "a story was shared"}`];
+      if (Array.isArray(entry.questionsAsked) && entry.questionsAsked.length) {
+        lines.push(`   Questions asked: ${entry.questionsAsked.join(" / ")}`);
       }
       return lines.join("\n");
     })
     .join("\n");
+
+  return (
+    `So far on this walk you have told them about:\n${entries}\n\n` +
+    `Do not repeat information already covered. Build on what came before. ` +
+    `Reference earlier stops naturally when relevant - "As we saw back at..." ` +
+    `or "This connects to what I mentioned earlier about...".`
+  );
 }
 
 app.post("/api/speak", async (req, res) => {
@@ -454,12 +639,16 @@ app.post("/api/speak", async (req, res) => {
   const resolvedVoice = VALID_VOICES.includes(voice) ? voice : VOICE_CONFIG.voice;
   const requestedSpeed = typeof speed === "number" && Number.isFinite(speed) ? speed : VOICE_CONFIG.speed;
   const resolvedSpeed = Math.min(4.0, Math.max(0.25, requestedSpeed));
+  // OpenAI TTS rejects input over 4096 characters outright — deep-depth
+  // narrations combined with the user profile/session log context can
+  // exceed that, so clamp rather than let the whole request fail.
+  const resolvedText = text.length > 4096 ? text.slice(0, 4096) : text;
 
   try {
     const speech = await openai.audio.speech.create({
       model: VOICE_CONFIG.model,
       voice: resolvedVoice,
-      input: text,
+      input: resolvedText,
       speed: resolvedSpeed,
     });
 
@@ -536,6 +725,30 @@ function pickNearestPlace(results, allowedTypes, lat, lng, maxDistanceMeters) {
   return toPlaceResponse(nearest.result, primaryType);
 }
 
+// Returns up to `limit` nearest matching places, each annotated with
+// distance, compass bearing, and — when heading is known — whether it's
+// roughly in front of, to the side of, or behind the user.
+function pickNearestPlaces(results, allowedTypes, lat, lng, heading, limit) {
+  const types = allowedTypes && allowedTypes.length ? allowedTypes : ALLOWED_PLACE_TYPES;
+
+  return results
+    .filter((result) => result.geometry?.location && result.types?.some((type) => types.includes(type)))
+    .map((result) => {
+      const distance = distanceMeters(lat, lng, result.geometry.location.lat, result.geometry.location.lng);
+      const bearing = bearingDegrees(lat, lng, result.geometry.location.lat, result.geometry.location.lng);
+      const primaryType = types.find((type) => result.types?.includes(type)) || result.types?.[0];
+
+      return {
+        ...toPlaceResponse(result, primaryType),
+        distanceMeters: Math.round(distance),
+        bearingDegrees: Math.round(bearing),
+        relativePosition: relativePositionFromHeading(heading, bearing),
+      };
+    })
+    .sort((a, b) => a.distanceMeters - b.distanceMeters)
+    .slice(0, limit);
+}
+
 function toPlaceResponse(result, primaryType) {
   return {
     name: result.name,
@@ -558,6 +771,35 @@ function distanceMeters(lat1, lng1, lat2, lng2) {
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
   return 2 * earthRadius * Math.asin(Math.sqrt(h));
+}
+
+// Compass bearing (0-360, 0 = north) from point 1 to point 2.
+function bearingDegrees(lat1, lng1, lat2, lng2) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const toDeg = (rad) => (rad * 180) / Math.PI;
+  const dLng = toRad(lng2 - lng1);
+  const y = Math.sin(dLng) * Math.cos(toRad(lat2));
+  const x =
+    Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) - Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLng);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+function headingToCompassWord(heading) {
+  if (heading === null || heading === undefined || Number.isNaN(heading)) return null;
+  const directions = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"];
+  const index = ((Math.round(heading / 45) % 8) + 8) % 8;
+  return directions[index];
+}
+
+// Within 45 degrees of the heading = in front; 45-135 = to the side;
+// beyond that = behind. "unknown" when we have no heading to compare to.
+function relativePositionFromHeading(heading, bearing) {
+  if (heading === null || heading === undefined || Number.isNaN(heading)) return "unknown";
+  let diff = Math.abs(heading - bearing) % 360;
+  if (diff > 180) diff = 360 - diff;
+  if (diff <= 45) return "in front of";
+  if (diff <= 135) return "to the side of";
+  return "behind";
 }
 
 // Vercel imports this file and calls the exported Express app directly as

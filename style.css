@@ -64,6 +64,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  z-index: 2;
 }
 
 .logo {
@@ -75,9 +76,12 @@ body {
   color: var(--gold);
 }
 
-/* Location + pulse */
+/* Location + pulse + home-screen photo */
 
 .location-section {
+  position: relative;
+  overflow: hidden;
+  border-radius: 20px;
   text-align: center;
   flex: 1;
   min-height: 0;
@@ -85,7 +89,37 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
+}
+
+.home-photo {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-size: cover;
+  background-position: center;
+  opacity: 0;
+  transition: opacity 0.6s ease;
+}
+
+.home-photo.is-visible {
+  opacity: 1;
+}
+
+.home-photo-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: linear-gradient(180deg, rgba(15, 25, 35, 0.5) 0%, rgba(15, 25, 35, 0.82) 65%, var(--bg) 100%);
+}
+
+.location-content {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   gap: 4px;
+  padding: 24px;
 }
 
 .location-name {
@@ -95,6 +129,7 @@ body {
   line-height: 1.25;
   color: var(--white);
   max-width: 300px;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
 }
 
 .pulse {
@@ -113,7 +148,7 @@ body {
   border-radius: 50%;
   border: 1px solid var(--gold);
   opacity: 0;
-  animation: pulse-ring 2.8s cubic-bezier(0.16, 0.8, 0.3, 1) infinite;
+  animation: pulse-ring 3.6s cubic-bezier(0.16, 0.8, 0.3, 1) infinite;
 }
 
 .pulse-ring--delay {
@@ -131,11 +166,7 @@ body {
 }
 
 /* Before GPS lock the dot is dim and the rings pulse slowly ("searching").
-   Once locked (3 stable readings), it brightens and picks up pace. */
-.pulse-ring {
-  animation-duration: 3.6s;
-}
-
+   Once locked, it brightens and picks up pace. */
 .pulse.is-locked .pulse-dot {
   opacity: 1;
 }
@@ -162,11 +193,13 @@ body {
   font-size: 14px;
   color: var(--text-secondary);
   letter-spacing: 0.01em;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.5);
 }
 
-/* Player card — a fixed bottom drawer. Collapsed by default (only the peek
-   handle shows) so the screen stays clean while walking; tap or swipe up
-   to reveal the full narration, tap the X or swipe down to hide it again. */
+/* Player card — a fixed bottom drawer. The card itself never resizes; only
+   .drawer-content collapses (max-height: 0, opacity: 0, pointer-events:
+   none) when closed, so nothing from it can ever peek out or be tappable.
+   Only the always-visible handle shows while collapsed. */
 
 .player-card {
   position: fixed;
@@ -180,12 +213,6 @@ body {
   border: 1px solid var(--border);
   border-radius: 22px 22px 0 0;
   box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.45);
-  transform: translateY(calc(100% - 56px - env(safe-area-inset-bottom)));
-  transition: transform 0.32s cubic-bezier(0.16, 0.8, 0.3, 1);
-}
-
-.player-card.is-open {
-  transform: translateY(0);
 }
 
 .drawer-handle {
@@ -217,8 +244,18 @@ body {
 .drawer-content {
   position: relative;
   padding: 40px 24px calc(env(safe-area-inset-bottom) + 24px);
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition: max-height 0.32s cubic-bezier(0.16, 0.8, 0.3, 1), opacity 0.22s ease;
+}
+
+.player-card.is-open .drawer-content {
   max-height: 70vh;
+  opacity: 1;
   overflow-y: auto;
+  pointer-events: auto;
 }
 
 .drawer-close {
@@ -511,7 +548,8 @@ body {
   }
 }
 
-/* Tap-to-talk mic button — floats bottom-right above the drawer/footer. */
+/* Tap-to-talk mic button — floats bottom-right, always tappable during a
+   tour (mid-narration or during the watching/cooldown phase alike). */
 
 .mic-btn {
   position: fixed;
@@ -568,6 +606,18 @@ body {
   font-size: 14px;
   line-height: 1.4;
   text-align: center;
+}
+
+.listening-hint {
+  position: fixed;
+  right: 24px;
+  bottom: calc(env(safe-area-inset-bottom) + 144px);
+  z-index: 25;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--gold);
+  text-transform: uppercase;
 }
 
 /* Settings drawer — slides in from the right. */
@@ -728,4 +778,229 @@ body {
   font-size: 12px;
   line-height: 1.6;
   color: var(--text-secondary);
+}
+
+.reset-onboarding-btn {
+  margin-top: 12px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+/* Onboarding — fullscreen, gates the app on first launch. */
+
+.onboarding {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: radial-gradient(circle at 50% 0%, #142230 0%, var(--bg) 60%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(env(safe-area-inset-top) + 24px) 28px calc(env(safe-area-inset-bottom) + 24px);
+}
+
+.onboarding-inner {
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.onboarding-logo {
+  font-family: var(--font-serif);
+  font-size: 28px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+
+.onboarding-tagline {
+  margin-top: 8px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+
+.onboarding-steps {
+  position: relative;
+  width: 100%;
+  margin-top: 40px;
+}
+
+.onboarding-step {
+  display: none;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+  animation: onboarding-fade-in 0.35s ease;
+}
+
+.onboarding-step.is-active {
+  display: flex;
+}
+
+@keyframes onboarding-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.onboarding-question {
+  font-family: var(--font-serif);
+  font-size: 22px;
+  font-weight: 500;
+  color: var(--white);
+  margin-bottom: 4px;
+}
+
+.onboarding-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: -8px;
+}
+
+.onboarding-input {
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-elevated);
+  color: var(--white);
+  font-size: 16px;
+  text-align: center;
+}
+
+.onboarding-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.onboarding-card {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-elevated);
+  color: var(--white);
+  font-size: 15px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.onboarding-card.is-selected {
+  border-color: var(--gold);
+  background: var(--gold-soft);
+  color: var(--gold);
+}
+
+.onboarding-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+.onboarding-pill {
+  padding: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.onboarding-pill.is-selected {
+  border-color: var(--gold);
+  background: var(--gold-soft);
+  color: var(--gold);
+}
+
+.onboarding-depth {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.onboarding-depth-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-elevated);
+  text-align: left;
+}
+
+.onboarding-depth-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--white);
+}
+
+.onboarding-depth-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.onboarding-depth-option.is-selected {
+  border-color: var(--gold);
+  background: var(--gold-soft);
+}
+
+.onboarding-depth-option.is-selected .onboarding-depth-name {
+  color: var(--gold);
+}
+
+.onboarding-next {
+  margin-top: 6px;
+  padding: 16px;
+  border: none;
+  border-radius: 18px;
+  background: var(--gold);
+  color: var(--bg);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  box-shadow: 0 10px 30px var(--gold-glow);
+}
+
+.onboarding-next:active {
+  transform: scale(0.98);
+}
+
+.onboarding-progress {
+  display: flex;
+  gap: 8px;
+  margin-top: 32px;
+}
+
+.onboarding-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border);
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+
+.onboarding-dot.is-active {
+  background: var(--gold);
+  transform: scale(1.3);
 }

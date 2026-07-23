@@ -2,6 +2,7 @@ const startBtn = document.getElementById("start-btn");
 const statusCard = document.getElementById("status-card");
 const statusText = document.getElementById("status-text");
 const locationName = document.getElementById("location-name");
+const homePhoto = document.getElementById("home-photo");
 const pulseEl = document.getElementById("pulse");
 const playerCard = document.getElementById("player-card");
 const drawerHandle = document.getElementById("drawer-handle");
@@ -19,6 +20,7 @@ const installBannerCta = document.getElementById("install-banner-cta");
 const installBannerIosOnly = document.querySelectorAll("[data-ios-only]");
 const micBtn = document.getElementById("mic-btn");
 const askSubtitle = document.getElementById("ask-subtitle");
+const listeningHint = document.getElementById("listening-hint");
 const settingsBtn = document.getElementById("settings-btn");
 const settingsDrawer = document.getElementById("settings-drawer");
 const settingsOverlay = document.getElementById("settings-overlay");
@@ -26,27 +28,34 @@ const settingsClose = document.getElementById("settings-close");
 const voiceCards = document.querySelectorAll(".voice-card");
 const depthPills = document.querySelectorAll(".depth-pill");
 const languageSelect = document.getElementById("language-select");
+const resetOnboardingBtn = document.getElementById("reset-onboarding-btn");
 
 let watchId = null;
 let lastPosition = null;
+let lastHeading = null;
 let placeAbortController = null;
 let geocodeAbortController = null;
 let speakAbortController = null;
 let hasActivePlace = false;
-let isNarrating = false;
+let isNarrating = false; // tour-narration pipeline busy
+let isConversing = false; // tap-to-talk pipeline busy (independent flag —
+// see interruptPlayback()/startListening() for why these can't share state)
 
 let currentAudioObjectUrl = null;
 let selectedSpeed = 1;
 let currentNeighborhoodName = null;
+let currentPlaceName = null;
+let lastContextPlaces = [];
+let correctionContext = null;
 
 // GPS stabilization: don't act on the raw first fix, which can be noisy.
-// Show a fast, provisional welcome immediately, but wait for a few
+// Show a fast, provisional welcome immediately, but wait for a couple of
 // consecutive readings to agree before starting real orientation.
 let recentPositions = [];
 let gpsStabilized = false;
 let hasShownFastWelcome = false;
-const GPS_STABILIZATION_METERS = 20;
-const GPS_STABILIZATION_READINGS = 3;
+const GPS_STABILIZATION_METERS = 30;
+const GPS_STABILIZATION_READINGS = 2;
 
 // Three-tier location state. orientationCenter/isOriented track whether
 // we've given the user a neighborhood orientation for their current area;
@@ -56,9 +65,10 @@ let orientationCenter = null;
 let isOriented = false;
 const narratedPlaceIds = new Set();
 
-// Short-term memory: the last 3 places narrated (plus any question asked
-// about each), sent to /api/ask so Sabri has context of the walk so far.
-const sessionHistory = [];
+// Short-term memory: the last 5 places narrated (+ any questions asked
+// about each), sent to /api/narrate and /api/ask so Sabri has context of
+// the walk so far and never repeats itself.
+const sessionLog = [];
 
 // Pacing: once a narration finishes, wait for both a time and a distance
 // threshold before the next one can start, so narrations never jumble
@@ -68,15 +78,9 @@ let lastNarrationPosition = null;
 const NARRATION_COOLDOWN_MS = 10000;
 const NARRATION_COOLDOWN_METERS = 10;
 
-const DEFAULT_USER_PROFILE = {
-  interests: ["history", "culture", "local stories"],
-  pace: "walking",
-  language: "en",
-};
-
 const SIGNIFICANT_MOVE_METERS = 15;
 const ORIENTATION_RADIUS_METERS = 100;
-const SPECIFIC_RADIUS_METERS = 15;
+const CONTEXT_RADIUS_METERS = 50;
 
 const NEIGHBORHOOD_PLACE_TYPES = ["neighborhood", "locality", "sublocality"];
 const SPECIFIC_PLACE_TYPES = [
@@ -115,6 +119,131 @@ const PLACE_TYPE_LABELS = {
   premise: "Premise",
   establishment: "Establishment",
 };
+
+// --- Onboarding (first-launch profile capture) ---
+
+const ONBOARDED_KEY = "sabri_onboarded";
+const USER_PROFILE_KEY = "sabri_user_profile";
+
+const onboarding = document.getElementById("onboarding");
+const onboardingSteps = document.querySelectorAll(".onboarding-step");
+const onboardingDots = document.querySelectorAll(".onboarding-dot");
+const onboardingNameInput = document.getElementById("onboarding-name");
+const onboardingFinishBtn = document.getElementById("onboarding-finish");
+
+let onboardingStepIndex = 0;
+const onboardingAnswers = { name: "", reason: "", interests: [], companions: "", depth: "standard" };
+
+function isOnboarded() {
+  try {
+    return localStorage.getItem(ONBOARDED_KEY) === "true";
+  } catch (error) {
+    return false;
+  }
+}
+
+function loadUserProfile() {
+  try {
+    const raw = localStorage.getItem(USER_PROFILE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+let userProfile = loadUserProfile();
+
+if (isOnboarded()) {
+  onboarding.classList.add("hidden");
+} else {
+  onboarding.classList.remove("hidden");
+}
+
+function goToOnboardingStep(index) {
+  onboardingStepIndex = index;
+  onboardingSteps.forEach((step) => {
+    step.classList.toggle("is-active", Number(step.dataset.step) === index);
+  });
+  onboardingDots.forEach((dot) => {
+    dot.classList.toggle("is-active", Number(dot.dataset.dot) === index);
+  });
+}
+
+function advanceOnboarding() {
+  if (onboardingStepIndex < onboardingSteps.length - 1) {
+    goToOnboardingStep(onboardingStepIndex + 1);
+  }
+}
+
+onboardingSteps.forEach((step) => {
+  const nextBtn = step.querySelector("[data-next]");
+  if (nextBtn) {
+    nextBtn.addEventListener("click", () => {
+      if (step.dataset.step === "0") {
+        onboardingAnswers.name = onboardingNameInput.value.trim();
+      }
+      advanceOnboarding();
+    });
+  }
+
+  const singleSelectContainer = step.querySelector("[data-single-select]");
+  if (singleSelectContainer) {
+    const field = singleSelectContainer.dataset.field;
+    const buttons = singleSelectContainer.querySelectorAll("button");
+    buttons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        buttons.forEach((b) => b.classList.remove("is-selected"));
+        btn.classList.add("is-selected");
+        onboardingAnswers[field] = btn.dataset.value;
+        const isLastStep = onboardingStepIndex === onboardingSteps.length - 1;
+        if (!step.querySelector(".onboarding-next") && !isLastStep) {
+          setTimeout(advanceOnboarding, 250);
+        }
+      });
+    });
+  }
+
+  const pillsContainer = step.querySelector(".onboarding-pills");
+  if (pillsContainer) {
+    pillsContainer.querySelectorAll(".onboarding-pill").forEach((pill) => {
+      pill.addEventListener("click", () => {
+        pill.classList.toggle("is-selected");
+        onboardingAnswers.interests = Array.from(pillsContainer.querySelectorAll(".onboarding-pill.is-selected")).map(
+          (p) => p.dataset.value
+        );
+      });
+    });
+  }
+});
+
+if (onboardingFinishBtn) {
+  onboardingFinishBtn.addEventListener("click", () => {
+    userProfile = { ...onboardingAnswers };
+    try {
+      localStorage.setItem(USER_PROFILE_KEY, JSON.stringify(userProfile));
+      localStorage.setItem(ONBOARDED_KEY, "true");
+    } catch (error) {
+      // localStorage unavailable — onboarding just won't persist.
+    }
+    // Keep the settings panel's depth pill in sync with the onboarding choice.
+    settings.depth = userProfile.depth || settings.depth;
+    saveSettings();
+    applySettingsToUI();
+    onboarding.classList.add("hidden");
+  });
+}
+
+if (resetOnboardingBtn) {
+  resetOnboardingBtn.addEventListener("click", () => {
+    try {
+      localStorage.removeItem(ONBOARDED_KEY);
+      localStorage.removeItem(USER_PROFILE_KEY);
+    } catch (error) {
+      // ignore
+    }
+    location.reload();
+  });
+}
 
 // --- Settings (voice / tour depth / language), persisted to localStorage ---
 
@@ -233,8 +362,7 @@ if ("serviceWorker" in navigator) {
 // iOS Safari never fires beforeinstallprompt, so there's no way to trigger
 // a native install flow there — instead we show manual step-by-step
 // instructions. On Android/Chrome, the same banner shell shows a real
-// "Install" button wired to the native prompt (the old behavior, just
-// presented through this banner instead of a standalone pill button).
+// "Install" button wired to the native prompt.
 
 const INSTALL_BANNER_DISMISSED_KEY = "sabri-install-banner-dismissed";
 const isIosSafari = /iphone|ipad|ipod/i.test(navigator.userAgent) && !window.MSStream;
@@ -397,7 +525,7 @@ if ("mediaSession" in navigator) {
   // hands-free. Wrapped in try/catch since not every browser supports it.
   try {
     navigator.mediaSession.setActionHandler("nexttrack", () => {
-      if (!isListening) startListening();
+      startListening();
     });
   } catch (error) {
     // Unsupported action type — non-fatal.
@@ -442,8 +570,11 @@ function startTour() {
 }
 
 function onLocation(position) {
-  const { latitude, longitude } = position.coords;
+  const { latitude, longitude, heading } = position.coords;
   const current = { latitude, longitude };
+  if (typeof heading === "number" && !Number.isNaN(heading)) {
+    lastHeading = heading;
+  }
 
   // Immediate feedback the moment any fix arrives, before GPS has settled.
   if (!hasShownFastWelcome) {
@@ -476,7 +607,7 @@ function onLocation(position) {
   }
 
   reverseGeocode(latitude, longitude);
-  checkForNarration(latitude, longitude);
+  checkForNarration(latitude, longitude, lastHeading);
 }
 
 function isGpsStable(positions) {
@@ -496,7 +627,7 @@ async function showFastWelcome(latitude, longitude) {
     const data = await response.json();
 
     if (response.ok && data.locationName) {
-      statusText.textContent = `Welcome to ${data.locationName}`;
+      statusText.textContent = `GPS finding you in ${data.locationName}...`;
       if (!hasActivePlace) {
         locationName.textContent = data.locationName;
       }
@@ -529,12 +660,13 @@ async function reverseGeocode(latitude, longitude) {
   }
 }
 
-// Entry point for the three-tier flow: never interrupt a playing narration,
-// respect the pacing cooldown, then decide whether we need a fresh
-// neighborhood orientation (STEP 1) or can zoom into something specific
-// (STEP 2).
-async function checkForNarration(latitude, longitude) {
-  if (isNarrating) return;
+// Entry point for the three-tier flow: never interrupt an in-progress
+// narration or conversation, respect the pacing cooldown, then decide
+// whether we need a fresh neighborhood orientation (STEP 1) or can zoom
+// into something specific (STEP 2). Once GPS is locked, this fires
+// immediately — the user can stand still and still get a narration.
+async function checkForNarration(latitude, longitude, heading) {
+  if (isNarrating || isConversing) return;
 
   if (lastNarrationEndTime > 0) {
     const cooledDown = Date.now() - lastNarrationEndTime >= NARRATION_COOLDOWN_MS;
@@ -561,7 +693,7 @@ async function checkForNarration(latitude, longitude) {
     return;
   }
 
-  await runSpecificZoomIn(latitude, longitude);
+  await runSpecificZoomIn(latitude, longitude, heading);
 }
 
 // STEP 1 - orient the user to the neighborhood they've just arrived in.
@@ -570,9 +702,7 @@ async function checkForNarration(latitude, longitude) {
 async function runNeighborhoodOrientation(latitude, longitude) {
   statusText.textContent = "Getting your bearings...";
 
-  const place = await fetchNearbyPlace(latitude, longitude, NEIGHBORHOOD_PLACE_TYPES, {
-    strategy: "nearest",
-  });
+  const place = await fetchNearbyPlace(latitude, longitude, NEIGHBORHOOD_PLACE_TYPES, { strategy: "nearest" });
   isOriented = true;
 
   if (!place || narratedPlaceIds.has(place.placeId)) {
@@ -580,21 +710,26 @@ async function runNeighborhoodOrientation(latitude, longitude) {
     return;
   }
 
-  await narrateAndSpeak(place, "neighborhood", { latitude, longitude });
+  await narrateAndSpeak({ tier: "neighborhood", place, triggerPosition: { latitude, longitude } });
 }
 
-// STEP 2 - once oriented and still within range, look for something
-// specific worth stopping for.
-async function runSpecificZoomIn(latitude, longitude) {
-  const place = await fetchNearbyPlace(latitude, longitude, SPECIFIC_PLACE_TYPES, { radius: SPECIFIC_RADIUS_METERS });
+// STEP 2 - once oriented and still within range, fetch the nearest points
+// of interest (with distance + compass bearing + front/side/behind relative
+// to the user's heading) and let Claude reason about what's actually being
+// looked at, rather than blindly narrating the single closest place.
+async function runSpecificZoomIn(latitude, longitude, heading) {
+  const contextPlaces = await fetchContextPlaces(latitude, longitude, heading);
+  lastContextPlaces = contextPlaces;
 
-  if (!place || narratedPlaceIds.has(place.placeId)) {
+  const newPlaces = contextPlaces.filter((place) => !narratedPlaceIds.has(place.placeId));
+
+  if (newPlaces.length === 0) {
     // STEP 3 - nothing new nearby; keep watching as the user walks.
     statusText.textContent = "Keep walking, discovering...";
     return;
   }
 
-  await narrateAndSpeak(place, "specific", { latitude, longitude });
+  await narrateAndSpeak({ tier: "specific", places: newPlaces, heading, triggerPosition: { latitude, longitude } });
 }
 
 async function fetchNearbyPlace(latitude, longitude, types, options) {
@@ -627,7 +762,43 @@ async function fetchNearbyPlace(latitude, longitude, types, options) {
   }
 }
 
-async function narrateAndSpeak(place, tier, triggerPosition) {
+async function fetchContextPlaces(latitude, longitude, heading) {
+  if (placeAbortController) {
+    placeAbortController.abort();
+  }
+  placeAbortController = new AbortController();
+
+  try {
+    const params = new URLSearchParams({
+      lat: String(latitude),
+      lng: String(longitude),
+      radius: String(CONTEXT_RADIUS_METERS),
+      types: SPECIFIC_PLACE_TYPES.join(","),
+    });
+    if (typeof heading === "number" && !Number.isNaN(heading)) {
+      params.set("heading", String(heading));
+    }
+
+    const response = await fetch(`/api/context?${params.toString()}`, {
+      signal: placeAbortController.signal,
+    });
+    const data = await response.json();
+    return response.ok && Array.isArray(data.places) ? data.places : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+// Heuristic used only as a fallback if Claude's focusedPlaceId doesn't
+// match anything we sent it — prioritize whatever's in front, then nearest.
+function choosePrimaryPlace(places) {
+  if (!places || places.length === 0) return null;
+  const inFront = places.filter((place) => place.relativePosition === "in front of");
+  const pool = inFront.length > 0 ? inFront : places;
+  return pool.reduce((best, place) => (!best || place.distanceMeters < best.distanceMeters ? place : best), null);
+}
+
+async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }) {
   isNarrating = true;
   lastNarrationPosition = triggerPosition;
   statusText.textContent = tier === "neighborhood" ? "Getting your bearings..." : "Generating your story...";
@@ -637,11 +808,15 @@ async function narrateAndSpeak(place, tier, triggerPosition) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        place,
         tier,
+        place,
+        places,
+        heading,
         depth: settings.depth,
         language: settings.language,
-        userProfile: DEFAULT_USER_PROFILE,
+        userProfile,
+        sessionLog,
+        correctionContext,
       }),
     });
     const data = await response.json();
@@ -651,23 +826,33 @@ async function narrateAndSpeak(place, tier, triggerPosition) {
       return;
     }
 
-    narratedPlaceIds.add(place.placeId);
-    hasActivePlace = true;
-    if (tier === "neighborhood") {
-      currentNeighborhoodName = place.name;
+    const focusedPlace =
+      tier === "neighborhood" ? place : places.find((p) => p.placeId === data.focusedPlaceId) || choosePrimaryPlace(places);
+
+    if (!focusedPlace) {
+      statusText.textContent = "Couldn't generate your story.";
+      return;
     }
-    recordHistory(place, data.narration);
 
-    const typeLabel = PLACE_TYPE_LABELS[place.primaryType] || place.primaryType;
-    locationName.textContent = `${place.name} - ${typeLabel}`;
+    narratedPlaceIds.add(focusedPlace.placeId);
+    hasActivePlace = true;
+    currentPlaceName = focusedPlace.name;
+    if (tier === "neighborhood") {
+      currentNeighborhoodName = focusedPlace.name;
+    }
+    recordSessionLog(focusedPlace, data.narration);
 
-    const photoUrl = place.photoReference
-      ? `/api/photo?ref=${encodeURIComponent(place.photoReference)}&maxwidth=800`
+    const typeLabel = PLACE_TYPE_LABELS[focusedPlace.primaryType] || focusedPlace.primaryType;
+    locationName.textContent = `${focusedPlace.name} - ${typeLabel}`;
+
+    const photoUrl = focusedPlace.photoReference
+      ? `/api/photo?ref=${encodeURIComponent(focusedPlace.photoReference)}&maxwidth=800`
       : null;
     applyPlacePhoto(photoUrl);
+    applyHomePhoto(photoUrl);
 
-    startStory(place.name, data.narration);
-    updateMediaSessionMetadata(place.name, currentNeighborhoodName, photoUrl);
+    startStory(focusedPlace.name, data.narration);
+    updateMediaSessionMetadata(focusedPlace.name, currentNeighborhoodName, photoUrl);
     await speakNarration(data.narration);
   } catch (error) {
     statusText.textContent = "Couldn't generate your story.";
@@ -677,23 +862,48 @@ async function narrateAndSpeak(place, tier, triggerPosition) {
   }
 }
 
-// Keeps the last 3 places narrated (+ any question asked about each) as
-// simple short-term memory, passed to /api/ask for conversational context.
-function recordHistory(place, narrationText) {
-  sessionHistory.push({ place: place.name, summary: summarizeForHistory(narrationText) });
-  if (sessionHistory.length > 3) {
-    sessionHistory.shift();
+// Keeps the last 5 places narrated (+ any questions asked about each) as
+// simple short-term memory, passed to /api/narrate and /api/ask.
+function recordSessionLog(place, narrationText) {
+  sessionLog.push({
+    placeName: place.name,
+    placeType: place.primaryType,
+    narratedAt: Date.now(),
+    summary: summarizeForHistory(narrationText),
+    questionsAsked: [],
+  });
+  if (sessionLog.length > 5) {
+    sessionLog.shift();
   }
 }
 
 function summarizeForHistory(text) {
-  const firstSentence = text.split(/(?<=[.!?])\s/)[0] || text;
-  return firstSentence.length > 160 ? `${firstSentence.slice(0, 157)}...` : firstSentence;
+  return text.length > 150 ? `${text.slice(0, 150)}...` : text;
 }
 
 function applyPlacePhoto(url) {
   // Clearing the inline style falls back to the CSS gradient placeholder.
   placePhoto.style.backgroundImage = url ? `url("${url}")` : "";
+}
+
+// Crossfades the home-screen background photo in once it's actually
+// loaded, so there's no flash of a broken image mid-transition.
+function applyHomePhoto(url) {
+  if (!url) {
+    homePhoto.classList.remove("is-visible");
+    homePhoto.style.backgroundImage = "";
+    return;
+  }
+
+  const preload = new Image();
+  preload.onload = () => {
+    homePhoto.style.backgroundImage = `url("${url}")`;
+    homePhoto.classList.add("is-visible");
+  };
+  preload.onerror = () => {
+    homePhoto.classList.remove("is-visible");
+  };
+  preload.src = url;
 }
 
 function updateMediaSessionMetadata(title, neighborhoodName, photoUrl) {
@@ -709,12 +919,15 @@ function updateMediaSessionMetadata(title, neighborhoodName, photoUrl) {
   });
 }
 
-// Resolves once playback has genuinely finished (or failed) — awaiting this
-// is what keeps isNarrating true for the whole time audio is playing, not
+// Resolves once playback has genuinely finished, failed, or been
+// interrupted (see interruptPlayback()) — awaiting this is what keeps
+// isNarrating/isConversing true for the whole time audio is playing, not
 // just while it's being generated. Playback goes through the real HTML5
 // <audio> element (not the Web Audio API) because that's what iOS Safari
 // allows to keep playing with the screen locked, and what Media Session
 // needs to attach lock-screen/AirPods controls to.
+let currentPlaybackResolve = null;
+
 async function speakNarration(text) {
   if (speakAbortController) {
     speakAbortController.abort();
@@ -744,6 +957,7 @@ async function speakNarration(text) {
     audioPlayer.src = currentAudioObjectUrl;
 
     await new Promise((resolve) => {
+      currentPlaybackResolve = resolve;
       audioPlayer.addEventListener("ended", resolve, { once: true });
       const playPromise = audioPlayer.play();
       if (playPromise && typeof playPromise.catch === "function") {
@@ -754,12 +968,26 @@ async function speakNarration(text) {
         });
       }
     });
+    currentPlaybackResolve = null;
   } catch (error) {
     if (error.name === "AbortError") return;
     // Audio didn't play — make sure the story is still readable front and
     // center rather than leaving the user with nothing.
     statusText.textContent = "Audio unavailable — read your story below.";
     placeDescription.classList.add("story-description--fallback");
+  }
+}
+
+// Cleanly stops whatever's currently playing (if anything) and resolves any
+// pending speakNarration() promise immediately, so the caller's finally
+// block runs right away instead of hanging until a natural 'ended' event
+// that will never come once we overwrite audioPlayer.src.
+function interruptPlayback() {
+  audioPlayer.pause();
+  if (currentPlaybackResolve) {
+    const resolve = currentPlaybackResolve;
+    currentPlaybackResolve = null;
+    resolve();
   }
 }
 
@@ -820,12 +1048,15 @@ function pause() {
   playBtn.classList.remove("hidden");
 }
 
-// --- Tap to talk: speech-to-text + conversational Q&A ---
+// --- Tap to talk: speech-to-text + conversational Q&A (rebuilt) ---
 
 const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
 const recognition = SpeechRecognitionClass ? new SpeechRecognitionClass() : null;
 let isListening = false;
-let wasPlayingBeforeAsk = false;
+let silenceTimer = null;
+
+const INITIAL_SILENCE_MS = 8000; // generous window before the user starts speaking
+const FOLLOWUP_SILENCE_MS = 2000; // stop 2s after the user stops speaking
 
 if (recognition) {
   recognition.continuous = false;
@@ -835,38 +1066,40 @@ if (recognition) {
   micBtn.classList.add("hidden");
 }
 
+// Always tappable: a tap during an active narration interrupts it cleanly
+// first; a tap while already listening stops listening early.
 micBtn.addEventListener("click", () => {
-  if (isListening) return;
+  if (isListening) {
+    stopListening();
+    return;
+  }
   startListening();
 });
 
 function startListening() {
-  if (!recognition || isNarrating || isListening) return;
+  if (!recognition || isListening) return;
 
-  isNarrating = true; // block the tour pipeline from firing while we converse
+  interruptPlayback();
+  isConversing = true;
   isListening = true;
   micBtn.classList.add("is-listening");
   askSubtitle.textContent = "";
   askSubtitle.classList.remove("hidden");
+  listeningHint.classList.remove("hidden");
   statusText.textContent = "Listening...";
-
-  wasPlayingBeforeAsk = !audioPlayer.paused;
-  if (wasPlayingBeforeAsk) {
-    audioPlayer.pause();
-  }
 
   recognition.lang = SPEECH_RECOGNITION_LANGS[settings.language] || "en-US";
 
   let finalTranscript = "";
-  const stopTimeout = setTimeout(() => {
-    try {
-      recognition.stop();
-    } catch (error) {
-      // Already stopped — harmless.
-    }
-  }, 10000);
+  const resetSilenceTimer = (duration) => {
+    clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => stopListening(), duration);
+  };
+  resetSilenceTimer(INITIAL_SILENCE_MS);
 
   recognition.onresult = (event) => {
+    resetSilenceTimer(FOLLOWUP_SILENCE_MS);
+
     let interim = "";
     for (let i = event.resultIndex; i < event.results.length; i++) {
       const transcript = event.results[i][0].transcript;
@@ -880,9 +1113,10 @@ function startListening() {
   };
 
   recognition.onend = () => {
-    clearTimeout(stopTimeout);
+    clearTimeout(silenceTimer);
     isListening = false;
     micBtn.classList.remove("is-listening");
+    listeningHint.classList.add("hidden");
 
     const question = finalTranscript.trim();
     if (question) {
@@ -890,20 +1124,17 @@ function startListening() {
       askSabri(question);
     } else {
       askSubtitle.classList.add("hidden");
-      isNarrating = false;
-      if (wasPlayingBeforeAsk) {
-        audioPlayer.play().catch(() => {});
-      } else {
-        statusText.textContent = "Keep walking, discovering...";
-      }
+      isConversing = false;
+      statusText.textContent = "Keep walking, discovering...";
     }
   };
 
   recognition.onerror = () => {
-    clearTimeout(stopTimeout);
+    clearTimeout(silenceTimer);
     isListening = false;
-    isNarrating = false;
+    isConversing = false;
     micBtn.classList.remove("is-listening");
+    listeningHint.classList.add("hidden");
     askSubtitle.classList.add("hidden");
     statusText.textContent = "Didn't catch that — tap the mic to try again.";
   };
@@ -912,8 +1143,18 @@ function startListening() {
     recognition.start();
   } catch (error) {
     isListening = false;
-    isNarrating = false;
+    isConversing = false;
     micBtn.classList.remove("is-listening");
+    listeningHint.classList.add("hidden");
+  }
+}
+
+function stopListening() {
+  if (!recognition) return;
+  try {
+    recognition.stop();
+  } catch (error) {
+    // Already stopped — harmless.
   }
 }
 
@@ -924,9 +1165,13 @@ async function askSabri(question) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         question,
-        currentPlace: placeName.textContent !== "—" ? placeName.textContent : null,
+        currentPlace: currentPlaceName,
         neighborhood: currentNeighborhoodName,
-        sessionHistory,
+        heading: lastHeading,
+        nearbyPlaces: lastContextPlaces,
+        sessionLog,
+        userProfile,
+        correctionContext,
       }),
     });
     const data = await response.json();
@@ -934,12 +1179,15 @@ async function askSabri(question) {
     if (!response.ok || !data.answer) {
       statusText.textContent = "Sabri couldn't answer that.";
       askSubtitle.classList.add("hidden");
-      finishAsking();
       return;
     }
 
-    if (sessionHistory.length > 0) {
-      sessionHistory[sessionHistory.length - 1].question = question;
+    if (data.locationCorrection) {
+      correctionContext = data.locationCorrection;
+    }
+
+    if (sessionLog.length > 0) {
+      sessionLog[sessionLog.length - 1].questionsAsked.push(question);
     }
 
     askSubtitle.classList.add("hidden");
@@ -961,12 +1209,6 @@ async function askSabri(question) {
     statusText.textContent = "Sabri couldn't answer that.";
     askSubtitle.classList.add("hidden");
   } finally {
-    finishAsking();
+    isConversing = false;
   }
-}
-
-function finishAsking() {
-  // Let the background tour pipeline resume checking location now that the
-  // conversation has wrapped up.
-  isNarrating = false;
 }

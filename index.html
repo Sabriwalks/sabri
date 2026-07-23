@@ -13,6 +13,84 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <!-- First-launch onboarding. Gates the whole app until "Start Exploring"
+       is tapped; never shown again unless reset from settings. -->
+  <div id="onboarding" class="onboarding hidden">
+    <div class="onboarding-inner">
+      <div class="onboarding-logo">Sabri</div>
+      <p class="onboarding-tagline">Your personal guide. Everywhere.</p>
+
+      <div class="onboarding-steps">
+        <div class="onboarding-step is-active" data-step="0">
+          <h2 class="onboarding-question">What's your name?</h2>
+          <input id="onboarding-name" type="text" class="onboarding-input" placeholder="Your name" autocomplete="given-name" />
+          <button class="onboarding-next" data-next>Continue</button>
+        </div>
+
+        <div class="onboarding-step" data-step="1">
+          <h2 class="onboarding-question">What brings you here today?</h2>
+          <div class="onboarding-cards" data-single-select data-field="reason">
+            <button class="onboarding-card" data-value="Tourist exploring">Tourist exploring</button>
+            <button class="onboarding-card" data-value="Local discovering">Local discovering</button>
+            <button class="onboarding-card" data-value="Student learning">Student learning</button>
+            <button class="onboarding-card" data-value="Spiritual journey">Spiritual journey</button>
+          </div>
+        </div>
+
+        <div class="onboarding-step" data-step="2">
+          <h2 class="onboarding-question">What excites you most?</h2>
+          <p class="onboarding-hint">Select all that apply</p>
+          <div class="onboarding-pills">
+            <button class="onboarding-pill" data-value="History">History</button>
+            <button class="onboarding-pill" data-value="Religion &amp; Spirituality">Religion &amp; Spirituality</button>
+            <button class="onboarding-pill" data-value="Architecture">Architecture</button>
+            <button class="onboarding-pill" data-value="Food &amp; Culture">Food &amp; Culture</button>
+            <button class="onboarding-pill" data-value="Hidden Stories">Hidden Stories</button>
+            <button class="onboarding-pill" data-value="People &amp; Community">People &amp; Community</button>
+          </div>
+          <button class="onboarding-next" data-next>Continue</button>
+        </div>
+
+        <div class="onboarding-step" data-step="3">
+          <h2 class="onboarding-question">Who are you exploring with?</h2>
+          <div class="onboarding-cards" data-single-select data-field="companions">
+            <button class="onboarding-card" data-value="Just me">Just me</button>
+            <button class="onboarding-card" data-value="With my partner">With my partner</button>
+            <button class="onboarding-card" data-value="With family">With family</button>
+            <button class="onboarding-card" data-value="With a group">With a group</button>
+          </div>
+        </div>
+
+        <div class="onboarding-step" data-step="4">
+          <h2 class="onboarding-question">How deep should Sabri go?</h2>
+          <div class="onboarding-depth" data-single-select data-field="depth">
+            <button class="onboarding-depth-option" data-value="surface">
+              <span class="onboarding-depth-name">Quick highlights</span>
+              <span class="onboarding-depth-desc">Keep it moving, key stories only</span>
+            </button>
+            <button class="onboarding-depth-option is-selected" data-value="standard">
+              <span class="onboarding-depth-name">Balanced</span>
+              <span class="onboarding-depth-desc">Stories with context — recommended</span>
+            </button>
+            <button class="onboarding-depth-option" data-value="deep">
+              <span class="onboarding-depth-name">Deep dives</span>
+              <span class="onboarding-depth-desc">Full history, connections, everything</span>
+            </button>
+          </div>
+          <button id="onboarding-finish" class="onboarding-next">Start Exploring</button>
+        </div>
+      </div>
+
+      <div class="onboarding-progress" aria-hidden="true">
+        <span class="onboarding-dot is-active" data-dot="0"></span>
+        <span class="onboarding-dot" data-dot="1"></span>
+        <span class="onboarding-dot" data-dot="2"></span>
+        <span class="onboarding-dot" data-dot="3"></span>
+        <span class="onboarding-dot" data-dot="4"></span>
+      </div>
+    </div>
+  </div>
+
   <div class="app">
     <header class="app-header">
       <button id="settings-btn" class="settings-btn" aria-label="Open settings">⚙️</button>
@@ -20,15 +98,20 @@
     </header>
 
     <section id="status-card" class="location-section">
-      <h1 id="location-name" class="location-name">Nachlaot, Jerusalem</h1>
+      <div id="home-photo" class="home-photo" aria-hidden="true"></div>
+      <div class="home-photo-overlay" aria-hidden="true"></div>
 
-      <div id="pulse" class="pulse" aria-hidden="true">
-        <span class="pulse-ring"></span>
-        <span class="pulse-ring pulse-ring--delay"></span>
-        <span class="pulse-dot"></span>
+      <div class="location-content">
+        <h1 id="location-name" class="location-name">Nachlaot, Jerusalem</h1>
+
+        <div id="pulse" class="pulse" aria-hidden="true">
+          <span class="pulse-ring"></span>
+          <span class="pulse-ring pulse-ring--delay"></span>
+          <span class="pulse-dot"></span>
+        </div>
+
+        <p id="status-text" class="status-text">Tap start to begin your tour.</p>
       </div>
-
-      <p id="status-text" class="status-text">Tap start to begin your tour.</p>
     </section>
 
     <footer class="app-footer">
@@ -37,7 +120,7 @@
     </footer>
   </div>
 
-  <!-- Collapsed by default: only a peek handle with a "tap to read" hint
+  <!-- Collapsed by default: only the peek handle with a "tap to read" hint
        shows while walking. Tap or swipe up to reveal the full narration. -->
   <section id="player-card" class="player-card hidden">
     <button id="drawer-handle" class="drawer-handle" aria-label="Show story details">
@@ -75,9 +158,12 @@
     </div>
   </section>
 
-  <!-- Tap-to-talk mic button, floats bottom-right above the drawer/footer. -->
+  <!-- Tap-to-talk mic button, floats bottom-right above the drawer/footer.
+       Always tappable during a tour, including mid-narration (tapping it
+       interrupts cleanly) and during the cooldown/watching phase. -->
   <button id="mic-btn" class="mic-btn" aria-label="Ask Sabri a question">🎤</button>
   <p id="ask-subtitle" class="ask-subtitle hidden"></p>
+  <p id="listening-hint" class="listening-hint hidden">Tap to stop</p>
 
   <!-- Settings drawer, slides in from the right. -->
   <div id="settings-overlay" class="settings-overlay hidden"></div>
@@ -138,6 +224,7 @@
 
       <section class="settings-about">
         <p>Sabri v1.0 — Your personal AI tour guide. Built with love in Jerusalem.</p>
+        <button id="reset-onboarding-btn" class="reset-onboarding-btn">Reset onboarding</button>
       </section>
     </div>
   </aside>
