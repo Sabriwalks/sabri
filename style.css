@@ -40,6 +40,17 @@ body {
   gap: 16px;
 }
 
+/* Active tour: the photo and control bar go fully edge-to-edge (a premium
+   music-player feel), so the shell's own padding/gap is dropped and the
+   header floats over the photo instead of pushing it down. */
+.app.has-player {
+  height: 100vh;
+  height: 100dvh;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+
 .hidden {
   display: none !important;
 }
@@ -49,6 +60,18 @@ body {
 .app-header {
   position: relative;
   text-align: center;
+}
+
+/* Overlaid on top of the photo once a tour is active, rather than pushing
+   it down — the photo's own gradient overlay already keeps the logo/gear
+   readable, so this is what makes the photo truly reach the top edge. */
+.app.has-player .app-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  padding: calc(env(safe-area-inset-top) + 18px) 24px 0;
 }
 
 .settings-btn {
@@ -89,6 +112,26 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
+}
+
+/* Photo area fills a fixed ~55% of the screen, flush edge-to-edge (no side
+   margins), with rounded corners only where it meets the control bar. */
+.app.has-player .location-section {
+  flex: none;
+  width: 100%;
+  height: 55vh;
+  height: 55dvh;
+  border-radius: 0 0 8px 8px;
+}
+
+.app.has-player .location-content {
+  justify-content: flex-end;
+  padding: 24px 24px 20px;
+}
+
+.app.has-player .pulse,
+.app.has-player .status-text {
+  display: none;
 }
 
 .home-photo {
@@ -196,10 +239,12 @@ body {
   text-shadow: 0 1px 8px rgba(0, 0, 0, 0.5);
 }
 
-/* Player card — a fixed bottom drawer. The card itself never resizes; only
-   .drawer-content collapses (max-height: 0, opacity: 0, pointer-events:
-   none) when closed, so nothing from it can ever peek out or be tappable.
-   Only the always-visible handle shows while collapsed. */
+/* Narration text drawer — a fixed overlay that slides up from the bottom
+   only once "Tap to read" (now part of the control bar) is tapped. Fully
+   collapsed by default: max-height can never shrink a box below its own
+   padding (padding can't force negative content height), so padding only
+   applies once open — otherwise it'd leave a permanent floor height that
+   pushes/overlaps whatever sits just above it. */
 
 .player-card {
   position: fixed;
@@ -213,41 +258,6 @@ body {
   border: 1px solid var(--border);
   border-radius: 22px 22px 0 0;
   box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.45);
-}
-
-.drawer-handle {
-  width: 100%;
-  height: 56px;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-}
-
-.drawer-handle-bar {
-  width: 36px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--gold-soft);
-}
-
-.drawer-handle-hint {
-  font-size: 12px;
-  letter-spacing: 0.04em;
-  color: var(--gold);
-}
-
-.drawer-content {
-  position: relative;
-  /* No padding while collapsed: max-height can never shrink a box below its
-     own padding (padding can't force negative content height), so any
-     padding here would leave a permanent floor height, pushing the handle
-     above it up and off the true bottom edge — overlapping whatever sits
-     just above it. Padding only applies once the drawer is actually open. */
   padding: 0 24px;
   max-height: 0;
   opacity: 0;
@@ -258,9 +268,9 @@ body {
   transition: max-height 0.32s cubic-bezier(0.16, 0.8, 0.3, 1), opacity 0.22s ease, padding 0.22s ease;
 }
 
-.player-card.is-open .drawer-content {
+.player-card.is-open {
   padding: 40px 24px calc(env(safe-area-inset-bottom) + 48px);
-  max-height: 70vh;
+  max-height: 75vh;
   opacity: 1;
   overflow-y: scroll;
   pointer-events: auto;
@@ -311,17 +321,16 @@ body {
 .speed-controls {
   display: flex;
   gap: 8px;
-  margin-top: 18px;
 }
 
 .speed-btn {
   flex: 1;
-  padding: 8px 0;
+  padding: 14px 0;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.03em;
 }
@@ -332,31 +341,9 @@ body {
   color: var(--bg);
 }
 
-.progress-track {
-  margin-top: 18px;
-  height: 4px;
-  border-radius: 2px;
-  background: rgba(255, 255, 255, 0.08);
-  overflow: hidden;
-}
-
-.progress-fill {
-  width: 0%;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--gold);
-  transition: width 0.3s ease;
-}
-
-.controls {
-  margin-top: 20px;
-  display: flex;
-  justify-content: center;
-}
-
 .control-btn {
-  width: 52px;
-  height: 52px;
+  width: 60px;
+  height: 60px;
   border-radius: 50%;
   border: none;
   background: var(--gold);
@@ -371,18 +358,21 @@ body {
   transform: scale(0.96);
 }
 
-/* Footer */
+/* Footer / control bar — full width, flush edge-to-edge, fills the
+   remaining ~45% of the screen below the photo once a tour is active. */
 
 .app-footer {
   text-align: center;
 }
 
-/* Once a tour is active the fixed drawer handle (56px) is permanently
-   visible above the safe-area inset, so the footer needs matching bottom
-   clearance or its own content (playback controls) would render underneath
-   it and be untappable. */
 .app.has-player .app-footer {
-  padding-bottom: calc(env(safe-area-inset-bottom) + 72px);
+  flex: none;
+  width: 100%;
+  height: 45vh;
+  height: 45dvh;
+  background: var(--bg);
+  display: flex;
+  align-items: stretch;
 }
 
 .tap-hint {
@@ -411,15 +401,40 @@ body {
   opacity: 0.95;
 }
 
-/* Always-visible playback controls (main screen, never inside the drawer).
-   Right padding keeps every control clear of the floating mic button, which
-   sits fixed at bottom-right regardless of scroll/tour state. */
+/* Always-visible playback controls — anchored inside the control bar as
+   three stacked rows (speed pills, main controls, tap-to-read), never
+   floating and never hidden inside the drawer. */
 .tour-controls {
-  padding-right: 76px;
+  flex: 1;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  padding: 20px 16px calc(env(safe-area-inset-bottom) + 10px);
 }
 
-.tour-controls .speed-controls {
-  margin-top: 0;
+.main-controls-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+}
+
+/* Mic sits in the control bar's main row now (not floating), sized smaller
+   than the play/pause button per the row-2 layout. */
+.control-placeholder {
+  width: 48px;
+  height: 48px;
+}
+
+.tap-to-read-row {
+  border: none;
+  background: transparent;
+  color: var(--gold);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 6px;
 }
 
 /* iOS/Android PWA install banner — slides up from the bottom, above
@@ -566,21 +581,20 @@ body {
   }
 }
 
-/* Tap-to-talk mic button — floats bottom-right, always tappable during a
-   tour (mid-narration or during the watching/cooldown phase alike). */
+/* Tap-to-talk mic button — anchored in the control bar's main row (left
+   slot), always tappable during a tour (mid-narration or during the
+   watching/cooldown phase alike). Smaller than the play/pause button next
+   to it, per the row-2 layout. */
 
 .mic-btn {
-  position: fixed;
-  right: 24px;
-  bottom: calc(env(safe-area-inset-bottom) + 84px);
-  z-index: 25;
-  width: 56px;
-  height: 56px;
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
   border: none;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-secondary);
-  font-size: 22px;
+  font-size: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -610,11 +624,14 @@ body {
   }
 }
 
+/* Live transcript + "tap to stop" hint float just above the control bar
+   (which occupies the bottom 45% of the screen once a tour is active). */
 .ask-subtitle {
   position: fixed;
   left: 24px;
   right: 24px;
-  bottom: calc(env(safe-area-inset-bottom) + 150px);
+  bottom: calc(45vh + 12px);
+  bottom: calc(45dvh + 12px);
   z-index: 25;
   padding: 12px 16px;
   border-radius: 14px;
@@ -628,14 +645,17 @@ body {
 
 .listening-hint {
   position: fixed;
-  right: 24px;
-  bottom: calc(env(safe-area-inset-bottom) + 144px);
+  left: 0;
+  right: 0;
+  bottom: calc(45vh + 12px);
+  bottom: calc(45dvh + 12px);
   z-index: 25;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--gold);
   text-transform: uppercase;
+  text-align: center;
 }
 
 /* Settings drawer — slides in from the right. */
