@@ -21,8 +21,10 @@ const installBannerClose = document.getElementById("install-banner-close");
 const installBannerCta = document.getElementById("install-banner-cta");
 const installBannerIosOnly = document.querySelectorAll("[data-ios-only]");
 const micBtn = document.getElementById("mic-btn");
+const cameraBtn = document.getElementById("camera-btn");
 const askSubtitle = document.getElementById("ask-subtitle");
 const listeningHint = document.getElementById("listening-hint");
+const toastEl = document.getElementById("toast");
 const settingsBtn = document.getElementById("settings-btn");
 const settingsDrawer = document.getElementById("settings-drawer");
 const settingsOverlay = document.getElementById("settings-overlay");
@@ -462,6 +464,27 @@ drawerClose.addEventListener("click", (event) => {
   event.stopPropagation();
   playerCard.classList.remove("is-open");
 });
+
+cameraBtn.addEventListener("click", (event) => {
+  event.stopPropagation();
+  handleCameraTap();
+});
+
+// Placeholder for the camera feature — swap this implementation for real
+// capture functionality later; the button/toast scaffolding stays the same.
+function handleCameraTap() {
+  showToast("Camera feature coming soon");
+}
+
+let toastHideTimeout = null;
+function showToast(message) {
+  clearTimeout(toastHideTimeout);
+  toastEl.textContent = message;
+  toastEl.classList.add("is-visible");
+  toastHideTimeout = setTimeout(() => {
+    toastEl.classList.remove("is-visible");
+  }, 2200);
+}
 
 let drawerTouchStartY = null;
 playerCard.addEventListener(

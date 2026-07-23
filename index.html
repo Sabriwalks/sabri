@@ -141,7 +141,7 @@
             <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
           </button>
 
-          <div class="control-placeholder" aria-hidden="true"></div>
+          <button id="camera-btn" class="camera-btn" aria-label="Take a photo">📷</button>
         </div>
 
         <button id="drawer-handle" class="tap-to-read-row" aria-label="Show story details">Tap to read</button>
@@ -163,6 +163,9 @@
 
   <p id="ask-subtitle" class="ask-subtitle hidden"></p>
   <p id="listening-hint" class="listening-hint hidden">Tap to stop</p>
+
+  <!-- Generic toast, currently only used by the camera placeholder button. -->
+  <p id="toast" class="toast" role="status" aria-live="polite"></p>
 
   <!-- Settings drawer, slides in from the right. -->
   <div id="settings-overlay" class="settings-overlay hidden"></div>

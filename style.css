@@ -55,29 +55,33 @@ body {
   display: none !important;
 }
 
-/* Header */
+/* Header — a fixed-height row that always sits above the photo in normal
+   document flow (never an overlay), so the settings button can never be
+   pushed off-screen or covered by anything below it. */
 
 .app-header {
   position: relative;
+  flex-shrink: 0;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
 }
 
-/* Overlaid on top of the photo once a tour is active, rather than pushing
-   it down — the photo's own gradient overlay already keeps the logo/gear
-   readable, so this is what makes the photo truly reach the top edge. */
+/* Active tour: the shell's own top padding is dropped (see .app.has-player
+   below), so the safe-area inset has to be reserved here instead, on top of
+   the fixed 60px of real header content. */
 .app.has-player .app-header {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 5;
-  padding: calc(env(safe-area-inset-top) + 18px) 24px 0;
+  height: calc(60px + env(safe-area-inset-top));
+  padding-top: env(safe-area-inset-top);
 }
 
 .settings-btn {
   position: absolute;
-  top: 0;
+  top: 50%;
   right: 0;
+  transform: translateY(-50%);
   width: 36px;
   height: 36px;
   border: none;
@@ -88,6 +92,13 @@ body {
   align-items: center;
   justify-content: center;
   z-index: 2;
+}
+
+/* .app's own side padding is dropped in the active-tour shell (see
+   .app.has-player below), so the 24px inset has to be reapplied here
+   directly or the button would sit flush against the true screen edge. */
+.app.has-player .settings-btn {
+  right: 24px;
 }
 
 .logo {
@@ -114,13 +125,16 @@ body {
   justify-content: center;
 }
 
-/* Photo area fills a fixed ~55% of the screen, flush edge-to-edge (no side
-   margins), with rounded corners only where it meets the control bar. */
+/* Photo area fills ~45% of the space below the fixed header, flush
+   edge-to-edge (no side margins), with rounded corners only where it meets
+   the control bar. Computed off the space remaining after the header (not
+   the full viewport) so the two always add up correctly regardless of the
+   safe-area inset. */
 .app.has-player .location-section {
   flex: none;
   width: 100%;
-  height: 55vh;
-  height: 55dvh;
+  height: calc((100vh - 60px - env(safe-area-inset-top)) * 0.45);
+  height: calc((100dvh - 60px - env(safe-area-inset-top)) * 0.45);
   border-radius: 0 0 8px 8px;
 }
 
@@ -365,11 +379,13 @@ body {
   text-align: center;
 }
 
+/* Fills whatever's left after the fixed header and the 45%-height photo —
+   effectively the other 55%, without needing its own explicit height (and
+   without any rounding gap between the two). */
 .app.has-player .app-footer {
-  flex: none;
+  flex: 1;
+  min-height: 0;
   width: 100%;
-  height: 45vh;
-  height: 45dvh;
   background: var(--bg);
   display: flex;
   align-items: stretch;
@@ -420,11 +436,27 @@ body {
   padding: 0 8px;
 }
 
-/* Mic sits in the control bar's main row now (not floating), sized smaller
-   than the play/pause button per the row-2 layout. */
-.control-placeholder {
+/* Camera button balances the mic on the opposite side of play/pause —
+   same footprint as the mic, always gold (not gated on any "available"
+   state the way the mic is). Placeholder for now; swap handleCameraTap()
+   in app.js for real capture functionality later without touching this. */
+.camera-btn {
+  flex-shrink: 0;
   width: 48px;
   height: 48px;
+  border: none;
+  border-radius: 50%;
+  background: var(--gold);
+  color: var(--bg);
+  font-size: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 24px var(--gold-glow);
+}
+
+.camera-btn:active {
+  transform: scale(0.96);
 }
 
 .tap-to-read-row {
@@ -625,13 +657,13 @@ body {
 }
 
 /* Live transcript + "tap to stop" hint float just above the control bar
-   (which occupies the bottom 45% of the screen once a tour is active). */
+   (which occupies ~55% of the screen, below the header, once active). */
 .ask-subtitle {
   position: fixed;
   left: 24px;
   right: 24px;
-  bottom: calc(45vh + 12px);
-  bottom: calc(45dvh + 12px);
+  bottom: calc((100vh - 60px - env(safe-area-inset-top)) * 0.55 + 12px);
+  bottom: calc((100dvh - 60px - env(safe-area-inset-top)) * 0.55 + 12px);
   z-index: 25;
   padding: 12px 16px;
   border-radius: 14px;
@@ -647,8 +679,8 @@ body {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: calc(45vh + 12px);
-  bottom: calc(45dvh + 12px);
+  bottom: calc((100vh - 60px - env(safe-area-inset-top)) * 0.55 + 12px);
+  bottom: calc((100dvh - 60px - env(safe-area-inset-top)) * 0.55 + 12px);
   z-index: 25;
   font-size: 11px;
   font-weight: 600;
@@ -656,6 +688,31 @@ body {
   color: var(--gold);
   text-transform: uppercase;
   text-align: center;
+}
+
+/* Generic toast — currently only used by the camera placeholder button. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom) + 24px);
+  transform: translate(-50%, 12px);
+  z-index: 60;
+  padding: 12px 20px;
+  border-radius: 999px;
+  background: rgba(15, 25, 35, 0.95);
+  border: 1px solid var(--border);
+  color: var(--white);
+  font-size: 13px;
+  font-weight: 500;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  white-space: nowrap;
+}
+
+.toast.is-visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
 }
 
 /* Settings drawer — slides in from the right. */
