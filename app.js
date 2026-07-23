@@ -33,6 +33,32 @@ const voiceCards = document.querySelectorAll(".voice-card");
 const depthPills = document.querySelectorAll(".depth-pill");
 const languageSelect = document.getElementById("language-select");
 const resetOnboardingBtn = document.getElementById("reset-onboarding-btn");
+const accountSignedIn = document.getElementById("account-signed-in");
+const accountGuest = document.getElementById("account-guest");
+const accountNameEl = document.getElementById("account-name");
+const accountEmailEl = document.getElementById("account-email");
+const signOutBtn = document.getElementById("sign-out-btn");
+const settingsGoogleBtn = document.getElementById("settings-google-btn");
+
+// --- Supabase client (frontend uses the anon key only; the service role
+// key never leaves server.js). SUPABASE_URL/SUPABASE_ANON_KEY are injected
+// into the page by server.js's renderIndexHtml(). ---
+// Named supabaseClient (not `supabase`) — the CDN script itself creates a
+// global `window.supabase` namespace object, and declaring a top-level
+// `const supabase` collides with it (SyntaxError: already declared).
+const supabaseClient =
+  window.supabase && window.SUPABASE_URL && window.SUPABASE_ANON_KEY
+    ? window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY)
+    : null;
+
+let currentUser = null; // Supabase auth user, or null for a guest
+let visitedPlaceIds = new Set(); // cross-session — fetched after login
+let crossSessionVisitedPlaceNames = []; // last 5 place names, sent to every /api/narrate + /api/ask
+let returningUserContext = null; // {recentSessions, recentPlaces} — first narration only
+let isFirstNarrationOfSession = true;
+let tourStartedAt = null;
+let totalNarrationsThisSession = 0;
+let totalQuestionsThisSession = 0;
 
 let watchId = null;
 let lastPosition = null;
@@ -61,17 +87,25 @@ let hasShownFastWelcome = false;
 const GPS_STABILIZATION_METERS = 30;
 const GPS_STABILIZATION_READINGS = 2;
 
+// Last 3 raw GPS fixes, used only to derive the user's actual direction of
+// TRAVEL — distinct from compass heading (which way the phone points, not
+// necessarily the way the user is walking).
+let travelHistory = [];
+const TRAVEL_HISTORY_SIZE = 3;
+const TRAVEL_MIN_METERS = 10;
+
 // Three-tier location state. orientationCenter/isOriented track whether
 // we've given the user a neighborhood orientation for their current area;
 // narratedPlaceIds ensures nothing (neighborhood or specific) is ever
-// narrated twice in a session.
+// narrated twice in a session. visitedPlaceIds (cross-session, above) is
+// merged with this everywhere a candidate place gets filtered.
 let orientationCenter = null;
 let isOriented = false;
 const narratedPlaceIds = new Set();
 
-// Short-term memory: the last 5 places narrated (+ any questions asked
-// about each), sent to /api/narrate and /api/ask so Sabri has context of
-// the walk so far and never repeats itself.
+// Short-term memory: every narration and every question/answer pair, sent
+// (last 5) to /api/narrate and /api/ask so Sabri has context of the walk so
+// far, can reference earlier stops, and never repeats itself.
 const sessionLog = [];
 
 // Pacing: once a narration finishes, wait for both a time and a distance
@@ -124,15 +158,18 @@ const PLACE_TYPE_LABELS = {
   establishment: "Establishment",
 };
 
-// --- Onboarding (first-launch profile capture) ---
+// --- Onboarding (first-launch profile capture + Google sign-in) ---
 
 const ONBOARDED_KEY = "sabri_onboarded";
 const USER_PROFILE_KEY = "sabri_user_profile";
+const ONBOARDING_DRAFT_KEY = "sabri_onboarding_draft";
 
 const onboarding = document.getElementById("onboarding");
 const onboardingSteps = document.querySelectorAll(".onboarding-step");
-const onboardingDots = document.querySelectorAll(".onboarding-dot");
 const onboardingNameInput = document.getElementById("onboarding-name");
+const onboardingWelcomeNextBtn = document.getElementById("onboarding-welcome-next");
+const onboardingGoogleBtn = document.getElementById("onboarding-google-btn");
+const onboardingGuestBtn = document.getElementById("onboarding-guest-btn");
 const onboardingFinishBtn = document.getElementById("onboarding-finish");
 
 let onboardingStepIndex = 0;
@@ -157,19 +194,18 @@ function loadUserProfile() {
 
 let userProfile = loadUserProfile();
 
-if (isOnboarded()) {
-  onboarding.classList.add("hidden");
-} else {
-  onboarding.classList.remove("hidden");
+function updateNameSlots() {
+  const name = onboardingAnswers.name || userProfile?.name || "friend";
+  document.querySelectorAll("[data-name-slot]").forEach((el) => {
+    el.textContent = name;
+  });
 }
 
 function goToOnboardingStep(index) {
   onboardingStepIndex = index;
+  updateNameSlots();
   onboardingSteps.forEach((step) => {
     step.classList.toggle("is-active", Number(step.dataset.step) === index);
-  });
-  onboardingDots.forEach((dot) => {
-    dot.classList.toggle("is-active", Number(dot.dataset.dot) === index);
   });
 }
 
@@ -183,7 +219,7 @@ onboardingSteps.forEach((step) => {
   const nextBtn = step.querySelector("[data-next]");
   if (nextBtn) {
     nextBtn.addEventListener("click", () => {
-      if (step.dataset.step === "0") {
+      if (step.dataset.step === "1") {
         onboardingAnswers.name = onboardingNameInput.value.trim();
       }
       advanceOnboarding();
@@ -209,32 +245,121 @@ onboardingSteps.forEach((step) => {
 
   const pillsContainer = step.querySelector(".onboarding-pills");
   if (pillsContainer) {
+    const nextBtnForPills = step.querySelector("[data-next]");
     pillsContainer.querySelectorAll(".onboarding-pill").forEach((pill) => {
       pill.addEventListener("click", () => {
         pill.classList.toggle("is-selected");
         onboardingAnswers.interests = Array.from(pillsContainer.querySelectorAll(".onboarding-pill.is-selected")).map(
           (p) => p.dataset.value
         );
+        if (nextBtnForPills) nextBtnForPills.disabled = onboardingAnswers.interests.length === 0;
       });
     });
   }
 });
 
-if (onboardingFinishBtn) {
-  onboardingFinishBtn.addEventListener("click", () => {
-    userProfile = { ...onboardingAnswers };
-    try {
-      localStorage.setItem(USER_PROFILE_KEY, JSON.stringify(userProfile));
-      localStorage.setItem(ONBOARDED_KEY, "true");
-    } catch (error) {
-      // localStorage unavailable — onboarding just won't persist.
+if (onboardingNameInput) {
+  onboardingNameInput.addEventListener("input", () => {
+    if (onboardingNameInput.value.trim().length >= 2) {
+      onboardingWelcomeNextBtn.classList.remove("hidden");
+    } else {
+      onboardingWelcomeNextBtn.classList.add("hidden");
     }
-    // Keep the settings panel's depth pill in sync with the onboarding choice.
-    settings.depth = userProfile.depth || settings.depth;
-    saveSettings();
-    applySettingsToUI();
-    onboarding.classList.add("hidden");
   });
+}
+
+function completeOnboarding() {
+  userProfile = { ...onboardingAnswers };
+  try {
+    localStorage.setItem(USER_PROFILE_KEY, JSON.stringify(userProfile));
+    localStorage.setItem(ONBOARDED_KEY, "true");
+  } catch (error) {
+    // localStorage unavailable — onboarding just won't persist.
+  }
+  // Keep the settings panel's depth pill in sync with the onboarding choice.
+  settings.depth = userProfile.depth || settings.depth;
+  saveSettings();
+  applySettingsToUI();
+  onboarding.classList.add("hidden");
+  initializeAuthState();
+}
+
+if (onboardingFinishBtn) {
+  onboardingFinishBtn.addEventListener("click", completeOnboarding);
+}
+
+if (onboardingGuestBtn) {
+  onboardingGuestBtn.addEventListener("click", () => {
+    goToOnboardingStep(7);
+  });
+}
+
+if (onboardingGoogleBtn) {
+  onboardingGoogleBtn.addEventListener("click", () => {
+    try {
+      localStorage.setItem(ONBOARDING_DRAFT_KEY, JSON.stringify(onboardingAnswers));
+    } catch (error) {
+      // Draft won't survive the redirect — the post-auth resume falls back
+      // to the Supabase user's own name/email instead.
+    }
+    signInWithGoogle();
+  });
+}
+
+function signInWithGoogle() {
+  if (!supabaseClient) {
+    showToast("Sign in isn't available right now.");
+    return;
+  }
+  supabaseClient.auth.signInWithOAuth({
+    provider: "google",
+    options: { redirectTo: "https://getsabri.com/auth/callback" },
+  });
+}
+
+// If the user tapped "Sign in with Google" from onboarding, the page just
+// did a full redirect out to Google and back — every in-memory JS variable
+// (including onboardingAnswers) was wiped. This restores the draft saved
+// right before the redirect, confirms the sign-in actually completed, saves
+// the profile, and jumps straight to the "ready" screen instead of asking
+// the user to redo 5 screens they already answered.
+async function resumeOnboardingAfterAuth() {
+  const session = supabaseClient ? (await supabaseClient.auth.getSession()).data?.session : null;
+
+  if (!session) {
+    // Sign-in didn't complete (cancelled, or the draft is stale) — fall
+    // back to the normal splash flow instead of leaving the user stuck.
+    if (onboardingStepIndex === 0) advanceOnboarding();
+    return;
+  }
+
+  let draftAnswers = null;
+  try {
+    const raw = localStorage.getItem(ONBOARDING_DRAFT_KEY);
+    if (raw) draftAnswers = JSON.parse(raw);
+  } catch (error) {
+    draftAnswers = null;
+  }
+
+  const fallbackName =
+    session.user.user_metadata?.full_name?.split(" ")[0] ||
+    session.user.user_metadata?.name?.split(" ")[0] ||
+    session.user.email?.split("@")[0] ||
+    "friend";
+
+  Object.assign(onboardingAnswers, draftAnswers || { name: fallbackName });
+  userProfile = { ...onboardingAnswers };
+  currentUser = session.user;
+
+  try {
+    localStorage.setItem(USER_PROFILE_KEY, JSON.stringify(userProfile));
+    localStorage.removeItem(ONBOARDING_DRAFT_KEY);
+  } catch (error) {
+    // Non-fatal.
+  }
+
+  saveProfileToSupabase();
+  goToOnboardingStep(7);
 }
 
 if (resetOnboardingBtn) {
@@ -242,12 +367,185 @@ if (resetOnboardingBtn) {
     try {
       localStorage.removeItem(ONBOARDED_KEY);
       localStorage.removeItem(USER_PROFILE_KEY);
+      localStorage.removeItem(ONBOARDING_DRAFT_KEY);
     } catch (error) {
       // ignore
     }
     location.reload();
   });
 }
+
+// Skip the splash's 2s auto-advance entirely when we're resuming a
+// just-completed Google sign-in redirect — otherwise the timer and the
+// async session check race, and the timer usually wins.
+const hasPendingAuthResume = (() => {
+  try {
+    return !isOnboarded() && !!localStorage.getItem(ONBOARDING_DRAFT_KEY);
+  } catch (error) {
+    return false;
+  }
+})();
+
+if (isOnboarded()) {
+  onboarding.classList.add("hidden");
+} else {
+  onboarding.classList.remove("hidden");
+  if (hasPendingAuthResume) {
+    resumeOnboardingAfterAuth();
+  } else {
+    setTimeout(() => {
+      if (onboardingStepIndex === 0) advanceOnboarding();
+    }, 2000);
+  }
+}
+
+// --- Auth state (Supabase session, cross-session history) ---
+
+async function initializeAuthState() {
+  if (!supabaseClient) return;
+
+  const { data } = await supabaseClient.auth.getSession();
+  currentUser = data?.session?.user || null;
+
+  supabaseClient.auth.onAuthStateChange((_event, session) => {
+    currentUser = session?.user || null;
+    updateAccountSettingsUI();
+  });
+
+  updateAccountSettingsUI();
+
+  if (currentUser) {
+    await loadVisitedPlaceIds();
+  }
+}
+
+async function loadVisitedPlaceIds() {
+  if (!currentUser) return;
+  try {
+    const response = await fetch(`/api/auth/visited-place-ids?userId=${encodeURIComponent(currentUser.id)}`);
+    const data = await response.json();
+    if (response.ok && Array.isArray(data.placeIds)) {
+      visitedPlaceIds = new Set(data.placeIds);
+    }
+  } catch (error) {
+    // Non-fatal — this run just won't cross-session-filter.
+  }
+}
+
+async function loadReturningUserContext() {
+  if (!currentUser) return;
+  try {
+    const response = await fetch(`/api/auth/user-history?userId=${encodeURIComponent(currentUser.id)}`);
+    const data = await response.json();
+    if (response.ok) {
+      returningUserContext = {
+        recentSessions: (data.recentSessions || []).slice(0, 3),
+        recentPlaces: (data.recentPlaces || []).slice(0, 10),
+      };
+      crossSessionVisitedPlaceNames = (data.recentPlaces || [])
+        .slice(0, 5)
+        .map((place) => place.place_name)
+        .filter(Boolean);
+    }
+  } catch (error) {
+    // Non-fatal — the first narration just won't have returning-user framing.
+  }
+}
+
+async function saveProfileToSupabase() {
+  if (!currentUser) return;
+  try {
+    await fetch("/api/auth/save-profile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: currentUser.id, profile: userProfile }),
+    });
+  } catch (error) {
+    // Non-fatal — profile still persists locally via localStorage.
+  }
+}
+
+async function saveVisitToSupabase(place, narrationText) {
+  if (!currentUser) return;
+  try {
+    await fetch("/api/auth/save-visit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: currentUser.id,
+        placeId: place.placeId,
+        placeName: place.name,
+        neighborhood: currentNeighborhoodName,
+        city: null,
+        narrationSummary: narrationText.slice(0, 200),
+      }),
+    });
+  } catch (error) {
+    // Non-fatal — local session state still works this run.
+  }
+}
+
+// Fired when the app is backgrounded/closed — uses sendBeacon so the
+// request actually survives the page being torn down, which a plain fetch
+// often doesn't.
+function saveSessionToSupabase() {
+  if (!currentUser) return;
+  const payload = JSON.stringify({
+    userId: currentUser.id,
+    neighborhood: currentNeighborhoodName,
+    city: null,
+    placesVisited: Array.from(narratedPlaceIds),
+    totalNarrations: totalNarrationsThisSession,
+    questionsAsked: totalQuestionsThisSession,
+  });
+
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon("/api/auth/save-session", new Blob([payload], { type: "application/json" }));
+  } else {
+    fetch("/api/auth/save-session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+      keepalive: true,
+    }).catch(() => {});
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && currentUser && tourStartedAt) {
+    saveSessionToSupabase();
+  }
+});
+
+function updateAccountSettingsUI() {
+  if (!accountSignedIn || !accountGuest) return;
+
+  if (currentUser) {
+    accountSignedIn.classList.remove("hidden");
+    accountGuest.classList.add("hidden");
+    accountNameEl.textContent = userProfile?.name || currentUser.user_metadata?.full_name || "Signed in";
+    accountEmailEl.textContent = currentUser.email || "";
+  } else {
+    accountSignedIn.classList.add("hidden");
+    accountGuest.classList.remove("hidden");
+  }
+}
+
+if (signOutBtn) {
+  signOutBtn.addEventListener("click", async () => {
+    if (supabaseClient) await supabaseClient.auth.signOut();
+    currentUser = null;
+    visitedPlaceIds = new Set();
+    updateAccountSettingsUI();
+    showToast("Signed out");
+  });
+}
+
+if (settingsGoogleBtn) {
+  settingsGoogleBtn.addEventListener("click", signInWithGoogle);
+}
+
+initializeAuthState();
 
 // --- Settings (voice / tour depth / language), persisted to localStorage ---
 
@@ -343,6 +641,7 @@ settingsClose.addEventListener("click", closeSettings);
 settingsOverlay.addEventListener("click", closeSettings);
 
 function openSettings() {
+  updateAccountSettingsUI();
   settingsDrawer.classList.add("is-open");
   settingsDrawer.setAttribute("aria-hidden", "false");
   settingsOverlay.classList.remove("hidden");
@@ -595,11 +894,20 @@ function startTour() {
   }
 
   recentPositions = [];
+  travelHistory = [];
   gpsStabilized = false;
   hasShownFastWelcome = false;
   lastPosition = null;
+  tourStartedAt = Date.now();
+  isFirstNarrationOfSession = true;
+  totalNarrationsThisSession = 0;
+  totalQuestionsThisSession = 0;
   pulseEl.classList.remove("is-locked");
   micBtn.classList.add("is-available");
+
+  if (currentUser) {
+    loadReturningUserContext();
+  }
 
   statusText.textContent = "Finding your location...";
   watchId = navigator.geolocation.watchPosition(onLocation, onLocationError, {
@@ -615,6 +923,7 @@ function onLocation(position) {
   if (typeof heading === "number" && !Number.isNaN(heading)) {
     lastHeading = heading;
   }
+  recordTravelPosition(latitude, longitude);
 
   // Immediate feedback the moment any fix arrives, before GPS has settled.
   if (!hasShownFastWelcome) {
@@ -657,6 +966,48 @@ function isGpsStable(positions) {
     }
   }
   return true;
+}
+
+// Stores raw GPS fixes (not the stabilized/significant-move-filtered ones
+// above) purely to derive direction of travel — a short, fast-moving
+// window is more accurate for that than the narration pipeline's own
+// slower-moving position tracking.
+function recordTravelPosition(latitude, longitude) {
+  travelHistory.push({ latitude, longitude, timestamp: Date.now() });
+  if (travelHistory.length > TRAVEL_HISTORY_SIZE) {
+    travelHistory.shift();
+  }
+}
+
+// Direction of TRAVEL (which way the user is actually walking) as derived
+// from consecutive GPS fixes — distinct from compass heading (which way the
+// phone is pointing, which can differ, e.g. if held sideways).
+function computeDirectionOfTravel() {
+  if (travelHistory.length < 2) return null;
+  const oldest = travelHistory[0];
+  const newest = travelHistory[travelHistory.length - 1];
+  const moved = distanceInMeters(oldest, newest);
+  if (moved < TRAVEL_MIN_METERS) return null;
+
+  const bearing = travelBearingDegrees(oldest.latitude, oldest.longitude, newest.latitude, newest.longitude);
+  return bearingToCompassWord(bearing);
+}
+
+function travelBearingDegrees(lat1, lng1, lat2, lng2) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const toDeg = (rad) => (rad * 180) / Math.PI;
+  const dLng = toRad(lng2 - lng1);
+  const y = Math.sin(dLng) * Math.cos(toRad(lat2));
+  const x =
+    Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) - Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLng);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+function bearingToCompassWord(bearing) {
+  if (bearing === null || bearing === undefined || Number.isNaN(bearing)) return null;
+  const directions = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"];
+  const index = ((Math.round(bearing / 45) % 8) + 8) % 8;
+  return directions[index];
 }
 
 // Fires once, on the very first GPS fix, so the user sees proof the app is
@@ -745,7 +1096,7 @@ async function runNeighborhoodOrientation(latitude, longitude) {
   const place = await fetchNearbyPlace(latitude, longitude, NEIGHBORHOOD_PLACE_TYPES, { strategy: "nearest" });
   isOriented = true;
 
-  if (!place || narratedPlaceIds.has(place.placeId)) {
+  if (!place || narratedPlaceIds.has(place.placeId) || visitedPlaceIds.has(place.placeId)) {
     statusText.textContent = "Keep walking, discovering...";
     return;
   }
@@ -761,7 +1112,9 @@ async function runSpecificZoomIn(latitude, longitude, heading) {
   const contextPlaces = await fetchContextPlaces(latitude, longitude, heading);
   lastContextPlaces = contextPlaces;
 
-  const newPlaces = contextPlaces.filter((place) => !narratedPlaceIds.has(place.placeId));
+  const newPlaces = contextPlaces.filter(
+    (place) => !narratedPlaceIds.has(place.placeId) && !visitedPlaceIds.has(place.placeId)
+  );
 
   if (newPlaces.length === 0) {
     // STEP 3 - nothing new nearby; keep watching as the user walks.
@@ -843,6 +1196,8 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
   lastNarrationPosition = triggerPosition;
   statusText.textContent = tier === "neighborhood" ? "Getting your bearings..." : "Generating your story...";
 
+  const directionOfTravel = computeDirectionOfTravel();
+
   try {
     const response = await fetch("/api/narrate", {
       method: "POST",
@@ -852,11 +1207,15 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
         place,
         places,
         heading,
+        directionOfTravel,
         depth: settings.depth,
         language: settings.language,
         userProfile,
         sessionLog,
         correctionContext,
+        crossSessionVisitedPlaces: crossSessionVisitedPlaceNames,
+        returningUserContext,
+        isFirstNarrationOfSession,
       }),
     });
     const data = await response.json();
@@ -880,7 +1239,14 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
     if (tier === "neighborhood") {
       currentNeighborhoodName = focusedPlace.name;
     }
-    recordSessionLog(focusedPlace, data.narration);
+    recordNarrationLog(focusedPlace, data.narration, heading, focusedPlace.relativePosition === "in front of");
+    totalNarrationsThisSession += 1;
+    isFirstNarrationOfSession = false;
+
+    if (currentUser) {
+      visitedPlaceIds.add(focusedPlace.placeId);
+      saveVisitToSupabase(focusedPlace, data.narration);
+    }
 
     const typeLabel = PLACE_TYPE_LABELS[focusedPlace.primaryType] || focusedPlace.primaryType;
     locationName.textContent = `${focusedPlace.name} - ${typeLabel}`;
@@ -901,17 +1267,37 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
   }
 }
 
-// Keeps the last 5 places narrated (+ any questions asked about each) as
-// simple short-term memory, passed to /api/narrate and /api/ask.
-function recordSessionLog(place, narrationText) {
+// Keeps a running record of every narration and question/answer pair, sent
+// (last 5) to /api/narrate and /api/ask so Sabri has context of the walk so
+// far and never repeats itself.
+function recordNarrationLog(place, narrationText, heading, wasInFront) {
   sessionLog.push({
+    type: "narration",
     placeName: place.name,
     placeType: place.primaryType,
-    narratedAt: Date.now(),
+    neighborhood: currentNeighborhoodName,
+    timestamp: new Date().toISOString(),
     summary: summarizeForHistory(narrationText),
-    questionsAsked: [],
+    heading: typeof heading === "number" ? heading : null,
+    wasInFront: wasInFront === true,
   });
-  if (sessionLog.length > 5) {
+  if (sessionLog.length > 20) {
+    sessionLog.shift();
+  }
+}
+
+function recordQuestionLog(question, answer, heading) {
+  sessionLog.push({
+    type: "question",
+    placeName: currentPlaceName,
+    placeType: null,
+    neighborhood: currentNeighborhoodName,
+    timestamp: new Date().toISOString(),
+    summary: summarizeForHistory(`Asked: "${question}" — ${answer}`),
+    heading: typeof heading === "number" ? heading : null,
+    wasInFront: null,
+  });
+  if (sessionLog.length > 20) {
     sessionLog.shift();
   }
 }
@@ -1201,6 +1587,8 @@ function stopListening() {
 }
 
 async function askSabri(question) {
+  const directionOfTravel = computeDirectionOfTravel();
+
   try {
     const response = await fetch("/api/ask", {
       method: "POST",
@@ -1210,10 +1598,12 @@ async function askSabri(question) {
         currentPlace: currentPlaceName,
         neighborhood: currentNeighborhoodName,
         heading: lastHeading,
+        directionOfTravel,
         nearbyPlaces: lastContextPlaces,
         sessionLog,
         userProfile,
         correctionContext,
+        crossSessionVisitedPlaces: crossSessionVisitedPlaceNames,
       }),
     });
     const data = await response.json();
@@ -1228,9 +1618,8 @@ async function askSabri(question) {
       correctionContext = data.locationCorrection;
     }
 
-    if (sessionLog.length > 0) {
-      sessionLog[sessionLog.length - 1].questionsAsked.push(question);
-    }
+    recordQuestionLog(question, data.answer, lastHeading);
+    totalQuestionsThisSession += 1;
 
     askSubtitle.classList.add("hidden");
     placeName.textContent = "Sabri";

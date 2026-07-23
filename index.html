@@ -11,82 +11,160 @@
   <link rel="apple-touch-icon" href="/icon-512.png" />
   <title>Sabri — AI Audio Tour Guide</title>
   <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!--SUPABASE_ENV-->
 </head>
 <body>
   <!-- First-launch onboarding. Gates the whole app until "Start Exploring"
        is tapped; never shown again unless reset from settings. -->
   <div id="onboarding" class="onboarding hidden">
     <div class="onboarding-inner">
-      <div class="onboarding-logo">Sabri</div>
-      <p class="onboarding-tagline">Your personal guide. Everywhere.</p>
-
       <div class="onboarding-steps">
-        <div class="onboarding-step is-active" data-step="0">
-          <h2 class="onboarding-question">What's your name?</h2>
-          <input id="onboarding-name" type="text" class="onboarding-input" placeholder="Your name" autocomplete="given-name" />
-          <button class="onboarding-next" data-next>Continue</button>
+
+        <!-- SCREEN 0 - splash, auto-advances after 2s -->
+        <div class="onboarding-step onboarding-step--splash is-active" data-step="0">
+          <div class="onboarding-splash-logo" aria-hidden="true">
+            <svg viewBox="0 0 100 100" width="72" height="72">
+              <circle cx="50" cy="50" r="41" fill="none" stroke="#c9a84c" stroke-width="2" />
+              <path d="M50 12 L60 50 L50 88 L40 50 Z" fill="#c9a84c" />
+              <path d="M12 50 L50 40 L88 50 L50 60 Z" fill="#c9a84c" />
+              <circle cx="50" cy="50" r="5" fill="#c9a84c" />
+            </svg>
+          </div>
+          <p class="onboarding-splash-tagline">Your personal guide. Everywhere.</p>
         </div>
 
+        <!-- SCREEN 1 - welcome / name -->
         <div class="onboarding-step" data-step="1">
-          <h2 class="onboarding-question">What brings you here today?</h2>
-          <div class="onboarding-cards" data-single-select data-field="reason">
-            <button class="onboarding-card" data-value="Tourist exploring">Tourist exploring</button>
-            <button class="onboarding-card" data-value="Local discovering">Local discovering</button>
-            <button class="onboarding-card" data-value="Student learning">Student learning</button>
-            <button class="onboarding-card" data-value="Spiritual journey">Spiritual journey</button>
-          </div>
+          <p class="onboarding-wordmark">Sabri</p>
+          <h2 class="onboarding-heading">Before we begin&hellip;</h2>
+          <p class="onboarding-subtext onboarding-subtext--gold">
+            Every great journey starts with a conversation. I'd love to know who I'm walking with.
+          </p>
+          <input
+            id="onboarding-name"
+            type="text"
+            class="onboarding-input onboarding-input--large"
+            placeholder="Your name..."
+            autocomplete="given-name"
+          />
+          <button id="onboarding-welcome-next" class="onboarding-next hidden" data-next>Nice to meet you →</button>
         </div>
 
+        <!-- SCREEN 2 - the reason -->
         <div class="onboarding-step" data-step="2">
-          <h2 class="onboarding-question">What excites you most?</h2>
-          <p class="onboarding-hint">Select all that apply</p>
-          <div class="onboarding-pills">
-            <button class="onboarding-pill" data-value="History">History</button>
-            <button class="onboarding-pill" data-value="Religion &amp; Spirituality">Religion &amp; Spirituality</button>
-            <button class="onboarding-pill" data-value="Architecture">Architecture</button>
-            <button class="onboarding-pill" data-value="Food &amp; Culture">Food &amp; Culture</button>
-            <button class="onboarding-pill" data-value="Hidden Stories">Hidden Stories</button>
-            <button class="onboarding-pill" data-value="People &amp; Community">People &amp; Community</button>
+          <h2 class="onboarding-greeting">Welcome, <span data-name-slot>friend</span>.</h2>
+          <p class="onboarding-question">What brings you here today?</p>
+          <p class="onboarding-subtext">
+            Every place has a thousand stories. The ones I choose for you depend on what moves you.
+          </p>
+          <div class="onboarding-cards onboarding-cards--grid" data-single-select data-field="reason">
+            <button class="onboarding-card" data-value="Discovering somewhere new">
+              <span class="onboarding-card-icon">🌍</span>
+              <span class="onboarding-card-label">Discovering somewhere new</span>
+            </button>
+            <button class="onboarding-card" data-value="Returning somewhere I love">
+              <span class="onboarding-card-icon">💛</span>
+              <span class="onboarding-card-label">Returning somewhere I love</span>
+            </button>
+            <button class="onboarding-card" data-value="Searching for something">
+              <span class="onboarding-card-icon">🔍</span>
+              <span class="onboarding-card-label">Searching for something</span>
+            </button>
+            <button class="onboarding-card" data-value="Just following my feet">
+              <span class="onboarding-card-icon">🚶</span>
+              <span class="onboarding-card-label">Just following my feet</span>
+            </button>
           </div>
-          <button class="onboarding-next" data-next>Continue</button>
         </div>
 
+        <!-- SCREEN 3 - the soul -->
         <div class="onboarding-step" data-step="3">
-          <h2 class="onboarding-question">Who are you exploring with?</h2>
-          <div class="onboarding-cards" data-single-select data-field="companions">
-            <button class="onboarding-card" data-value="Just me">Just me</button>
-            <button class="onboarding-card" data-value="With my partner">With my partner</button>
-            <button class="onboarding-card" data-value="With family">With family</button>
-            <button class="onboarding-card" data-value="With a group">With a group</button>
+          <p class="onboarding-question">What do you carry with you?</p>
+          <p class="onboarding-subtext">
+            Every person I guide carries something. A story, a faith, a curiosity, a wonder. What moves you?
+          </p>
+          <div class="onboarding-pills">
+            <button class="onboarding-pill" data-value="Deep history">Deep history</button>
+            <button class="onboarding-pill" data-value="Faith &amp; spirituality">Faith &amp; spirituality</button>
+            <button class="onboarding-pill" data-value="Hidden stories">Hidden stories</button>
+            <button class="onboarding-pill" data-value="Architecture &amp; beauty">Architecture &amp; beauty</button>
+            <button class="onboarding-pill" data-value="Food &amp; living culture">Food &amp; living culture</button>
+            <button class="onboarding-pill" data-value="People &amp; community">People &amp; community</button>
+            <button class="onboarding-pill" data-value="Politics &amp; society">Politics &amp; society</button>
+            <button class="onboarding-pill" data-value="Art &amp; creativity">Art &amp; creativity</button>
+            <button class="onboarding-pill" data-value="Nature &amp; landscape">Nature &amp; landscape</button>
+            <button class="onboarding-pill" data-value="All of it">All of it</button>
           </div>
+          <button id="onboarding-soul-next" class="onboarding-next" data-next disabled>These are my compass →</button>
         </div>
 
+        <!-- SCREEN 4 - the company -->
         <div class="onboarding-step" data-step="4">
-          <h2 class="onboarding-question">How deep should Sabri go?</h2>
-          <div class="onboarding-depth" data-single-select data-field="depth">
-            <button class="onboarding-depth-option" data-value="surface">
-              <span class="onboarding-depth-name">Quick highlights</span>
-              <span class="onboarding-depth-desc">Keep it moving, key stories only</span>
+          <p class="onboarding-question">Who's walking with you?</p>
+          <p class="onboarding-subtext">I guide everyone a little differently.</p>
+          <div class="onboarding-cards onboarding-cards--grid" data-single-select data-field="companions">
+            <button class="onboarding-card" data-value="Just me">
+              <span class="onboarding-card-icon">🧍</span>
+              <span class="onboarding-card-label">Just me — with my own thoughts</span>
             </button>
-            <button class="onboarding-depth-option is-selected" data-value="standard">
-              <span class="onboarding-depth-name">Balanced</span>
-              <span class="onboarding-depth-desc">Stories with context — recommended</span>
+            <button class="onboarding-card" data-value="Someone I love">
+              <span class="onboarding-card-icon">💑</span>
+              <span class="onboarding-card-label">Someone I love</span>
             </button>
-            <button class="onboarding-depth-option" data-value="deep">
-              <span class="onboarding-depth-name">Deep dives</span>
-              <span class="onboarding-depth-desc">Full history, connections, everything</span>
+            <button class="onboarding-card" data-value="My family">
+              <span class="onboarding-card-icon">👨‍👩‍👧</span>
+              <span class="onboarding-card-label">My family</span>
+            </button>
+            <button class="onboarding-card" data-value="A group of friends">
+              <span class="onboarding-card-icon">👥</span>
+              <span class="onboarding-card-label">A group of friends</span>
             </button>
           </div>
-          <button id="onboarding-finish" class="onboarding-next">Start Exploring</button>
         </div>
-      </div>
 
-      <div class="onboarding-progress" aria-hidden="true">
-        <span class="onboarding-dot is-active" data-dot="0"></span>
-        <span class="onboarding-dot" data-dot="1"></span>
-        <span class="onboarding-dot" data-dot="2"></span>
-        <span class="onboarding-dot" data-dot="3"></span>
-        <span class="onboarding-dot" data-dot="4"></span>
+        <!-- SCREEN 5 - the pace -->
+        <div class="onboarding-step" data-step="5">
+          <p class="onboarding-question">How do you like to travel?</p>
+          <p class="onboarding-subtext">There's no wrong answer — only your answer.</p>
+          <div class="onboarding-pace" data-single-select data-field="depth">
+            <button class="onboarding-pace-option" data-value="deep">
+              <span class="onboarding-pace-title">Take your time →</span>
+              <span class="onboarding-pace-desc">Full stories, deep dives, every connection</span>
+            </button>
+            <button class="onboarding-pace-option" data-value="standard">
+              <span class="onboarding-pace-tag">Recommended</span>
+              <span class="onboarding-pace-title">Stories with room to breathe →</span>
+              <span class="onboarding-pace-desc">Rich but balanced — the recommended way</span>
+            </button>
+            <button class="onboarding-pace-option" data-value="surface">
+              <span class="onboarding-pace-title">Keep it moving →</span>
+              <span class="onboarding-pace-desc">Key highlights, beautiful and brief</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- SCREEN 6 - the save -->
+        <div class="onboarding-step" data-step="6">
+          <p class="onboarding-save-logo" aria-hidden="true">Sabri</p>
+          <h2 class="onboarding-heading"><span data-name-slot>Friend</span>, I've been waiting for someone like you.</h2>
+          <p class="onboarding-subtext">
+            Save your journey so Sabri remembers every place you've explored, every story you've heard, and every
+            question you've asked.
+          </p>
+          <button id="onboarding-google-btn" class="onboarding-google-btn">
+            <span class="onboarding-google-icon" aria-hidden="true">G</span>
+            Sign in with Google
+          </button>
+          <button id="onboarding-guest-btn" class="onboarding-guest-link">or explore without saving →</button>
+        </div>
+
+        <!-- SCREEN 7 - ready -->
+        <div class="onboarding-step" data-step="7">
+          <h2 class="onboarding-heading"><span data-name-slot>Friend</span>, your guide is ready.</h2>
+          <p class="onboarding-subtext">Wherever you go, I'll be there.</p>
+          <button id="onboarding-finish" class="onboarding-next">Start Exploring →</button>
+        </div>
       </div>
     </div>
   </div>
@@ -222,6 +300,21 @@
           <option value="fr">French</option>
           <option value="ru">Russian</option>
         </select>
+      </section>
+
+      <section class="settings-section">
+        <h3 class="settings-section-title">Account</h3>
+
+        <div id="account-signed-in" class="account-signed-in hidden">
+          <p class="account-name" id="account-name">—</p>
+          <p class="account-email" id="account-email">—</p>
+          <button id="sign-out-btn" class="account-btn account-btn--outline">Sign Out</button>
+        </div>
+
+        <div id="account-guest" class="account-guest hidden">
+          <p class="account-guest-copy">Sign in to save your journey across visits.</p>
+          <button id="settings-google-btn" class="account-btn account-btn--gold">Sign in to save your journey</button>
+        </div>
       </section>
 
       <section class="settings-about">

@@ -1,18 +1,33 @@
 const path = require("path");
+const fs = require("fs");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 const { Readable } = require("stream");
 const express = require("express");
 const Anthropic = require("@anthropic-ai/sdk");
 const OpenAI = require("openai");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+// Server-side client only — always uses the service role key, which
+// bypasses Row Level Security, so it must never be sent to the frontend.
+// The frontend gets its own client using the anon key (injected via
+// renderIndexHtml below), which IS safe to expose and is constrained by the
+// RLS policies in supabase/schema.sql.
+const supabaseAdmin =
+  SUPABASE_URL && SUPABASE_SERVICE_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } })
+    : null;
 
 // Default TTS identity — every /api/speak call is pinned to VOICE_CONFIG
 // unless the request explicitly (and validly) asks for a different voice
@@ -94,23 +109,25 @@ const SABRI_SYSTEM_PROMPT =
   "Above all — you make people fall in love with wherever they are. That is " +
   "your gift. That is your purpose. That is what Sabri does.";
 
-// Every narration should leave the listener feeling led forward, never
-// concluded — a real guide is always mid-walk, not wrapping up a lecture.
-const CONTINUITY_GUIDANCE =
-  "Always end every narration with a natural guiding sentence that makes the " +
-  "user feel led and cared for. This should feel like a real guide walking " +
-  "beside them. Examples of the feeling to convey:\n" +
-  '- Directional: "Keep heading north along this street and let the ' +
-  'neighborhood unfold around you"\n' +
-  '- Anticipatory: "As you continue walking you will start to notice the ' +
-  'architecture changing — we are approaching something special"\n' +
-  '- Observational: "Before you move on, look up at the roofline above you ' +
-  '— those water towers have been there since the British Mandate period"\n' +
-  '- Connective: "This street connects to one of the most storied corners ' +
-  'in the whole neighborhood — keep walking and I will tell you about it ' +
-  'when you arrive"\n\n' +
-  "Never make this ending feel like a conclusion. It should always feel like " +
-  "a continuation. The tour never ends — it just moves forward.";
+// Every narration must end with two things: a closing thought on the
+// current place, and a forward-looking transition that makes the walk feel
+// continuous rather than a series of disconnected stops.
+const TRANSITION_GUIDANCE =
+  "End every narration with a natural transition that does one of the " +
+  "following based on what is actually nearby according to the location " +
+  "context you have been given:\n" +
+  '- Directional: Reference a real nearby place and point toward it: "Keep ' +
+  'heading north — we are approaching [nearby place name] and I have a ' +
+  'story for you when we get there"\n' +
+  "- Observational: Point out something specific to notice right now: " +
+  '"Before you move on, look up at the roofline above you"\n' +
+  "- Connective: Connect to something from earlier in the walk if relevant: " +
+  '"This neighborhood actually has a deep connection to what we saw at ' +
+  '[earlier place]"\n' +
+  "- Anticipatory: Build excitement for what is coming without naming it: " +
+  '"The next few minutes of walking are going to surprise you"\n\n' +
+  "Never make the ending feel like a conclusion. The walk never ends — it " +
+  "only continues.";
 
 const TIER_GUIDANCE = {
   neighborhood:
@@ -206,7 +223,57 @@ const CONTEXT_RADIUS_METERS = 50;
 const CONTEXT_PLACE_LIMIT = 5;
 
 app.use(express.json());
-app.use(express.static(__dirname));
+
+// Injects the Supabase URL + anon key into a small inline <script> block so
+// the frontend can create its own client without hardcoding secrets into
+// app.js/index.html — the anon key is safe client-side (it's constrained by
+// the RLS policies in supabase/schema.sql), unlike the service role key
+// above, which never leaves this file.
+function renderIndexHtml() {
+  const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
+  const envScript =
+    "<script>\n" +
+    `  window.SUPABASE_URL = ${JSON.stringify(SUPABASE_URL || "")};\n` +
+    `  window.SUPABASE_ANON_KEY = ${JSON.stringify(SUPABASE_ANON_KEY || "")};\n` +
+    "</script>";
+  return html.replace("<!--SUPABASE_ENV-->", envScript);
+}
+
+// /auth/callback is where Google sends the user back after sign-in. It's
+// not a real static file — Supabase's client-side SDK reads the auth tokens
+// out of the URL itself once this same single-page app loads, so serving
+// index.html here is all the server needs to do.
+app.get(["/", "/index.html", "/auth/callback"], (req, res) => {
+  res.type("html").send(renderIndexHtml());
+});
+
+app.use(express.static(__dirname, { index: false }));
+
+// The 4 tables this app depends on (see supabase/schema.sql).
+const REQUIRED_TABLES = ["profiles", "walk_sessions", "visited_places", "user_questions"];
+
+// supabase-js has no API for running arbitrary DDL, so this can't actually
+// create missing tables — only verify whether supabase/schema.sql has
+// already been applied (via the Supabase SQL editor or `supabase db push`)
+// and report which tables, if any, are still missing.
+async function checkDbSetup() {
+  if (!supabaseAdmin) {
+    return { ok: false, configured: false, missingTables: REQUIRED_TABLES };
+  }
+
+  const missingTables = [];
+  for (const table of REQUIRED_TABLES) {
+    const { error } = await supabaseAdmin.from(table).select("*", { head: true, count: "exact" }).limit(1);
+    if (error) missingTables.push(table);
+  }
+
+  return { ok: missingTables.length === 0, configured: true, missingTables };
+}
+
+app.post("/api/setup-db", async (req, res) => {
+  const status = await checkDbSetup();
+  res.json(status);
+});
 
 app.get("/api/places", async (req, res) => {
   const lat = parseFloat(req.query.lat);
@@ -362,7 +429,21 @@ app.get("/api/photo", async (req, res) => {
 });
 
 app.post("/api/narrate", async (req, res) => {
-  const { tier, place, places, heading, depth, language, userProfile, sessionLog, correctionContext } = req.body || {};
+  const {
+    tier,
+    place,
+    places,
+    heading,
+    directionOfTravel,
+    depth,
+    language,
+    userProfile,
+    sessionLog,
+    correctionContext,
+    crossSessionVisitedPlaces,
+    returningUserContext,
+    isFirstNarrationOfSession,
+  } = req.body || {};
   const resolvedTier = tier === "neighborhood" ? "neighborhood" : "specific";
 
   if (resolvedTier === "neighborhood") {
@@ -383,8 +464,10 @@ app.post("/api/narrate", async (req, res) => {
   const systemPromptParts = [
     SABRI_SYSTEM_PROMPT,
     buildUserProfileGuidance(userProfile),
-    buildSessionLogGuidance(sessionLog),
-    CONTINUITY_GUIDANCE,
+    buildSessionLogGuidance(sessionLog, userProfile?.name),
+    isFirstNarrationOfSession ? buildReturningUserGuidance(returningUserContext, userProfile?.name) : null,
+    buildCrossSessionVisitedGuidance(crossSessionVisitedPlaces),
+    TRANSITION_GUIDANCE,
     PRONUNCIATION_GUIDANCE,
     TIER_GUIDANCE[resolvedTier],
     DEPTH_GUIDANCE[resolvedDepth],
@@ -428,7 +511,7 @@ app.post("/api/narrate", async (req, res) => {
 
     // Specific tier: multi-place + heading reasoning, with structured output
     // so we know exactly which place Claude actually centered the story on.
-    const userMessage = buildSpecificUserMessage(places, heading);
+    const userMessage = buildSpecificUserMessage(places, heading, directionOfTravel);
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 2048,
@@ -458,10 +541,13 @@ app.post("/api/narrate", async (req, res) => {
   }
 });
 
-function buildSpecificUserMessage(places, heading) {
+function buildSpecificUserMessage(places, heading, directionOfTravel) {
   const compassWord = headingToCompassWord(heading);
-  const facingLine = compassWord
-    ? `I am standing here, facing ${compassWord}.`
+  const facingParts = [];
+  if (compassWord) facingParts.push(`facing ${compassWord}`);
+  if (directionOfTravel) facingParts.push(`walking ${directionOfTravel}`);
+  const facingLine = facingParts.length
+    ? `I am standing here, ${facingParts.join(", ")}.`
     : `I am standing here (my facing direction isn't available right now).`;
 
   const placeLines = places
@@ -482,8 +568,18 @@ function buildSpecificUserMessage(places, heading) {
 }
 
 app.post("/api/ask", async (req, res) => {
-  const { question, currentPlace, neighborhood, heading, nearbyPlaces, sessionLog, userProfile, correctionContext } =
-    req.body || {};
+  const {
+    question,
+    currentPlace,
+    neighborhood,
+    heading,
+    directionOfTravel,
+    nearbyPlaces,
+    sessionLog,
+    userProfile,
+    correctionContext,
+    crossSessionVisitedPlaces,
+  } = req.body || {};
 
   if (!question) {
     return res.status(400).json({ error: "question is required." });
@@ -503,12 +599,16 @@ app.post("/api/ask", async (req, res) => {
       `2-3 paragraphs maximum - they are walking and listening, not reading. ` +
       `Stay in character as Sabri at all times.`,
     buildUserProfileGuidance(userProfile),
-    buildSessionLogGuidance(sessionLog),
+    buildSessionLogGuidance(sessionLog, userProfile?.name),
+    buildCrossSessionVisitedGuidance(crossSessionVisitedPlaces),
   ].filter(Boolean);
 
   const compassWord = headingToCompassWord(heading);
-  if (compassWord) {
-    systemPromptParts.push(`The user is currently facing ${compassWord}.`);
+  const facingParts = [];
+  if (compassWord) facingParts.push(`facing ${compassWord}`);
+  if (directionOfTravel) facingParts.push(`walking ${directionOfTravel}`);
+  if (facingParts.length) {
+    systemPromptParts.push(`The user is currently ${facingParts.join(", ")}.`);
   }
 
   if (Array.isArray(nearbyPlaces) && nearbyPlaces.length > 0) {
@@ -598,26 +698,88 @@ function buildUserProfileGuidance(profile) {
   return lines.join("\n");
 }
 
-// Keeps Claude from repeating itself and lets it reference earlier stops.
-function buildSessionLogGuidance(sessionLog) {
-  if (!Array.isArray(sessionLog) || sessionLog.length === 0) return null;
+// Keeps Claude from repeating itself and lets it reference earlier stops —
+// each entry can be a narration or a question/answer pair (see app.js's
+// sessionLog, which tags every entry with `type`).
+function buildSessionLogGuidance(sessionLog, name) {
+  const addressee = name || "this person";
 
+  if (!Array.isArray(sessionLog) || sessionLog.length === 0) {
+    return `Your walk with ${addressee} so far:\nThis is the very beginning of the walk.`;
+  }
+
+  const now = Date.now();
   const entries = sessionLog
     .slice(-5)
-    .map((entry, index) => {
-      const lines = [`${index + 1}. ${entry.placeName || "somewhere nearby"}: ${entry.summary || "a story was shared"}`];
-      if (Array.isArray(entry.questionsAsked) && entry.questionsAsked.length) {
-        lines.push(`   Questions asked: ${entry.questionsAsked.join(" / ")}`);
-      }
-      return lines.join("\n");
+    .map((entry) => {
+      const timestamp = entry.timestamp ? new Date(entry.timestamp).getTime() : NaN;
+      const minutesAgo = Number.isFinite(timestamp) ? Math.max(0, Math.round((now - timestamp) / 60000)) : null;
+      const timeLabel =
+        minutesAgo === null ? "earlier" : minutesAgo === 0 ? "just now" : `${minutesAgo} minute${minutesAgo === 1 ? "" : "s"} ago`;
+      const place = entry.placeName || "somewhere nearby";
+      const summary = entry.summary || (entry.type === "question" ? "a question was asked" : "a story was shared");
+      return `- [${timeLabel}] near ${place}: ${summary}`;
     })
     .join("\n");
 
   return (
-    `So far on this walk you have told them about:\n${entries}\n\n` +
-    `Do not repeat information already covered. Build on what came before. ` +
-    `Reference earlier stops naturally when relevant - "As we saw back at..." ` +
-    `or "This connects to what I mentioned earlier about...".`
+    `Your walk with ${addressee} so far:\n${entries}\n\n` +
+    `Use this context naturally:\n` +
+    `- Never repeat information already covered\n` +
+    `- Reference earlier stops when genuinely relevant: "As I mentioned back ` +
+    `at the Ades Synagogue..." or "This connects to what we saw earlier..."\n` +
+    `- Build a narrative arc across the walk — each stop should feel like ` +
+    `the next chapter, not a fresh start\n` +
+    `- If the user is returning to an area they passed earlier, acknowledge ` +
+    `it: "We are looping back toward..."\n` +
+    `- Track themes that are emerging in what interests this person based ` +
+    `on their questions and engagement`
+  );
+}
+
+// Only added to the very first narration of a session (see app.js's
+// isFirstNarrationOfSession) — earlier walks/places fetched from Supabase
+// for a logged-in user, so Sabri treats them as a returning guest rather
+// than a first-time visitor.
+function buildReturningUserGuidance(returningUserContext, name) {
+  if (!returningUserContext || typeof returningUserContext !== "object") return null;
+  const { recentSessions, recentPlaces } = returningUserContext;
+  const hasSessions = Array.isArray(recentSessions) && recentSessions.length > 0;
+  const hasPlaces = Array.isArray(recentPlaces) && recentPlaces.length > 0;
+  if (!hasSessions && !hasPlaces) return null;
+
+  const addressee = name || "This person";
+  const walkList = hasSessions
+    ? recentSessions
+        .map((session) => [session.neighborhood, session.city].filter(Boolean).join(", "))
+        .filter(Boolean)
+        .join("; ")
+    : "no recorded neighborhoods";
+  const placeList = hasPlaces
+    ? recentPlaces
+        .map((place) => place.place_name || place.placeName)
+        .filter(Boolean)
+        .join(", ")
+    : "nothing yet";
+
+  return (
+    `${addressee} has used Sabri before. Their previous walks: ${walkList}. ` +
+    `Places they have already heard about: ${placeList}. Build on this ` +
+    `history — reference past visits naturally if relevant, never repeat ` +
+    `what they already know, and treat them as someone returning to deepen ` +
+    `their knowledge rather than a first-time visitor.`
+  );
+}
+
+// Sent on every call (not just the first) for a logged-in user, so Claude
+// never re-narrates a place from a previous session even if it somehow
+// still ended up in the candidate list.
+function buildCrossSessionVisitedGuidance(placeNames) {
+  if (!Array.isArray(placeNames) || placeNames.length === 0) return null;
+  const list = placeNames.slice(0, 5).join(", ");
+  return (
+    `This person has previously visited: ${list}. Do not repeat these ` +
+    `places or their stories. Build on what they already know.`
   );
 }
 
@@ -657,6 +819,122 @@ app.post("/api/speak", async (req, res) => {
   } catch (error) {
     res.status(502).json({ error: "Failed to generate speech." });
   }
+});
+
+// --- Auth / Supabase-backed history endpoints ---
+// All of these use supabaseAdmin (the service-role client), which bypasses
+// RLS — that's fine here because these routes are the trusted server side
+// of the app, not a path a browser talks to directly with its own key.
+
+app.post("/api/auth/save-profile", async (req, res) => {
+  const { userId, profile } = req.body || {};
+  if (!userId || !profile) {
+    return res.status(400).json({ error: "userId and profile are required." });
+  }
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: "Supabase is not configured on the server." });
+  }
+
+  const { error } = await supabaseAdmin.from("profiles").upsert(
+    {
+      id: userId,
+      name: profile.name || null,
+      reason: profile.reason || null,
+      interests: Array.isArray(profile.interests) ? profile.interests : [],
+      companions: profile.companions || null,
+      depth: profile.depth || null,
+      home_city: profile.homeCity || null,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "id" }
+  );
+
+  if (error) return res.status(502).json({ error: "Failed to save profile." });
+  res.json({ success: true });
+});
+
+app.post("/api/auth/save-visit", async (req, res) => {
+  const { userId, placeId, placeName, neighborhood, city, narrationSummary } = req.body || {};
+  if (!userId || !placeId) {
+    return res.status(400).json({ error: "userId and placeId are required." });
+  }
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: "Supabase is not configured on the server." });
+  }
+
+  const { error } = await supabaseAdmin.from("visited_places").insert({
+    user_id: userId,
+    place_id: placeId,
+    place_name: placeName || null,
+    neighborhood: neighborhood || null,
+    city: city || null,
+    narration_summary: narrationSummary ? String(narrationSummary).slice(0, 200) : null,
+  });
+
+  if (error) return res.status(502).json({ error: "Failed to save visit." });
+  res.json({ success: true });
+});
+
+app.get("/api/auth/user-history", async (req, res) => {
+  const userId = req.query.userId;
+  if (!userId) return res.status(400).json({ error: "userId query param is required." });
+  if (!supabaseAdmin) return res.status(500).json({ error: "Supabase is not configured on the server." });
+
+  try {
+    const [placesResult, sessionsResult, profileResult] = await Promise.all([
+      supabaseAdmin
+        .from("visited_places")
+        .select("*")
+        .eq("user_id", userId)
+        .order("visited_at", { ascending: false })
+        .limit(20),
+      supabaseAdmin
+        .from("walk_sessions")
+        .select("*")
+        .eq("user_id", userId)
+        .order("started_at", { ascending: false })
+        .limit(3),
+      supabaseAdmin.from("profiles").select("*").eq("id", userId).maybeSingle(),
+    ]);
+
+    res.json({
+      profile: profileResult.data || null,
+      recentPlaces: placesResult.data || [],
+      recentSessions: sessionsResult.data || [],
+    });
+  } catch (error) {
+    res.status(502).json({ error: "Failed to load user history." });
+  }
+});
+
+app.post("/api/auth/save-session", async (req, res) => {
+  const { userId, neighborhood, city, placesVisited, totalNarrations, questionsAsked } = req.body || {};
+  if (!userId) return res.status(400).json({ error: "userId is required." });
+  if (!supabaseAdmin) return res.status(500).json({ error: "Supabase is not configured on the server." });
+
+  const { error } = await supabaseAdmin.from("walk_sessions").insert({
+    user_id: userId,
+    ended_at: new Date().toISOString(),
+    neighborhood: neighborhood || null,
+    city: city || null,
+    places_visited: Array.isArray(placesVisited) ? placesVisited : [],
+    total_narrations: Number.isFinite(totalNarrations) ? totalNarrations : 0,
+    questions_asked: Number.isFinite(questionsAsked) ? questionsAsked : 0,
+  });
+
+  if (error) return res.status(502).json({ error: "Failed to save session." });
+  res.json({ success: true });
+});
+
+app.get("/api/auth/visited-place-ids", async (req, res) => {
+  const userId = req.query.userId;
+  if (!userId) return res.status(400).json({ error: "userId query param is required." });
+  if (!supabaseAdmin) return res.status(500).json({ error: "Supabase is not configured on the server." });
+
+  const { data, error } = await supabaseAdmin.from("visited_places").select("place_id").eq("user_id", userId);
+  if (error) return res.status(502).json({ error: "Failed to load visited place ids." });
+
+  res.json({ placeIds: [...new Set((data || []).map((row) => row.place_id))] });
 });
 
 function extractLocationName(results) {
@@ -805,8 +1083,18 @@ function relativePositionFromHeading(heading, bearing) {
 // Vercel imports this file and calls the exported Express app directly as
 // a serverless function, so only start a listening server for local dev.
 if (require.main === module) {
-  app.listen(PORT, () => {
+  app.listen(PORT, async () => {
     console.log(`Sabri server running at http://127.0.0.1:${PORT}`);
+    const status = await checkDbSetup();
+    if (!status.configured) {
+      console.log(
+        "Supabase is not configured (missing SUPABASE_URL/SUPABASE_SERVICE_KEY) — auth/history features are disabled."
+      );
+    } else if (!status.ok) {
+      console.log(
+        `Supabase tables missing: ${status.missingTables.join(", ")}. Run supabase/schema.sql in the Supabase SQL editor to create them.`
+      );
+    }
   });
 }
 
