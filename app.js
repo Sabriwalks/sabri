@@ -1,4 +1,7 @@
+const appEl = document.querySelector(".app");
 const startBtn = document.getElementById("start-btn");
+const startPrompt = document.getElementById("start-prompt");
+const tourControls = document.getElementById("tour-controls");
 const statusCard = document.getElementById("status-card");
 const statusText = document.getElementById("status-text");
 const locationName = document.getElementById("location-name");
@@ -7,7 +10,6 @@ const pulseEl = document.getElementById("pulse");
 const playerCard = document.getElementById("player-card");
 const drawerHandle = document.getElementById("drawer-handle");
 const drawerClose = document.getElementById("drawer-close");
-const placePhoto = document.getElementById("place-photo");
 const placeName = document.getElementById("place-name");
 const placeDescription = document.getElementById("place-description");
 const speedButtons = document.querySelectorAll(".speed-btn");
@@ -532,15 +534,30 @@ if ("mediaSession" in navigator) {
   }
 }
 
+// A silent, near-zero-length WAV. iOS Safari only "unlocks" an <audio>
+// element for later script-triggered playback (no fresh user gesture, e.g.
+// after a narration is fetched a few seconds later, or via lock-screen/
+// AirPods controls) if that exact element actually started real playback
+// during a user gesture. Calling .play() with no src at all doesn't count
+// on iOS — hence AirPods/background playback regressing even though the
+// desktop pipeline looked fine. Playing this tiny clip inside the tap
+// handler satisfies that requirement reliably.
+const SILENT_AUDIO_DATA_URI =
+  "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+
 function unlockAudio() {
   try {
+    audioPlayer.src = SILENT_AUDIO_DATA_URI;
+    audioPlayer.load();
     const playPromise = audioPlayer.play();
     if (playPromise && typeof playPromise.catch === "function") {
       playPromise.catch(() => {});
     }
     audioPlayer.pause();
+    audioPlayer.currentTime = 0;
   } catch (error) {
-    // Some browsers throw synchronously when there's no src yet — harmless.
+    // Some browsers throw synchronously here — harmless, later playback
+    // just falls back to needing its own gesture on that device.
   }
 }
 
@@ -848,7 +865,6 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
     const photoUrl = focusedPlace.photoReference
       ? `/api/photo?ref=${encodeURIComponent(focusedPlace.photoReference)}&maxwidth=800`
       : null;
-    applyPlacePhoto(photoUrl);
     applyHomePhoto(photoUrl);
 
     startStory(focusedPlace.name, data.narration);
@@ -879,11 +895,6 @@ function recordSessionLog(place, narrationText) {
 
 function summarizeForHistory(text) {
   return text.length > 150 ? `${text.slice(0, 150)}...` : text;
-}
-
-function applyPlacePhoto(url) {
-  // Clearing the inline style falls back to the CSS gradient placeholder.
-  placePhoto.style.backgroundImage = url ? `url("${url}")` : "";
 }
 
 // Crossfades the home-screen background photo in once it's actually
@@ -1036,6 +1047,14 @@ function startStory(title, description) {
   placeDescription.textContent = description;
   placeDescription.classList.remove("story-description--fallback");
   playerCard.classList.remove("hidden");
+
+  // Playback controls (pause/resume, speed) live on the main screen, never
+  // trapped inside the drawer — the drawer is for reading the text only.
+  // This only needs to run once per tour, but toggling classes that are
+  // already set is harmless.
+  appEl.classList.add("has-player");
+  startPrompt.classList.add("hidden");
+  tourControls.classList.remove("hidden");
 }
 
 function play() {
@@ -1196,6 +1215,9 @@ async function askSabri(question) {
     placeDescription.classList.remove("story-description--fallback");
     playerCard.classList.remove("hidden");
     playerCard.classList.add("is-open");
+    appEl.classList.add("has-player");
+    startPrompt.classList.add("hidden");
+    tourControls.classList.remove("hidden");
 
     await speakNarration(data.answer);
 

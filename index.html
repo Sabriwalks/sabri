@@ -115,13 +115,41 @@
     </section>
 
     <footer class="app-footer">
-      <p class="tap-hint">Tap to talk</p>
-      <button id="start-btn" class="start-btn">Start Tour</button>
+      <div id="start-prompt" class="start-prompt">
+        <p class="tap-hint">Tap to talk</p>
+        <button id="start-btn" class="start-btn">Start Tour</button>
+      </div>
+
+      <!-- Always-visible playback controls, shown on the main screen once a
+           tour is active. Never hidden inside the drawer — the drawer is
+           for reading the narration text only. -->
+      <div id="tour-controls" class="tour-controls hidden">
+        <div class="speed-controls" role="group" aria-label="Narration speed">
+          <button class="speed-btn" data-speed="0.75">0.75x</button>
+          <button class="speed-btn is-active" data-speed="1">1.0x</button>
+          <button class="speed-btn" data-speed="1.25">1.25x</button>
+        </div>
+
+        <div class="progress-track">
+          <div class="progress-fill"></div>
+        </div>
+
+        <div class="controls">
+          <button id="play-btn" class="control-btn" aria-label="Play">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          </button>
+          <button id="pause-btn" class="control-btn hidden" aria-label="Pause">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+          </button>
+        </div>
+      </div>
     </footer>
   </div>
 
   <!-- Collapsed by default: only the peek handle with a "tap to read" hint
-       shows while walking. Tap or swipe up to reveal the full narration. -->
+       shows while walking. Tap or swipe up to reveal the full narration.
+       Contains narration text ONLY — playback controls live on the main
+       screen so they're never trapped behind a closed/dragged drawer. -->
   <section id="player-card" class="player-card hidden">
     <button id="drawer-handle" class="drawer-handle" aria-label="Show story details">
       <span class="drawer-handle-bar" aria-hidden="true"></span>
@@ -131,30 +159,9 @@
     <div class="drawer-content">
       <button id="drawer-close" class="drawer-close" aria-label="Hide story details">✕</button>
 
-      <div id="place-photo" class="place-photo" aria-hidden="true"></div>
-
       <p class="now-playing">Now Playing</p>
       <h2 id="place-name" class="story-title">—</h2>
       <p id="place-description" class="story-description">—</p>
-
-      <div class="speed-controls" role="group" aria-label="Narration speed">
-        <button class="speed-btn" data-speed="0.75">0.75x</button>
-        <button class="speed-btn is-active" data-speed="1">1.0x</button>
-        <button class="speed-btn" data-speed="1.25">1.25x</button>
-      </div>
-
-      <div class="progress-track">
-        <div class="progress-fill"></div>
-      </div>
-
-      <div class="controls">
-        <button id="play-btn" class="control-btn" aria-label="Play">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-        </button>
-        <button id="pause-btn" class="control-btn hidden" aria-label="Pause">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
-        </button>
-      </div>
     </div>
   </section>
 
