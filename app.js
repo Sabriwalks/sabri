@@ -320,27 +320,32 @@ function signInWithGoogle() {
     showToast("Sign in isn't available right now.");
     return;
   }
+  // skipBrowserRedirect: false (the default, made explicit here) makes
+  // Supabase navigate the whole page to Google instead of trying a popup —
+  // iOS Safari blocks popups not opened synchronously from the click
+  // handler, which is what was silently swallowing the sign-in attempt.
   supabaseClient.auth.signInWithOAuth({
     provider: "google",
-    options: { redirectTo: "https://getsabri.com/auth/callback" },
+    options: {
+      redirectTo: "https://getsabri.com/auth/callback",
+      skipBrowserRedirect: false,
+    },
   });
 }
 
 // If the user tapped "Sign in with Google" from onboarding, the page just
-// did a full redirect out to Google and back — every in-memory JS variable
-// (including onboardingAnswers) was wiped. This restores the draft saved
-// right before the redirect, confirms the sign-in actually completed, saves
-// the profile, and jumps straight to the "ready" screen instead of asking
-// the user to redo 5 screens they already answered.
+// did a full redirect out to Google and back (redirect mode, not a popup —
+// see signInWithGoogle) — every in-memory JS variable (including
+// onboardingAnswers) was wiped. This restores the draft saved right before
+// the redirect and either:
+//  - sign-in succeeded: saves the profile and skips straight into the main
+//    app, same as finishing onboarding normally — no extra tap needed.
+//  - sign-in didn't complete (cancelled, error, still pending): restores
+//    the answers and drops the user back on the "save" screen so they can
+//    retry or go guest, instead of losing 6 screens of answers and
+//    restarting from the splash.
 async function resumeOnboardingAfterAuth() {
   const session = supabaseClient ? (await supabaseClient.auth.getSession()).data?.session : null;
-
-  if (!session) {
-    // Sign-in didn't complete (cancelled, or the draft is stale) — fall
-    // back to the normal splash flow instead of leaving the user stuck.
-    if (onboardingStepIndex === 0) advanceOnboarding();
-    return;
-  }
 
   let draftAnswers = null;
   try {
@@ -350,6 +355,18 @@ async function resumeOnboardingAfterAuth() {
     draftAnswers = null;
   }
 
+  if (!session) {
+    if (draftAnswers) {
+      Object.assign(onboardingAnswers, draftAnswers);
+      goToOnboardingStep(onboardingSteps.length - 2); // the "save" screen
+    } else if (onboardingStepIndex === 0) {
+      // No draft at all — this wasn't actually a redirect return, just a
+      // stale flag somehow. Fall back to the normal splash flow.
+      advanceOnboarding();
+    }
+    return;
+  }
+
   const fallbackName =
     session.user.user_metadata?.full_name?.split(" ")[0] ||
     session.user.user_metadata?.name?.split(" ")[0] ||
@@ -357,18 +374,16 @@ async function resumeOnboardingAfterAuth() {
     "friend";
 
   Object.assign(onboardingAnswers, draftAnswers || { name: fallbackName });
-  userProfile = { ...onboardingAnswers };
   currentUser = session.user;
 
   try {
-    localStorage.setItem(USER_PROFILE_KEY, JSON.stringify(userProfile));
     localStorage.removeItem(ONBOARDING_DRAFT_KEY);
   } catch (error) {
     // Non-fatal.
   }
 
+  completeOnboarding();
   saveProfileToSupabase();
-  goToOnboardingStep(onboardingSteps.length - 1);
 }
 
 if (resetOnboardingBtn) {
