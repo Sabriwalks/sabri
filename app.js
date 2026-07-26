@@ -173,7 +173,14 @@ const onboardingGuestBtn = document.getElementById("onboarding-guest-btn");
 const onboardingFinishBtn = document.getElementById("onboarding-finish");
 
 let onboardingStepIndex = 0;
-const onboardingAnswers = { name: "", reason: "", interests: [], companions: "", depth: "standard" };
+const onboardingAnswers = {
+  name: "",
+  reason: "",
+  interests: [],
+  companions: "",
+  language: "en",
+  depth: "standard",
+};
 
 function isOnboarded() {
   try {
@@ -276,8 +283,10 @@ function completeOnboarding() {
   } catch (error) {
     // localStorage unavailable — onboarding just won't persist.
   }
-  // Keep the settings panel's depth pill in sync with the onboarding choice.
+  // Keep the settings panel's depth/language selections in sync with the
+  // onboarding choices, so they don't silently diverge from each other.
   settings.depth = userProfile.depth || settings.depth;
+  settings.language = userProfile.language || settings.language;
   saveSettings();
   applySettingsToUI();
   onboarding.classList.add("hidden");
@@ -290,7 +299,7 @@ if (onboardingFinishBtn) {
 
 if (onboardingGuestBtn) {
   onboardingGuestBtn.addEventListener("click", () => {
-    goToOnboardingStep(7);
+    goToOnboardingStep(onboardingSteps.length - 1);
   });
 }
 
@@ -359,7 +368,7 @@ async function resumeOnboardingAfterAuth() {
   }
 
   saveProfileToSupabase();
-  goToOnboardingStep(7);
+  goToOnboardingStep(onboardingSteps.length - 1);
 }
 
 if (resetOnboardingBtn) {
@@ -881,6 +890,42 @@ function unlockAudio() {
     // Some browsers throw synchronously here — harmless, later playback
     // just falls back to needing its own gesture on that device.
   }
+  ensureAudioContext();
+}
+
+// iOS Safari has no web-exposed API for setting AVAudioSession categories
+// (that's a native-only API — there is no way from JS to explicitly tell
+// iOS "allow simultaneous record and playback"). Keeping a real, running
+// AudioContext alive for the whole tour is the closest practical mitigation
+// available to web content: it signals continuous audio engagement to
+// WebKit, which measurably reduces (though cannot 100% guarantee) iOS
+// tearing down the AirPods playback route when SpeechRecognition grabs the
+// mic. Created once on the Start Tour tap (a real user gesture, required
+// for AudioContext to start unsuspended) and resumed again right before
+// every mic use, since backgrounding/other audio interruptions can suspend
+// it in between.
+let audioContext = null;
+
+function ensureAudioContext() {
+  if (!audioContext) {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return null;
+    audioContext = new AudioContextClass();
+  }
+  if (audioContext.state === "suspended") {
+    audioContext.resume().catch(() => {});
+  }
+  return audioContext;
+}
+
+// The delay iOS needs to re-establish the Bluetooth route back to AirPods
+// after SpeechRecognition releases the microphone — resuming playback
+// immediately on `onend` routinely comes out of the phone's own speaker
+// for a beat before snapping back to AirPods, or doesn't snap back at all.
+const AIRPODS_ROUTE_RECOVERY_MS = 500;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function startTour() {
@@ -1481,21 +1526,45 @@ function pause() {
 const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
 const recognition = SpeechRecognitionClass ? new SpeechRecognitionClass() : null;
 let isListening = false;
+let isCancelledListening = false;
 let silenceTimer = null;
 
 const INITIAL_SILENCE_MS = 8000; // generous window before the user starts speaking
-const FOLLOWUP_SILENCE_MS = 2000; // stop 2s after the user stops speaking
+const FOLLOWUP_SILENCE_MS = 3000; // stop 3s after the user stops speaking
+const MIN_QUESTION_LENGTH = 5; // shorter than this is almost always a mis-hear, not a real question
+const CONFIRM_DISPLAY_MS = 1000; // show the full captured text before sending it
 
 if (recognition) {
   recognition.continuous = false;
   recognition.interimResults = true;
-  recognition.maxAlternatives = 1;
+  // Requesting 3 alternatives and picking the highest-confidence one (see
+  // pickBestAlternative) measurably improves accuracy on iOS Safari, whose
+  // single-best guess is often the least likely of the alternatives it
+  // actually considered.
+  recognition.maxAlternatives = 3;
 } else {
   micBtn.classList.add("hidden");
 }
 
+// Picks the highest-confidence alternative out of a SpeechRecognitionResult.
+// iOS Safari doesn't always populate `confidence` (it's sometimes 0 for
+// every alternative, especially on interim results) — falls back to the
+// first alternative in that case, same as requesting just one.
+function pickBestAlternative(result) {
+  let best = result[0];
+  for (let i = 1; i < result.length; i++) {
+    if ((result[i].confidence || 0) > (best.confidence || 0)) {
+      best = result[i];
+    }
+  }
+  return best;
+}
+
 // Always tappable: a tap during an active narration interrupts it cleanly
-// first; a tap while already listening stops listening early.
+// first; a tap while already listening stops listening early (and sends
+// whatever was captured, same as the silence timeout completing on its
+// own) — use the separate "Tap to cancel" control to abort without asking
+// anything.
 micBtn.addEventListener("click", () => {
   if (isListening) {
     stopListening();
@@ -1504,16 +1573,26 @@ micBtn.addEventListener("click", () => {
   startListening();
 });
 
+listeningHint.addEventListener("click", () => {
+  if (isListening) cancelListening();
+});
+
 function startListening() {
   if (!recognition || isListening) return;
 
   interruptPlayback();
+  // Keeping this alive/running is the standard practical mitigation for the
+  // iOS "SpeechRecognition kicks AirPods off the playback route" issue —
+  // there's no web API to directly control AVAudioSession categories.
+  ensureAudioContext();
+  isCancelledListening = false;
   isConversing = true;
   isListening = true;
   micBtn.classList.add("is-listening");
   askSubtitle.textContent = "";
   askSubtitle.classList.remove("hidden");
   listeningHint.classList.remove("hidden");
+  listeningHint.textContent = "Tap to cancel";
   statusText.textContent = "Listening...";
 
   recognition.lang = SPEECH_RECOGNITION_LANGS[settings.language] || "en-US";
@@ -1530,7 +1609,7 @@ function startListening() {
 
     let interim = "";
     for (let i = event.resultIndex; i < event.results.length; i++) {
-      const transcript = event.results[i][0].transcript;
+      const transcript = pickBestAlternative(event.results[i]).transcript;
       if (event.results[i].isFinal) {
         finalTranscript += transcript;
       } else {
@@ -1546,21 +1625,35 @@ function startListening() {
     micBtn.classList.remove("is-listening");
     listeningHint.classList.add("hidden");
 
-    const question = finalTranscript.trim();
-    if (question) {
-      statusText.textContent = "Sabri is thinking...";
-      askSabri(question);
-    } else {
+    if (isCancelledListening) {
+      isCancelledListening = false;
       askSubtitle.classList.add("hidden");
       isConversing = false;
       statusText.textContent = "Keep walking, discovering...";
+      return;
     }
+
+    const question = finalTranscript.trim();
+    if (!question || question.length < MIN_QUESTION_LENGTH) {
+      askSubtitle.textContent = "I didn't catch that — tap to try again";
+      setTimeout(() => askSubtitle.classList.add("hidden"), 2500);
+      isConversing = false;
+      statusText.textContent = "Keep walking, discovering...";
+      return;
+    }
+
+    // Show the full captured text for a beat so the user can confirm what
+    // was actually heard before it's sent off to Claude.
+    askSubtitle.textContent = question;
+    statusText.textContent = "Sabri is thinking...";
+    setTimeout(() => askSabri(question), CONFIRM_DISPLAY_MS);
   };
 
   recognition.onerror = () => {
     clearTimeout(silenceTimer);
     isListening = false;
     isConversing = false;
+    isCancelledListening = false;
     micBtn.classList.remove("is-listening");
     listeningHint.classList.add("hidden");
     askSubtitle.classList.add("hidden");
@@ -1577,8 +1670,22 @@ function startListening() {
   }
 }
 
+// Stops listening AND sends whatever was captured — same completion path
+// as the silence timeout firing on its own.
 function stopListening() {
   if (!recognition) return;
+  try {
+    recognition.stop();
+  } catch (error) {
+    // Already stopped — harmless.
+  }
+}
+
+// Stops listening and discards the transcript entirely — nothing gets sent
+// to Claude, unlike stopListening()/the silence timeout.
+function cancelListening() {
+  if (!recognition) return;
+  isCancelledListening = true;
   try {
     recognition.stop();
   } catch (error) {
@@ -1604,6 +1711,7 @@ async function askSabri(question) {
         userProfile,
         correctionContext,
         crossSessionVisitedPlaces: crossSessionVisitedPlaceNames,
+        language: settings.language,
       }),
     });
     const data = await response.json();
@@ -1631,6 +1739,10 @@ async function askSabri(question) {
     startPrompt.classList.add("hidden");
     tourControls.classList.remove("hidden");
 
+    // Give iOS a moment to re-establish the Bluetooth route back to
+    // AirPods after SpeechRecognition released the microphone, before
+    // asking the audio element to start playing again.
+    await sleep(AIRPODS_ROUTE_RECOVERY_MS);
     await speakNarration(data.answer);
 
     statusText.textContent = "Listening for your next question...";

@@ -123,8 +123,40 @@
           </div>
         </div>
 
-        <!-- SCREEN 5 - the pace -->
+        <!-- SCREEN 5 - the language -->
         <div class="onboarding-step" data-step="5">
+          <p class="onboarding-question">What language should I speak?</p>
+          <p class="onboarding-subtext">Sabri speaks your language — whichever feels most natural to you.</p>
+          <div class="onboarding-language-grid" data-single-select data-field="language">
+            <button class="onboarding-language-pill" data-value="en">
+              <span class="onboarding-language-flag">🇬🇧</span>
+              <span class="onboarding-language-name">English</span>
+            </button>
+            <button class="onboarding-language-pill" data-value="he">
+              <span class="onboarding-language-flag">🇮🇱</span>
+              <span class="onboarding-language-name">Hebrew</span>
+            </button>
+            <button class="onboarding-language-pill" data-value="ar">
+              <span class="onboarding-language-flag">🇸🇦</span>
+              <span class="onboarding-language-name">Arabic</span>
+            </button>
+            <button class="onboarding-language-pill" data-value="es">
+              <span class="onboarding-language-flag">🇪🇸</span>
+              <span class="onboarding-language-name">Spanish</span>
+            </button>
+            <button class="onboarding-language-pill" data-value="fr">
+              <span class="onboarding-language-flag">🇫🇷</span>
+              <span class="onboarding-language-name">French</span>
+            </button>
+            <button class="onboarding-language-pill" data-value="ru">
+              <span class="onboarding-language-flag">🇷🇺</span>
+              <span class="onboarding-language-name">Russian</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- SCREEN 6 - the pace -->
+        <div class="onboarding-step" data-step="6">
           <p class="onboarding-question">How do you like to travel?</p>
           <p class="onboarding-subtext">There's no wrong answer — only your answer.</p>
           <div class="onboarding-pace" data-single-select data-field="depth">
@@ -144,8 +176,8 @@
           </div>
         </div>
 
-        <!-- SCREEN 6 - the save -->
-        <div class="onboarding-step" data-step="6">
+        <!-- SCREEN 7 - the save -->
+        <div class="onboarding-step" data-step="7">
           <p class="onboarding-save-logo" aria-hidden="true">Sabri</p>
           <h2 class="onboarding-heading"><span data-name-slot>Friend</span>, I've been waiting for someone like you.</h2>
           <p class="onboarding-subtext">
@@ -159,8 +191,8 @@
           <button id="onboarding-guest-btn" class="onboarding-guest-link">or explore without saving →</button>
         </div>
 
-        <!-- SCREEN 7 - ready -->
-        <div class="onboarding-step" data-step="7">
+        <!-- SCREEN 8 - ready -->
+        <div class="onboarding-step" data-step="8">
           <h2 class="onboarding-heading"><span data-name-slot>Friend</span>, your guide is ready.</h2>
           <p class="onboarding-subtext">Wherever you go, I'll be there.</p>
           <button id="onboarding-finish" class="onboarding-next">Start Exploring →</button>
@@ -210,7 +242,10 @@
         </div>
 
         <div class="main-controls-row">
-          <button id="mic-btn" class="mic-btn" aria-label="Ask Sabri a question">🎤</button>
+          <button id="mic-btn" class="mic-btn" aria-label="Ask Sabri a question">
+            🎤
+            <span class="mic-waveform" aria-hidden="true"><span></span><span></span><span></span></span>
+          </button>
 
           <button id="play-btn" class="control-btn control-btn--main" aria-label="Play">
             <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>

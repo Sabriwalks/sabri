@@ -619,6 +619,7 @@ body {
    to it, per the row-2 layout. */
 
 .mic-btn {
+  position: relative;
   flex-shrink: 0;
   width: 48px;
   height: 48px;
@@ -656,6 +657,50 @@ body {
   }
 }
 
+/* Small animated waveform above the mic button while listening — a clear,
+   glanceable "the mic is actually active and capturing" signal alongside
+   the pulsing red glow. */
+.mic-waveform {
+  display: none;
+  position: absolute;
+  top: -14px;
+  left: 50%;
+  transform: translateX(-50%);
+  gap: 3px;
+  align-items: flex-end;
+  height: 10px;
+}
+
+.mic-btn.is-listening .mic-waveform {
+  display: flex;
+}
+
+.mic-waveform span {
+  width: 3px;
+  height: 3px;
+  border-radius: 2px;
+  background: #ffffff;
+  animation: mic-waveform-bar 0.9s ease-in-out infinite;
+}
+
+.mic-waveform span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.mic-waveform span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes mic-waveform-bar {
+  0%,
+  100% {
+    height: 3px;
+  }
+  50% {
+    height: 10px;
+  }
+}
+
 /* Live transcript + "tap to stop" hint float just above the control bar
    (which occupies ~55% of the screen, below the header, once active). */
 .ask-subtitle {
@@ -675,19 +720,23 @@ body {
   text-align: center;
 }
 
+/* Doubles as the "Tap to cancel" control while listening — sits above the
+   transcript bubble so the two never overlap. */
 .listening-hint {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: calc((100vh - 60px - env(safe-area-inset-top)) * 0.55 + 12px);
-  bottom: calc((100dvh - 60px - env(safe-area-inset-top)) * 0.55 + 12px);
+  bottom: calc((100vh - 60px - env(safe-area-inset-top)) * 0.55 + 52px);
+  bottom: calc((100dvh - 60px - env(safe-area-inset-top)) * 0.55 + 52px);
   z-index: 25;
+  padding: 6px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--gold);
   text-transform: uppercase;
   text-align: center;
+  cursor: pointer;
 }
 
 /* Generic toast — currently only used by the camera placeholder button. */
@@ -1163,7 +1212,39 @@ body {
   color: var(--bg);
 }
 
-/* Screen 5 - the pace */
+/* Screen 5 - the language */
+
+.onboarding-language-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.onboarding-language-pill {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 18px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-elevated);
+  color: var(--white);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.onboarding-language-flag {
+  font-size: 26px;
+}
+
+.onboarding-language-pill.is-selected {
+  border-color: var(--gold);
+  background: var(--gold-soft);
+  color: var(--gold);
+}
+
+/* Screen 6 - the pace */
 
 .onboarding-pace {
   display: flex;

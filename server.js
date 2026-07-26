@@ -58,11 +58,22 @@ const PRONUNCIATION_GUIDE_TEXT = Object.entries(HEBREW_PRONUNCIATION_GUIDE)
   .map(([word, phonetic]) => `${word} = "${phonetic}"`)
   .join("\n");
 
-const PRONUNCIATION_GUIDANCE =
-  "When you write Hebrew or Israeli place names, spell them phonetically for " +
-  "English text-to-speech so they are pronounced correctly. Use the " +
-  "pronunciation guide provided.\n\n" +
-  `Pronunciation guide:\n${PRONUNCIATION_GUIDE_TEXT}`;
+// Only relevant when the narration itself is in English (or another
+// non-Hebrew/Arabic language) — the point is spelling Hebrew place names
+// phonetically so an English-reading TTS voice pronounces them correctly.
+// If the narration is already being written natively in Hebrew or Arabic,
+// there's nothing to transliterate; the words are already correctly
+// spelled in their own script.
+function buildPronunciationGuidance(languageName) {
+  if (languageName === "Hebrew" || languageName === "Arabic") return null;
+
+  return (
+    "When you write Hebrew or Israeli place names, spell them phonetically for " +
+    "English text-to-speech so they are pronounced correctly. Use the " +
+    "pronunciation guide provided.\n\n" +
+    `Pronunciation guide:\n${PRONUNCIATION_GUIDE_TEXT}`
+  );
+}
 
 // The soul of the product — Sabri's full identity.
 const SABRI_SYSTEM_PROMPT =
@@ -468,7 +479,7 @@ app.post("/api/narrate", async (req, res) => {
     isFirstNarrationOfSession ? buildReturningUserGuidance(returningUserContext, userProfile?.name) : null,
     buildCrossSessionVisitedGuidance(crossSessionVisitedPlaces),
     TRANSITION_GUIDANCE,
-    PRONUNCIATION_GUIDANCE,
+    buildPronunciationGuidance(languageName),
     TIER_GUIDANCE[resolvedTier],
     DEPTH_GUIDANCE[resolvedDepth],
   ].filter(Boolean);
@@ -579,6 +590,7 @@ app.post("/api/ask", async (req, res) => {
     userProfile,
     correctionContext,
     crossSessionVisitedPlaces,
+    language,
   } = req.body || {};
 
   if (!question) {
@@ -591,6 +603,7 @@ app.post("/api/ask", async (req, res) => {
 
   const place = currentPlace || "an unfamiliar spot";
   const area = neighborhood || "this part of town";
+  const languageName = LANGUAGE_NAMES[language];
 
   const systemPromptParts = [
     `You are Sabri, a warm knowledgeable personal tour guide. The user is ` +
@@ -635,7 +648,15 @@ app.post("/api/ask", async (req, res) => {
       `description of their corrected location into locationCorrection. ` +
       `Otherwise set locationCorrection to null.`
   );
-  systemPromptParts.push(PRONUNCIATION_GUIDANCE);
+
+  if (languageName && languageName !== "English") {
+    systemPromptParts.push(
+      `Answer entirely in ${languageName}. Every word of your answer must be in ${languageName}, not English.`
+    );
+  }
+
+  const pronunciationGuidance = buildPronunciationGuidance(languageName);
+  if (pronunciationGuidance) systemPromptParts.push(pronunciationGuidance);
 
   const systemPrompt = systemPromptParts.join("\n\n");
 
