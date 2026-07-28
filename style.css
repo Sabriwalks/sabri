@@ -764,6 +764,29 @@ body {
   transform: translate(-50%, 0);
 }
 
+/* TEMPORARY diagnostic box for the iOS Google Sign In investigation — sits
+   above absolutely everything (including onboarding's z-index:100) and
+   never auto-hides, so an error is guaranteed visible and readable on a
+   real iPhone screen. Remove once the real bug is found and fixed. */
+.debug-error-box {
+  position: fixed;
+  top: calc(env(safe-area-inset-top) + 12px);
+  left: 12px;
+  right: 12px;
+  z-index: 999;
+  padding: 14px;
+  background: #b91c1c;
+  border: 2px solid #ffffff;
+  border-radius: 10px;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+}
+
 /* Settings drawer — slides in from the right. */
 
 .settings-overlay {

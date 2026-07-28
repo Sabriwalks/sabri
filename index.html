@@ -280,6 +280,12 @@
   <!-- Generic toast, currently only used by the camera placeholder button. -->
   <p id="toast" class="toast" role="status" aria-live="polite"></p>
 
+  <!-- TEMPORARY diagnostic box for the iOS Google Sign In investigation —
+       shows raw error text directly on screen since there's no easy way to
+       read console output on a real iPhone without a connected Mac. Remove
+       once the real bug is found and fixed. -->
+  <div id="debug-error-box" class="debug-error-box hidden"></div>
+
   <!-- Settings drawer, slides in from the right. -->
   <div id="settings-overlay" class="settings-overlay hidden"></div>
   <aside id="settings-drawer" class="settings-drawer" aria-hidden="true">

@@ -39,6 +39,25 @@ const accountNameEl = document.getElementById("account-name");
 const accountEmailEl = document.getElementById("account-email");
 const signOutBtn = document.getElementById("sign-out-btn");
 const settingsGoogleBtn = document.getElementById("settings-google-btn");
+const debugErrorBox = document.getElementById("debug-error-box");
+
+// TEMPORARY diagnostic helper for the iOS Google Sign In investigation —
+// shows the raw error text directly on screen since there's no easy way to
+// read console output on a real iPhone without a connected Mac. Remove
+// once the real bug is found and fixed.
+function showDebugError(message) {
+  console.log("[debug]", message);
+  if (!debugErrorBox) return;
+  debugErrorBox.textContent = String(message);
+  debugErrorBox.classList.remove("hidden");
+}
+
+console.log(
+  "[debug] Google button elements found — onboardingGoogleBtn:",
+  !!document.getElementById("onboarding-google-btn"),
+  "settingsGoogleBtn:",
+  !!settingsGoogleBtn
+);
 
 // --- Supabase client (frontend uses the anon key only; the service role
 // key never leaves server.js). SUPABASE_URL/SUPABASE_ANON_KEY are injected
@@ -315,22 +334,63 @@ if (onboardingGoogleBtn) {
   });
 }
 
-function signInWithGoogle() {
-  if (!supabaseClient) {
-    showToast("Sign in isn't available right now.");
-    return;
+async function signInWithGoogle() {
+  // TEMPORARY diagnostics (iOS Google Sign In investigation) — alert() first
+  // since it's the most reliable way to confirm a tap actually reached this
+  // function on a real iPhone with no debugger attached; console.log right
+  // after for anyone who IS watching Safari's Web Inspector over USB.
+  alert("Sign in tapped");
+  console.log("Sign in button tapped");
+  console.log(
+    "[debug] supabaseClient exists:",
+    !!supabaseClient,
+    "| has auth:",
+    !!(supabaseClient && supabaseClient.auth),
+    "| window.SUPABASE_URL:",
+    window.SUPABASE_URL,
+    "| window.SUPABASE_ANON_KEY set:",
+    !!window.SUPABASE_ANON_KEY,
+    "| window.supabase (CDN lib) loaded:",
+    typeof window.supabase
+  );
+
+  try {
+    if (!supabaseClient) {
+      throw new Error(
+        "supabaseClient is null — window.supabase=" +
+          typeof window.supabase +
+          ", window.SUPABASE_URL=" +
+          window.SUPABASE_URL +
+          ", window.SUPABASE_ANON_KEY set=" +
+          !!window.SUPABASE_ANON_KEY
+      );
+    }
+    if (!supabaseClient.auth) {
+      throw new Error("supabaseClient exists but has no .auth property");
+    }
+
+    // skipBrowserRedirect: false (the default, made explicit here) makes
+    // Supabase navigate the whole page to Google instead of trying a
+    // popup — iOS Safari blocks popups not opened synchronously from the
+    // click handler, which is what was silently swallowing the sign-in
+    // attempt.
+    const { data, error } = await supabaseClient.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: "https://getsabri.com/auth/callback",
+        skipBrowserRedirect: false,
+      },
+    });
+
+    console.log("[debug] signInWithOAuth resolved:", { data, error });
+
+    if (error) {
+      throw error;
+    }
+  } catch (error) {
+    const message = (error && error.message) || String(error);
+    showDebugError("Sign in failed: " + message);
   }
-  // skipBrowserRedirect: false (the default, made explicit here) makes
-  // Supabase navigate the whole page to Google instead of trying a popup —
-  // iOS Safari blocks popups not opened synchronously from the click
-  // handler, which is what was silently swallowing the sign-in attempt.
-  supabaseClient.auth.signInWithOAuth({
-    provider: "google",
-    options: {
-      redirectTo: "https://getsabri.com/auth/callback",
-      skipBrowserRedirect: false,
-    },
-  });
 }
 
 // If the user tapped "Sign in with Google" from onboarding, the page just
