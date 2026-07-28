@@ -366,10 +366,19 @@ async function signInWithGoogle() {
     // popup — iOS Safari blocks popups not opened synchronously from the
     // click handler, which is what was silently swallowing the sign-in
     // attempt.
+    //
+    // redirectTo must be the canonical www. domain, not the bare apex —
+    // getsabri.com (no www) 308-redirects to www.getsabri.com at the
+    // Vercel/DNS level. Supabase appends the session tokens as a URL hash
+    // fragment on this exact URL; routing through an extra cross-host
+    // redirect first is an unnecessary hop that risks that fragment not
+    // surviving on some browsers. This must also be registered as an
+    // allowed redirect URL in the Supabase dashboard (Authentication → URL
+    // Configuration).
     const { data, error } = await supabaseClient.auth.signInWithOAuth({
       provider: "google",
       options: {
-        redirectTo: "https://getsabri.com/auth/callback",
+        redirectTo: "https://www.getsabri.com/auth/callback",
         skipBrowserRedirect: false,
       },
     });

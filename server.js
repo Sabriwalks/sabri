@@ -254,6 +254,19 @@ const CONTEXT_PLACE_LIMIT = 5;
 
 app.use(express.json());
 
+// A real Supabase project URL or anon/publishable key never contains a
+// newline or another env var's name — if either does, something is
+// misconfigured in the Vercel dashboard (e.g. a whole .env file's contents
+// pasted into a single env var field) and that value must NEVER be
+// forwarded to client-side code, since it could be hiding
+// SUPABASE_SERVICE_KEY, which must never reach the browser.
+function looksCorrupted(value) {
+  return (
+    typeof value === "string" &&
+    (value.includes("\n") || value.includes("SERVICE_KEY") || value.includes("SUPABASE_URL="))
+  );
+}
+
 // Injects the Supabase URL + anon key into a small inline <script> block so
 // the frontend can create its own client without hardcoding secrets into
 // app.js/index.html — the anon key is safe client-side (it's constrained by
@@ -261,10 +274,24 @@ app.use(express.json());
 // above, which never leaves this file.
 function renderIndexHtml() {
   const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
+
+  let safeUrl = SUPABASE_URL || "";
+  let safeAnonKey = SUPABASE_ANON_KEY || "";
+  if (looksCorrupted(safeUrl) || looksCorrupted(safeAnonKey)) {
+    console.error(
+      "[SECURITY] SUPABASE_URL or SUPABASE_ANON_KEY looks corrupted (contains a newline or " +
+        "another env var's name) — refusing to inject it into the client-side page. Check the " +
+        "Vercel dashboard: each env var must hold only its own single value, never the " +
+        "contents of a .env file. SUPABASE_SERVICE_KEY must NEVER be exposed to the frontend."
+    );
+    safeUrl = "";
+    safeAnonKey = "";
+  }
+
   const envScript =
     "<script>\n" +
-    `  window.SUPABASE_URL = ${JSON.stringify(SUPABASE_URL || "")};\n` +
-    `  window.SUPABASE_ANON_KEY = ${JSON.stringify(SUPABASE_ANON_KEY || "")};\n` +
+    `  window.SUPABASE_URL = ${JSON.stringify(safeUrl)};\n` +
+    `  window.SUPABASE_ANON_KEY = ${JSON.stringify(safeAnonKey)};\n` +
     "</script>";
   return html.replace("<!--SUPABASE_ENV-->", envScript);
 }
@@ -274,6 +301,9 @@ function renderIndexHtml() {
 // out of the URL itself once this same single-page app loads, so serving
 // index.html here is all the server needs to do.
 app.get(["/", "/index.html", "/auth/callback"], (req, res) => {
+  if (req.path === "/auth/callback") {
+    console.log("auth callback route hit");
+  }
   res.type("html").send(renderIndexHtml());
 });
 
