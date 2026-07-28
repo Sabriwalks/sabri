@@ -70,6 +70,24 @@ const supabaseClient =
     ? window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY)
     : null;
 
+// TEMPORARY diagnostic (iOS Google Sign In investigation) — surface a
+// missing config immediately on page load rather than waiting for the user
+// to tap "Sign in" and be confused by nothing happening. If this fires, the
+// server isn't injecting window.SUPABASE_URL/ANON_KEY into the page at all
+// (check server.js's renderIndexHtml() actually ran — on Vercel this means
+// checking vercel.json routes every path through server.js rather than
+// serving a static index.html directly).
+if (!window.SUPABASE_URL || !window.SUPABASE_ANON_KEY) {
+  showDebugError(
+    "Configuration error - please contact support\n\n" +
+      "(window.SUPABASE_URL=" +
+      window.SUPABASE_URL +
+      ", window.SUPABASE_ANON_KEY set=" +
+      !!window.SUPABASE_ANON_KEY +
+      ")"
+  );
+}
+
 let currentUser = null; // Supabase auth user, or null for a guest
 let visitedPlaceIds = new Set(); // cross-session — fetched after login
 let crossSessionVisitedPlaceNames = []; // last 5 place names, sent to every /api/narrate + /api/ask

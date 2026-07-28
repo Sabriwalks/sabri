@@ -19,6 +19,25 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
+// Runs at module load time (not inside the require.main guard below) since
+// on Vercel this file is imported as a serverless function and app.listen()
+// never executes — that startup block only ever runs for local `node
+// server.js`. This is the only place a Vercel deployment log will ever show
+// whether the required env vars actually made it into the function's
+// environment.
+console.log(
+  "[env check] GOOGLE_MAPS_API_KEY:", !!GOOGLE_MAPS_API_KEY,
+  "| ANTHROPIC_API_KEY:", !!ANTHROPIC_API_KEY,
+  "| OPENAI_API_KEY:", !!OPENAI_API_KEY,
+  "| SUPABASE_URL:", !!SUPABASE_URL,
+  "| SUPABASE_ANON_KEY:", !!SUPABASE_ANON_KEY,
+  "| SUPABASE_SERVICE_KEY:", !!SUPABASE_SERVICE_KEY
+);
+console.log(
+  "[env check] all env var names present (values hidden):",
+  Object.keys(process.env).sort().join(", ")
+);
+
 // Server-side client only — always uses the service role key, which
 // bypasses Row Level Security, so it must never be sent to the frontend.
 // The frontend gets its own client using the anon key (injected via
