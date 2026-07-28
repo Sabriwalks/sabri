@@ -39,18 +39,6 @@ const accountNameEl = document.getElementById("account-name");
 const accountEmailEl = document.getElementById("account-email");
 const signOutBtn = document.getElementById("sign-out-btn");
 const settingsGoogleBtn = document.getElementById("settings-google-btn");
-const debugErrorBox = document.getElementById("debug-error-box");
-
-// TEMPORARY diagnostic helper for the iOS Google Sign In investigation —
-// shows the raw error text directly on screen since there's no easy way to
-// read console output on a real iPhone without a connected Mac. Remove
-// once the real bug is found and fixed.
-function showDebugError(message) {
-  console.log("[debug]", message);
-  if (!debugErrorBox) return;
-  debugErrorBox.textContent = String(message);
-  debugErrorBox.classList.remove("hidden");
-}
 
 console.log(
   "[debug] Google button elements found — onboardingGoogleBtn:",
@@ -70,21 +58,12 @@ const supabaseClient =
     ? window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY)
     : null;
 
-// TEMPORARY diagnostic (iOS Google Sign In investigation) — surface a
-// missing config immediately on page load rather than waiting for the user
-// to tap "Sign in" and be confused by nothing happening. If this fires, the
-// server isn't injecting window.SUPABASE_URL/ANON_KEY into the page at all
-// (check server.js's renderIndexHtml() actually ran — on Vercel this means
-// checking vercel.json routes every path through server.js rather than
-// serving a static index.html directly).
 if (!window.SUPABASE_URL || !window.SUPABASE_ANON_KEY) {
-  showDebugError(
-    "Configuration error - please contact support\n\n" +
-      "(window.SUPABASE_URL=" +
-      window.SUPABASE_URL +
-      ", window.SUPABASE_ANON_KEY set=" +
-      !!window.SUPABASE_ANON_KEY +
-      ")"
+  console.log(
+    "[debug] Supabase config missing — window.SUPABASE_URL:",
+    window.SUPABASE_URL,
+    "| window.SUPABASE_ANON_KEY set:",
+    !!window.SUPABASE_ANON_KEY
   );
 }
 
@@ -353,11 +332,6 @@ if (onboardingGoogleBtn) {
 }
 
 async function signInWithGoogle() {
-  // TEMPORARY diagnostics (iOS Google Sign In investigation) — alert() first
-  // since it's the most reliable way to confirm a tap actually reached this
-  // function on a real iPhone with no debugger attached; console.log right
-  // after for anyone who IS watching Safari's Web Inspector over USB.
-  alert("Sign in tapped");
   console.log("Sign in button tapped");
   console.log(
     "[debug] supabaseClient exists:",
@@ -407,7 +381,8 @@ async function signInWithGoogle() {
     }
   } catch (error) {
     const message = (error && error.message) || String(error);
-    showDebugError("Sign in failed: " + message);
+    console.log("[debug] signInWithGoogle failed:", message);
+    showToast("Sign in failed — please try again.");
   }
 }
 
@@ -416,14 +391,19 @@ async function signInWithGoogle() {
 // see signInWithGoogle) — every in-memory JS variable (including
 // onboardingAnswers) was wiped. This restores the draft saved right before
 // the redirect and either:
-//  - sign-in succeeded: saves the profile and skips straight into the main
-//    app, same as finishing onboarding normally — no extra tap needed.
+//  - sign-in succeeded: hand off to handleOAuthSignIn, which saves the
+//    profile and skips straight into the main app — no extra tap needed.
 //  - sign-in didn't complete (cancelled, error, still pending): restores
 //    the answers and drops the user back on the "save" screen so they can
 //    retry or go guest, instead of losing 6 screens of answers and
 //    restarting from the splash.
 async function resumeOnboardingAfterAuth() {
   const session = supabaseClient ? (await supabaseClient.auth.getSession()).data?.session : null;
+
+  if (session) {
+    await handleOAuthSignIn(session);
+    return;
+  }
 
   let draftAnswers = null;
   try {
@@ -433,35 +413,63 @@ async function resumeOnboardingAfterAuth() {
     draftAnswers = null;
   }
 
-  if (!session) {
-    if (draftAnswers) {
-      Object.assign(onboardingAnswers, draftAnswers);
-      goToOnboardingStep(onboardingSteps.length - 2); // the "save" screen
-    } else if (onboardingStepIndex === 0) {
-      // No draft at all — this wasn't actually a redirect return, just a
-      // stale flag somehow. Fall back to the normal splash flow.
-      advanceOnboarding();
-    }
-    return;
+  if (draftAnswers) {
+    Object.assign(onboardingAnswers, draftAnswers);
+    goToOnboardingStep(onboardingSteps.length - 2); // the "save" screen
+  } else if (onboardingStepIndex === 0) {
+    // No draft at all — this wasn't actually a redirect return, just a
+    // stale flag somehow. Fall back to the normal splash flow.
+    advanceOnboarding();
   }
+}
 
-  const fallbackName =
-    session.user.user_metadata?.full_name?.split(" ")[0] ||
-    session.user.user_metadata?.name?.split(" ")[0] ||
-    session.user.email?.split("@")[0] ||
-    "friend";
+// The single place that completes a Google sign-in once a session is
+// confirmed, whether it's discovered by the one-shot getSession() check
+// above (the common case — the redirect back to /auth/callback) or
+// reactively via the onAuthStateChange listener in initializeAuthState
+// (the safety net, in case the session wasn't ready at the exact moment of
+// that first check). Guarded so it only ever runs once per page load even
+// if both paths fire.
+let oauthSignInHandled = false;
 
-  Object.assign(onboardingAnswers, draftAnswers || { name: fallbackName });
+async function handleOAuthSignIn(session) {
+  if (!session || oauthSignInHandled) return;
+  oauthSignInHandled = true;
+
   currentUser = session.user;
 
-  try {
-    localStorage.removeItem(ONBOARDING_DRAFT_KEY);
-  } catch (error) {
-    // Non-fatal.
+  if (!isOnboarded()) {
+    let draftAnswers = null;
+    try {
+      const raw = localStorage.getItem(ONBOARDING_DRAFT_KEY);
+      if (raw) draftAnswers = JSON.parse(raw);
+    } catch (error) {
+      draftAnswers = null;
+    }
+
+    const fallbackName =
+      session.user.user_metadata?.full_name?.split(" ")[0] ||
+      session.user.user_metadata?.name?.split(" ")[0] ||
+      session.user.email?.split("@")[0] ||
+      "friend";
+
+    Object.assign(onboardingAnswers, draftAnswers || { name: fallbackName });
+
+    try {
+      localStorage.removeItem(ONBOARDING_DRAFT_KEY);
+    } catch (error) {
+      // Non-fatal.
+    }
+
+    // Saves the profile locally, sets sabri_onboarded, hides the onboarding
+    // overlay, and syncs settings — the user lands straight on the main
+    // app's home screen, ready to tour.
+    completeOnboarding();
   }
 
-  completeOnboarding();
   saveProfileToSupabase();
+  await loadVisitedPlaceIds();
+  updateAccountSettingsUI();
 }
 
 if (resetOnboardingBtn) {
@@ -509,9 +517,22 @@ async function initializeAuthState() {
   const { data } = await supabaseClient.auth.getSession();
   currentUser = data?.session?.user || null;
 
-  supabaseClient.auth.onAuthStateChange((_event, session) => {
+  // Reactive safety net alongside resumeOnboardingAfterAuth's one-shot
+  // check: also completes/refreshes sign-in the moment Supabase's SDK
+  // itself confirms SIGNED_IN (e.g. if the session wasn't ready yet at the
+  // exact moment of that first check), and keeps visited-place history
+  // fresh if a user signs in later from Settings mid-session.
+  supabaseClient.auth.onAuthStateChange((event, session) => {
     currentUser = session?.user || null;
     updateAccountSettingsUI();
+    // handleOAuthSignIn also covers a guest signing in later from
+    // Settings mid-session (isOnboarded() is already true, so it just
+    // saves the profile and refreshes visited-place history) — the
+    // oauthSignInHandled guard only skips it if this exact sign-in was
+    // already handled by resumeOnboardingAfterAuth's one-shot check.
+    if (event === "SIGNED_IN" && session) {
+      handleOAuthSignIn(session);
+    }
   });
 
   updateAccountSettingsUI();
