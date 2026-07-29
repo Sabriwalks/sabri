@@ -1,12 +1,19 @@
 :root {
-  --bg: #0f1923;
-  --bg-elevated: #16232e;
-  --gold: #c9a84c;
-  --gold-glow: rgba(201, 168, 76, 0.45);
-  --gold-soft: rgba(201, 168, 76, 0.12);
-  --white: #ffffff;
-  --text-secondary: #8a97a3;
-  --border: rgba(255, 255, 255, 0.06);
+  /* Warm rebrand — National Geographic meets Instagram: golden, alive,
+     confident, like late-afternoon light in a Mediterranean city. Replaces
+     the previous cold-navy/cold-gold corporate palette. */
+  --bg: #0F1B2D;
+  --bg-elevated: #1A2B3D;
+  --gold: #D4A853;
+  --gold-glow: rgba(212, 168, 83, 0.45);
+  --gold-soft: rgba(212, 168, 83, 0.12);
+  --terracotta: #C4622D;
+  --terracotta-glow: rgba(196, 98, 45, 0.4);
+  --success: #4CAF7D;
+  --white: #FAF7F2;
+  --text-secondary: #B8A898;
+  --border: rgba(250, 247, 242, 0.08);
+  --warm-shadow: rgba(30, 16, 4, 0.4);
   --font-serif: Georgia, "Iowan Old Style", "Palatino Linotype", "Times New Roman", serif;
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
 }
@@ -23,31 +30,20 @@ html, body {
 
 body {
   font-family: var(--font-sans);
-  background: radial-gradient(circle at 50% 0%, #142230 0%, var(--bg) 55%);
+  background: radial-gradient(circle at 50% 0%, #1F3247 0%, var(--bg) 55%);
   color: var(--white);
   -webkit-font-smoothing: antialiased;
 }
 
+/* The map fills the entire screen from the very first load (not just once
+   a tour is active) — the header and control bar float above it as
+   semi-transparent, blurred overlays rather than pushing it around. */
 .app {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  min-height: 100vh;
-  min-height: 100dvh;
-  max-width: 480px;
-  margin: 0 auto;
-  padding: calc(env(safe-area-inset-top) + 18px) 24px calc(env(safe-area-inset-bottom) + 18px);
-  gap: 16px;
-}
-
-/* Active tour: the photo and control bar go fully edge-to-edge (a premium
-   music-player feel), so the shell's own padding/gap is dropped and the
-   header floats over the photo instead of pushing it down. */
-.app.has-player {
+  position: relative;
   height: 100vh;
   height: 100dvh;
-  padding: 0;
-  gap: 0;
+  max-width: 480px;
+  margin: 0 auto;
   overflow: hidden;
 }
 
@@ -55,50 +51,42 @@ body {
   display: none !important;
 }
 
-/* Header — a fixed-height row that always sits above the photo in normal
-   document flow (never an overlay), so the settings button can never be
+/* Floating header — warm navy blur over the map. Absolutely positioned so
+   it always sits above the map regardless of tour state, and can never be
    pushed off-screen or covered by anything below it. */
 
 .app-header {
-  position: relative;
-  flex-shrink: 0;
-  height: 60px;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  height: calc(60px + env(safe-area-inset-top));
+  padding: env(safe-area-inset-top) 24px 0;
   display: flex;
   align-items: center;
   justify-content: center;
   text-align: center;
-}
-
-/* Active tour: the shell's own top padding is dropped (see .app.has-player
-   below), so the safe-area inset has to be reserved here instead, on top of
-   the fixed 60px of real header content. */
-.app.has-player .app-header {
-  height: calc(60px + env(safe-area-inset-top));
-  padding-top: env(safe-area-inset-top);
+  background: linear-gradient(180deg, rgba(15, 27, 45, 0.65) 0%, rgba(15, 27, 45, 0.25) 70%, transparent 100%);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 .settings-btn {
   position: absolute;
-  top: 50%;
-  right: 0;
+  top: calc(50% + (env(safe-area-inset-top) / 2));
+  right: 24px;
   transform: translateY(-50%);
   width: 36px;
   height: 36px;
   border: none;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(250, 247, 242, 0.1);
   font-size: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 2;
-}
-
-/* .app's own side padding is dropped in the active-tour shell (see
-   .app.has-player below), so the 24px inset has to be reapplied here
-   directly or the button would sit flush against the true screen edge. */
-.app.has-player .settings-btn {
-  right: 24px;
 }
 
 .logo {
@@ -110,147 +98,65 @@ body {
   color: var(--gold);
 }
 
-/* Location + pulse + home-screen photo */
-
-.location-section {
-  position: relative;
-  overflow: hidden;
-  border-radius: 20px;
-  text-align: center;
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-}
-
-/* Photo area fills ~45% of the space below the fixed header, flush
-   edge-to-edge (no side margins), with rounded corners only where it meets
-   the control bar. Computed off the space remaining after the header (not
-   the full viewport) so the two always add up correctly regardless of the
-   safe-area inset. */
-.app.has-player .location-section {
-  flex: none;
-  width: 100%;
-  height: calc((100vh - 60px - env(safe-area-inset-top)) * 0.45);
-  height: calc((100dvh - 60px - env(safe-area-inset-top)) * 0.45);
-  border-radius: 0 0 8px 8px;
-}
-
-.app.has-player .location-content {
-  justify-content: flex-end;
-  padding: 24px 24px 20px;
-}
-
-.app.has-player .pulse,
-.app.has-player .status-text {
-  display: none;
-}
-
-.home-photo {
+/* Full-screen map — see app.js initMap()/updateUserLocationOnMap(). Sits
+   behind everything else; the background color is just a fallback shown
+   for the instant before Google's tiles finish loading. */
+.map-container {
   position: absolute;
   inset: 0;
   z-index: 0;
+  background: var(--bg-elevated);
+}
+
+/* Legacy GPS-lock indicator — permanently hidden (see index.html comment);
+   pulseEl.classList still gets toggled by app.js but has no visual effect. */
+.pulse {
+  display: none !important;
+}
+
+/* Place photo header inside the narration drawer (reuses applyHomePhoto()
+   unchanged — only its class/position moved here from a full-screen photo). */
+.drawer-place-photo {
+  width: calc(100% + 48px);
+  margin: -40px -24px 16px;
+  height: 160px;
+  border-radius: 16px 16px 0 0;
+  background-color: var(--bg-elevated);
   background-size: cover;
   background-position: center;
   opacity: 0;
-  transition: opacity 0.6s ease;
+  transition: opacity 0.5s ease;
 }
 
-.home-photo.is-visible {
+.drawer-place-photo.is-visible {
   opacity: 1;
 }
 
-.home-photo-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  background: linear-gradient(180deg, rgba(15, 25, 35, 0.5) 0%, rgba(15, 25, 35, 0.82) 65%, var(--bg) 100%);
-}
-
-.location-content {
-  position: relative;
-  z-index: 2;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 24px;
+/* Row 1 of the floating control bar: place name, neighborhood, status. */
+.tour-location-row {
+  text-align: center;
+  margin-bottom: 4px;
 }
 
 .location-name {
   font-family: var(--font-serif);
   font-weight: 500;
-  font-size: 26px;
+  font-size: 24px;
   line-height: 1.25;
   color: var(--white);
-  max-width: 300px;
-  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
 }
 
-.pulse {
-  position: relative;
-  width: 64px;
-  height: 64px;
-  margin: 14px auto 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.pulse-ring {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 1px solid var(--gold);
-  opacity: 0;
-  animation: pulse-ring 3.6s cubic-bezier(0.16, 0.8, 0.3, 1) infinite;
-}
-
-.pulse-ring--delay {
-  animation-delay: 1.4s;
-}
-
-.pulse-dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--gold);
-  box-shadow: 0 0 22px var(--gold-glow);
-  opacity: 0.55;
-  transition: opacity 0.4s ease;
-}
-
-/* Before GPS lock the dot is dim and the rings pulse slowly ("searching").
-   Once locked, it brightens and picks up pace. */
-.pulse.is-locked .pulse-dot {
-  opacity: 1;
-}
-
-.pulse.is-locked .pulse-ring {
-  animation-duration: 2.8s;
-}
-
-@keyframes pulse-ring {
-  0% {
-    transform: scale(0.5);
-    opacity: 0.5;
-  }
-  70% {
-    opacity: 0.12;
-  }
-  100% {
-    transform: scale(1.7);
-    opacity: 0;
-  }
+.neighborhood-name {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 2px;
 }
 
 .status-text {
-  font-size: 14px;
+  font-size: 12px;
   color: var(--text-secondary);
   letter-spacing: 0.01em;
-  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.5);
+  margin-top: 4px;
 }
 
 /* Narration text drawer — a fixed overlay that slides up from the bottom
@@ -270,8 +176,8 @@ body {
   margin: 0 auto;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: 22px 22px 0 0;
-  box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.45);
+  border-radius: 24px 24px 0 0;
+  box-shadow: 0 -10px 40px var(--warm-shadow);
   padding: 0 24px;
   max-height: 0;
   opacity: 0;
@@ -282,9 +188,11 @@ body {
   transition: max-height 0.32s cubic-bezier(0.16, 0.8, 0.3, 1), opacity 0.22s ease, padding 0.22s ease;
 }
 
+/* Leaves the top ~35% of the map visible so the user keeps spatial
+   awareness of the live map underneath while reading. */
 .player-card.is-open {
   padding: 40px 24px calc(env(safe-area-inset-bottom) + 48px);
-  max-height: 75vh;
+  max-height: 65vh;
   opacity: 1;
   overflow-y: scroll;
   pointer-events: auto;
@@ -298,7 +206,7 @@ body {
   height: 32px;
   border: none;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(250, 247, 242, 0.08);
   color: var(--text-secondary);
   font-size: 14px;
 }
@@ -372,23 +280,22 @@ body {
   transform: scale(0.96);
 }
 
-/* Footer / control bar — full width, flush edge-to-edge, fills the
-   remaining ~45% of the screen below the photo once a tour is active. */
+/* Floating control bar — a warm, blurred navy card anchored to the bottom
+   of the screen, always overlaid on top of the full-screen map (never a
+   solid footer that pushes the map around). */
 
 .app-footer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
   text-align: center;
-}
-
-/* Fills whatever's left after the fixed header and the 45%-height photo —
-   effectively the other 55%, without needing its own explicit height (and
-   without any rounding gap between the two). */
-.app.has-player .app-footer {
-  flex: 1;
-  min-height: 0;
-  width: 100%;
-  background: var(--bg);
-  display: flex;
-  align-items: stretch;
+  background: linear-gradient(180deg, rgba(15, 27, 45, 0.4) 0%, rgba(15, 27, 45, 0.82) 35%, rgba(15, 27, 45, 0.94) 100%);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-radius: 24px 24px 0 0;
+  padding: 20px 24px calc(env(safe-area-inset-bottom) + 16px);
 }
 
 .tap-hint {
@@ -402,7 +309,7 @@ body {
   width: 100%;
   padding: 16px;
   border: none;
-  border-radius: 18px;
+  border-radius: 16px;
   background: var(--gold);
   color: var(--bg);
   font-size: 15px;
@@ -481,10 +388,10 @@ body {
   max-width: 480px;
   margin: 0 auto;
   padding: 18px 20px calc(env(safe-area-inset-bottom) + 18px);
-  background: #1a2535;
+  background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: 18px 18px 0 0;
-  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.5);
+  border-radius: 16px 16px 0 0;
+  box-shadow: 0 -12px 40px var(--warm-shadow);
   transform: translateY(110%);
   transition: transform 0.4s cubic-bezier(0.16, 0.8, 0.3, 1);
 }
@@ -501,7 +408,7 @@ body {
   height: 28px;
   border: none;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(250, 247, 242, 0.08);
   color: var(--text-secondary);
   font-size: 12px;
 }
@@ -563,10 +470,10 @@ body {
 @keyframes share-icon-glow {
   0%,
   100% {
-    filter: drop-shadow(0 0 0 rgba(201, 168, 76, 0));
+    filter: drop-shadow(0 0 0 rgba(212, 168, 83, 0));
   }
   50% {
-    filter: drop-shadow(0 0 6px rgba(201, 168, 76, 0.85));
+    filter: drop-shadow(0 0 6px rgba(212, 168, 83, 0.85));
   }
 }
 
@@ -625,13 +532,13 @@ body {
   height: 48px;
   border: none;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(250, 247, 242, 0.1);
   color: var(--text-secondary);
   font-size: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 6px 20px var(--warm-shadow);
   transition: background 0.2s ease, box-shadow 0.2s ease;
 }
 
@@ -701,18 +608,19 @@ body {
   }
 }
 
-/* Live transcript + "tap to stop" hint float just above the control bar
-   (which occupies ~55% of the screen, below the header, once active). */
+/* Live transcript + "tap to stop" hint float just above the floating
+   control bar. The control bar is now a variable-height overlay (not a
+   fixed 55%-of-screen block), so these use a generous fixed clearance
+   rather than a percentage tied to the old layout. */
 .ask-subtitle {
   position: fixed;
   left: 24px;
   right: 24px;
-  bottom: calc((100vh - 60px - env(safe-area-inset-top)) * 0.55 + 12px);
-  bottom: calc((100dvh - 60px - env(safe-area-inset-top)) * 0.55 + 12px);
+  bottom: calc(env(safe-area-inset-bottom) + 300px);
   z-index: 25;
   padding: 12px 16px;
-  border-radius: 14px;
-  background: rgba(15, 25, 35, 0.9);
+  border-radius: 16px;
+  background: rgba(15, 27, 45, 0.92);
   border: 1px solid var(--border);
   color: var(--white);
   font-size: 14px;
@@ -726,8 +634,7 @@ body {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: calc((100vh - 60px - env(safe-area-inset-top)) * 0.55 + 52px);
-  bottom: calc((100dvh - 60px - env(safe-area-inset-top)) * 0.55 + 52px);
+  bottom: calc(env(safe-area-inset-bottom) + 340px);
   z-index: 25;
   padding: 6px;
   font-size: 11px;
@@ -748,7 +655,7 @@ body {
   z-index: 60;
   padding: 12px 20px;
   border-radius: 999px;
-  background: rgba(15, 25, 35, 0.95);
+  background: rgba(15, 27, 45, 0.95);
   border: 1px solid var(--border);
   color: var(--white);
   font-size: 13px;
@@ -770,7 +677,7 @@ body {
   position: fixed;
   inset: 0;
   z-index: 29;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(10, 8, 4, 0.55);
 }
 
 .settings-drawer {
@@ -782,7 +689,7 @@ body {
   width: min(340px, 86vw);
   background: var(--bg-elevated);
   border-left: 1px solid var(--border);
-  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.45);
+  box-shadow: -12px 0 40px var(--warm-shadow);
   transform: translateX(100%);
   transition: transform 0.32s cubic-bezier(0.16, 0.8, 0.3, 1);
   display: flex;
@@ -840,7 +747,7 @@ body {
   gap: 2px;
   padding: 12px 14px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 16px;
   background: transparent;
   text-align: left;
 }
@@ -878,7 +785,7 @@ body {
   gap: 2px;
   padding: 10px 4px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 16px;
   background: transparent;
   text-align: center;
 }
@@ -907,7 +814,7 @@ body {
   width: 100%;
   padding: 12px 14px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 16px;
   background: var(--bg);
   color: var(--white);
   font-size: 14px;
@@ -935,7 +842,7 @@ body {
 .account-btn {
   width: 100%;
   padding: 12px;
-  border-radius: 14px;
+  border-radius: 16px;
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.03em;
@@ -985,7 +892,7 @@ body {
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: radial-gradient(circle at 50% 0%, #142230 0%, var(--bg) 60%);
+  background: radial-gradient(circle at 50% 0%, #1F3247 0%, var(--bg) 60%);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1109,7 +1016,7 @@ body {
   width: 100%;
   padding: 14px 16px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 16px;
   background: var(--bg-elevated);
   color: var(--white);
   font-size: 16px;
@@ -1161,7 +1068,7 @@ body {
 .onboarding-card {
   padding: 18px 12px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 16px;
   background: var(--bg-elevated);
   color: var(--white);
   font-size: 13px;
@@ -1227,7 +1134,7 @@ body {
   gap: 6px;
   padding: 18px 12px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 16px;
   background: var(--bg-elevated);
   color: var(--white);
   font-size: 14px;
@@ -1260,7 +1167,7 @@ body {
   gap: 4px;
   padding: 16px 18px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 16px;
   background: var(--bg-elevated);
   text-align: left;
 }
@@ -1380,4 +1287,160 @@ body {
   opacity: 0.35;
   box-shadow: none;
   pointer-events: none;
+}
+
+/* Onboarding splash cactus (Screen 0) — replaces the old compass rose. */
+.onboarding-splash-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 8px;
+}
+
+/* Map pin popup — content of the Google Maps InfoWindow opened when a pin
+   is tapped (see app.js buildPinPopupContent()). Google renders this inside
+   its own InfoWindow chrome, so it's kept simple/self-contained rather than
+   relying on the app's outer layout. */
+.map-pin-popup {
+  font-family: var(--font-sans);
+  padding: 4px 2px;
+  min-width: 160px;
+}
+
+.map-pin-popup-name {
+  font-weight: 700;
+  font-size: 14px;
+  color: #1a1a1a;
+  margin-bottom: 2px;
+}
+
+.map-pin-popup-type {
+  font-size: 12px;
+  color: #6b6b6b;
+  margin-bottom: 8px;
+}
+
+.map-pin-popup-btn {
+  border: none;
+  border-radius: 999px;
+  padding: 8px 14px;
+  background: var(--gold);
+  color: var(--bg);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* Camera "point and learn" overlay — full-screen live camera feed with a
+   warm-styled capture frame. See CAMERA_ENABLED in server.js/app.js. */
+.camera-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.camera-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.camera-frame {
+  position: absolute;
+  inset: 32px calc(env(safe-area-inset-right) + 20px) 140px calc(env(safe-area-inset-left) + 20px);
+  border: 2px solid var(--gold-glow);
+  border-radius: 24px;
+  pointer-events: none;
+}
+
+.camera-close-btn {
+  position: absolute;
+  top: calc(env(safe-area-inset-top) + 16px);
+  right: 20px;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(15, 27, 45, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: var(--white);
+  font-size: 16px;
+  z-index: 2;
+}
+
+.camera-identify-btn {
+  position: absolute;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom) + 32px);
+  transform: translateX(-50%);
+  border: none;
+  border-radius: 999px;
+  padding: 16px 32px;
+  background: var(--gold);
+  color: var(--bg);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  box-shadow: 0 10px 30px var(--gold-glow);
+  z-index: 2;
+}
+
+.camera-identify-btn:active {
+  transform: translateX(-50%) scale(0.97);
+}
+
+/* Delete account + privacy link — bottom of the settings drawer. */
+.settings-danger {
+  margin-top: 12px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+
+.delete-account-btn {
+  border: none;
+  background: transparent;
+  color: var(--terracotta);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px;
+}
+
+.delete-account-confirm {
+  margin-top: 10px;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(196, 98, 45, 0.1);
+  border: 1px solid var(--terracotta-glow);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.delete-account-confirm-btn {
+  display: block;
+  margin: 10px auto 0;
+  border: none;
+  border-radius: 999px;
+  padding: 10px 18px;
+  background: var(--terracotta);
+  color: var(--white);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.privacy-link {
+  display: inline-block;
+  margin-top: 16px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }

@@ -2,11 +2,20 @@ const appEl = document.querySelector(".app");
 const startBtn = document.getElementById("start-btn");
 const startPrompt = document.getElementById("start-prompt");
 const tourControls = document.getElementById("tour-controls");
-const statusCard = document.getElementById("status-card");
 const statusText = document.getElementById("status-text");
 const locationName = document.getElementById("location-name");
+const neighborhoodNameEl = document.getElementById("neighborhood-name");
 const homePhoto = document.getElementById("home-photo");
 const pulseEl = document.getElementById("pulse");
+const mapEl = document.getElementById("map");
+const cameraOverlay = document.getElementById("camera-overlay");
+const cameraVideo = document.getElementById("camera-video");
+const cameraCanvas = document.getElementById("camera-canvas");
+const cameraCloseBtn = document.getElementById("camera-close-btn");
+const cameraIdentifyBtn = document.getElementById("camera-identify-btn");
+const deleteAccountBtn = document.getElementById("delete-account-btn");
+const deleteAccountConfirm = document.getElementById("delete-account-confirm");
+const deleteAccountConfirmBtn = document.getElementById("delete-account-confirm-btn");
 const playerCard = document.getElementById("player-card");
 const drawerHandle = document.getElementById("drawer-handle");
 const drawerClose = document.getElementById("drawer-close");
@@ -91,8 +100,24 @@ let currentAudioObjectUrl = null;
 let selectedSpeed = 1;
 let currentNeighborhoodName = null;
 let currentPlaceName = null;
+let currentCity = null;
+let currentCountry = null;
 let lastContextPlaces = [];
 let correctionContext = null;
+
+// Weather — fetched on tour start and refreshed every 30 min; passed as
+// context to /api/narrate and /api/ask. Never blocks the tour if it fails.
+let currentWeather = null;
+const WEATHER_REFRESH_MS = 30 * 60 * 1000;
+let weatherRefreshInterval = null;
+
+// Interest-matched places (see INTEREST_TYPE_MAP server-side) — loaded once
+// per orientation area and used for both priority map pins and the
+// proactive "something fascinating up ahead" guidance.
+let interestPlaces = [];
+const INTEREST_PROACTIVE_MIN_METERS = 100;
+const INTEREST_PROACTIVE_MAX_METERS = 300;
+const INTEREST_IMMEDIATE_METERS = 30;
 
 // GPS stabilization: don't act on the raw first fix, which can be noisy.
 // Show a fast, provisional welcome immediately, but wait for a couple of
@@ -118,6 +143,10 @@ const TRAVEL_MIN_METERS = 10;
 let orientationCenter = null;
 let isOriented = false;
 const narratedPlaceIds = new Set();
+
+// Which place's map pin currently shows the pulsing "narrating now" ring —
+// see buildPlaceMarkerIcon()/refreshAllPlaceMarkers() in the map module.
+let narratingPlaceId = null;
 
 // Short-term memory: every narration and every question/answer pair, sent
 // (last 5) to /api/narrate and /api/ask so Sabri has context of the walk so
@@ -677,6 +706,43 @@ if (settingsGoogleBtn) {
   settingsGoogleBtn.addEventListener("click", signInWithGoogle);
 }
 
+// Requires an explicit second tap (the confirmation panel) before doing
+// anything irreversible — a single accidental tap on the red button alone
+// never deletes anything.
+if (deleteAccountBtn) {
+  deleteAccountBtn.addEventListener("click", () => {
+    deleteAccountConfirm.classList.remove("hidden");
+  });
+}
+
+if (deleteAccountConfirmBtn) {
+  deleteAccountConfirmBtn.addEventListener("click", async () => {
+    deleteAccountConfirmBtn.disabled = true;
+    deleteAccountConfirmBtn.textContent = "Deleting...";
+
+    try {
+      if (currentUser) {
+        await fetch("/api/auth/delete-account", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: currentUser.id }),
+        });
+        if (supabaseClient) await supabaseClient.auth.signOut();
+      }
+    } catch (error) {
+      // Proceed with the local reset regardless — the user asked to leave.
+    }
+
+    try {
+      localStorage.clear();
+    } catch (error) {
+      // Non-fatal.
+    }
+
+    location.reload();
+  });
+}
+
 initializeAuthState();
 
 // --- Settings (voice / tour depth / language), persisted to localStorage ---
@@ -869,6 +935,300 @@ window.addEventListener("appinstalled", () => {
   deferredInstallPrompt = null;
 });
 
+// --- Map-based home screen ---
+// Full-screen Google Map that's always live (not gated behind Start Tour) —
+// the user location dot, place pins, and everything else layer on top of it
+// as the tour progresses. See initMap() below for the warm custom style.
+
+// Warm, sandy/parchment style tuned for bright-sunlight readability — the
+// opposite of a typical dark/night map style.
+const MAP_STYLE = [
+  { elementType: "geometry", stylers: [{ color: "#F2E9DA" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#3A2F22" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#F2E9DA" }, { weight: 3 }] },
+  { featureType: "water", elementType: "geometry", stylers: [{ color: "#A9CBD8" }] },
+  { featureType: "landscape", elementType: "geometry", stylers: [{ color: "#EFE3CF" }] },
+  { featureType: "poi", elementType: "geometry", stylers: [{ color: "#E4D8BE" }] },
+  { featureType: "poi.park", elementType: "geometry", stylers: [{ color: "#C9D9B5" }] },
+  // Default Google business/POI icons compete visually with our own place
+  // pins (see upsertPlaceMarker) — hide them and their labels entirely.
+  { featureType: "poi", elementType: "labels.icon", stylers: [{ visibility: "off" }] },
+  { featureType: "poi.business", stylers: [{ visibility: "off" }] },
+  { featureType: "road", elementType: "geometry", stylers: [{ color: "#FBF6EC" }] },
+  { featureType: "road.arterial", elementType: "geometry", stylers: [{ color: "#F7EFDD" }] },
+  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#E9C989" }] },
+  { featureType: "road", elementType: "labels.icon", stylers: [{ visibility: "off" }] },
+  { featureType: "administrative", elementType: "geometry.stroke", stylers: [{ color: "#C9B896" }] },
+  { featureType: "transit", stylers: [{ visibility: "off" }] },
+];
+
+const MAP_WORLD_ZOOM = 2;
+const MAP_CITY_ZOOM = 17;
+const MAP_WIDE_ZOOM = 15;
+
+let map = null;
+let userLocationMarker = null;
+const placeMarkersByPlaceId = new Map();
+let activeInfoWindow = null;
+let hasMapCenteredOnUser = false;
+
+function waitForGoogleMaps() {
+  return new Promise((resolve) => {
+    if (window.google && window.google.maps) {
+      resolve();
+      return;
+    }
+    const interval = setInterval(() => {
+      if (window.google && window.google.maps) {
+        clearInterval(interval);
+        resolve();
+      }
+    }, 150);
+  });
+}
+
+async function initMap() {
+  if (!mapEl) return;
+  await waitForGoogleMaps();
+
+  // Neutral world view — no specific city — until the user's real GPS fix
+  // re-centers this (see updateUserLocationOnMap).
+  map = new google.maps.Map(mapEl, {
+    center: { lat: 20, lng: 0 },
+    zoom: MAP_WORLD_ZOOM,
+    disableDefaultUI: true,
+    gestureHandling: "greedy",
+    styles: MAP_STYLE,
+  });
+}
+
+initMap();
+
+function buildUserLocationIcon(heading) {
+  const hasHeading = typeof heading === "number" && !Number.isNaN(heading);
+  const arrow = hasHeading
+    ? `<g transform="rotate(${heading} 28 28)"><path d="M28 6 L34 20 L28 15 L22 20 Z" fill="#D4A853"/></g>`
+    : "";
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="56" height="56" viewBox="0 0 56 56">` +
+    `<circle cx="28" cy="28" r="18" fill="#D4A853" fill-opacity="0.22"/>` +
+    `<circle cx="28" cy="28" r="10" fill="#D4A853" fill-opacity="0.45"/>` +
+    `${arrow}` +
+    `<circle cx="28" cy="28" r="6" fill="#D4A853" stroke="#FAF7F2" stroke-width="2"/>` +
+    `</svg>`;
+  return {
+    url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg),
+    scaledSize: new google.maps.Size(56, 56),
+    anchor: new google.maps.Point(28, 28),
+  };
+}
+
+function updateUserLocationOnMap(latitude, longitude, heading) {
+  if (!map) return;
+  const position = { lat: latitude, lng: longitude };
+  const icon = buildUserLocationIcon(heading);
+
+  if (!userLocationMarker) {
+    userLocationMarker = new google.maps.Marker({ position, map, icon, zIndex: 1000 });
+  } else {
+    userLocationMarker.setPosition(position);
+    userLocationMarker.setIcon(icon);
+  }
+
+  if (!hasMapCenteredOnUser) {
+    hasMapCenteredOnUser = true;
+    map.setCenter(position);
+    map.setZoom(MAP_CITY_ZOOM);
+  } else {
+    map.panTo(position);
+  }
+}
+
+// Pin size/color: large gold for interest-matched places, medium gold for
+// other nearby candidates, small warm grey for already-visited-this-session,
+// and a pulsing gold ring layered on top for whichever place is currently
+// narrating.
+function buildPlaceMarkerIcon({ isInterestMatch, isVisited, isNarratingNow }) {
+  const size = isNarratingNow ? 30 : isInterestMatch ? 26 : isVisited ? 14 : 18;
+  const color = isVisited && !isNarratingNow ? "#B8A898" : "#D4A853";
+  const ringSvg = isNarratingNow
+    ? `<circle cx="20" cy="20" r="18" fill="none" stroke="#D4A853" stroke-width="2" opacity="0.6">` +
+      `<animate attributeName="r" values="12;18;12" dur="1.8s" repeatCount="indefinite"/>` +
+      `<animate attributeName="opacity" values="0.7;0;0.7" dur="1.8s" repeatCount="indefinite"/>` +
+      `</circle>`
+    : "";
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40">` +
+    `${ringSvg}` +
+    `<circle cx="20" cy="20" r="${size / 2}" fill="${color}" stroke="#0F1B2D" stroke-width="1.5"/>` +
+    `</svg>`;
+  return {
+    url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg),
+    scaledSize: new google.maps.Size(40, 40),
+    anchor: new google.maps.Point(20, 20),
+  };
+}
+
+function buildPinPopupContent(place) {
+  const typeLabel = PLACE_TYPE_LABELS[place.primaryType] || place.primaryType || "Place";
+  const container = document.createElement("div");
+  container.className = "map-pin-popup";
+  container.innerHTML =
+    `<div class="map-pin-popup-name"></div>` +
+    `<div class="map-pin-popup-type"></div>` +
+    `<button type="button" class="map-pin-popup-btn">Tell me about this →</button>`;
+  container.querySelector(".map-pin-popup-name").textContent = place.name;
+  container.querySelector(".map-pin-popup-type").textContent = typeLabel;
+  container.querySelector(".map-pin-popup-btn").addEventListener("click", () => {
+    if (activeInfoWindow) activeInfoWindow.close();
+    triggerNarrationForPlace(place);
+  });
+  return container;
+}
+
+// Adds/updates a pin for a place. isInterestMatch/isVisited/isNarratingNow
+// determine its size/color (see buildPlaceMarkerIcon). Safe to call
+// repeatedly for the same placeId — just updates the existing marker.
+function upsertPlaceMarker(place, { isInterestMatch } = {}) {
+  if (!map || !place || !place.placeId || typeof place.latitude !== "number" || typeof place.longitude !== "number") {
+    return;
+  }
+
+  const resolvedIsInterestMatch =
+    typeof isInterestMatch === "boolean" ? isInterestMatch : interestPlaces.some((p) => p.placeId === place.placeId);
+  const isVisited = narratedPlaceIds.has(place.placeId) || visitedPlaceIds.has(place.placeId);
+  const isNarratingNow = narratingPlaceId === place.placeId;
+  const icon = buildPlaceMarkerIcon({ isInterestMatch: resolvedIsInterestMatch, isVisited, isNarratingNow });
+
+  let marker = placeMarkersByPlaceId.get(place.placeId);
+  if (!marker) {
+    marker = new google.maps.Marker({
+      position: { lat: place.latitude, lng: place.longitude },
+      map,
+      icon,
+      zIndex: isNarratingNow ? 900 : resolvedIsInterestMatch ? 500 : 200,
+    });
+    marker.addListener("click", () => {
+      if (activeInfoWindow) activeInfoWindow.close();
+      activeInfoWindow = new google.maps.InfoWindow({ content: buildPinPopupContent(place) });
+      activeInfoWindow.open({ map, anchor: marker });
+    });
+    placeMarkersByPlaceId.set(place.placeId, marker);
+  } else {
+    marker.setIcon(icon);
+  }
+}
+
+function refreshAllPlaceMarkers() {
+  const interestPlaceIds = new Set(interestPlaces.map((p) => p.placeId));
+  for (const [placeId, marker] of placeMarkersByPlaceId) {
+    const isVisited = narratedPlaceIds.has(placeId) || visitedPlaceIds.has(placeId);
+    const isNarratingNow = narratingPlaceId === placeId;
+    marker.setIcon(buildPlaceMarkerIcon({ isInterestMatch: interestPlaceIds.has(placeId), isVisited, isNarratingNow }));
+  }
+}
+
+// User tapped a pin's "Tell me about this →" button — narrate that place
+// immediately, bypassing the normal cooldown/discovery flow (this is an
+// explicit user request, not the passive walking-discovery pipeline).
+async function triggerNarrationForPlace(place) {
+  if (isNarrating || isConversing) return;
+  await narrateAndSpeak({
+    tier: "specific",
+    places: [place],
+    heading: lastHeading,
+    triggerPosition: lastPosition || { latitude: place.latitude, longitude: place.longitude },
+  });
+}
+
+// --- Weather ---
+
+async function fetchWeather(latitude, longitude) {
+  try {
+    const response = await fetch(`/api/weather?lat=${latitude}&lng=${longitude}`);
+    const data = await response.json();
+    currentWeather = response.ok ? data.weather || null : null;
+  } catch (error) {
+    currentWeather = null;
+  }
+}
+
+function startWeatherRefresh(latitude, longitude) {
+  fetchWeather(latitude, longitude);
+  clearInterval(weatherRefreshInterval);
+  weatherRefreshInterval = setInterval(() => {
+    if (lastPosition) fetchWeather(lastPosition.latitude, lastPosition.longitude);
+  }, WEATHER_REFRESH_MS);
+}
+
+// --- Interest-based map pins + proactive guidance ---
+// See INTEREST_TYPE_MAP in server.js for the interest → Google Places type
+// mapping (server does the mapping; the client just passes the user's raw
+// onboarding interest labels).
+
+async function loadInterestPlaces(latitude, longitude) {
+  if (!userProfile || !Array.isArray(userProfile.interests) || userProfile.interests.length === 0) {
+    interestPlaces = [];
+    return;
+  }
+  try {
+    const params = new URLSearchParams({
+      lat: String(latitude),
+      lng: String(longitude),
+      interests: userProfile.interests.join("|"),
+    });
+    const response = await fetch(`/api/interest-places?${params.toString()}`);
+    const data = await response.json();
+    interestPlaces = response.ok && Array.isArray(data.places) ? data.places : [];
+    interestPlaces.forEach((place) => upsertPlaceMarker(place, { isInterestMatch: true }));
+  } catch (error) {
+    interestPlaces = [];
+  }
+}
+
+// Finds the nearest not-yet-narrated interest place and buckets it into
+// "immediately narrate" (within 30m — bypasses the normal cooldown) or
+// "mention proactively at the end of this narration" (100-300m away).
+function findNearbyInterestPlace(latitude, longitude, heading) {
+  const here = { latitude, longitude };
+  let nearest = null;
+  let nearestDistance = Infinity;
+
+  for (const place of interestPlaces) {
+    if (narratedPlaceIds.has(place.placeId) || visitedPlaceIds.has(place.placeId)) continue;
+    if (typeof place.latitude !== "number" || typeof place.longitude !== "number") continue;
+    const distance = distanceInMeters(here, { latitude: place.latitude, longitude: place.longitude });
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearest = place;
+    }
+  }
+
+  if (!nearest) return { immediate: null, proactive: null };
+
+  if (nearestDistance <= INTEREST_IMMEDIATE_METERS) {
+    return { immediate: nearest, proactive: null };
+  }
+
+  if (nearestDistance >= INTEREST_PROACTIVE_MIN_METERS && nearestDistance <= INTEREST_PROACTIVE_MAX_METERS) {
+    const bearing = travelBearingDegrees(latitude, longitude, nearest.latitude, nearest.longitude);
+    const direction = typeof heading === "number" ? relativeDirectionFromHeading(heading, bearing) : bearingToCompassWord(bearing);
+    return { immediate: null, proactive: { name: nearest.name, distanceMeters: nearestDistance, direction } };
+  }
+
+  return { immediate: null, proactive: null };
+}
+
+// Direction phrased relative to the user's own heading ("to your left") when
+// we know which way they're facing, otherwise falls back to a compass word.
+function relativeDirectionFromHeading(heading, bearingToPlace) {
+  let diff = ((bearingToPlace - heading) % 360 + 360) % 360;
+  if (diff <= 20 || diff >= 340) return "straight ahead";
+  if (diff > 20 && diff < 160) return "right";
+  if (diff >= 160 && diff <= 200) return "behind you";
+  return "left";
+}
+
 // --- Tour controls ---
 
 startBtn.addEventListener("click", () => {
@@ -901,10 +1261,93 @@ cameraBtn.addEventListener("click", (event) => {
   handleCameraTap();
 });
 
-// Placeholder for the camera feature — swap this implementation for real
-// capture functionality later; the button/toast scaffolding stays the same.
-function handleCameraTap() {
-  showToast("Camera feature coming soon");
+// "Point and learn" camera feature. Uses getUserMedia — when this app is
+// ever wrapped with Capacitor for the App Store, the native camera plugin
+// should replace getUserMedia here for better performance/reliability; the
+// rest of the flow (capture → /api/identify → drawer + speech) stays the
+// same either way.
+const CAMERA_ENABLED = true;
+let cameraStream = null;
+let isIdentifying = false;
+
+async function handleCameraTap() {
+  if (!CAMERA_ENABLED) {
+    showToast("Camera feature is unavailable");
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showToast("Camera isn't supported on this device");
+    return;
+  }
+
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    cameraVideo.srcObject = cameraStream;
+    cameraOverlay.classList.remove("hidden");
+  } catch (error) {
+    showToast("Camera permission denied");
+  }
+}
+
+function closeCameraOverlay() {
+  cameraOverlay.classList.add("hidden");
+  if (cameraStream) {
+    cameraStream.getTracks().forEach((track) => track.stop());
+    cameraStream = null;
+  }
+}
+
+if (cameraCloseBtn) {
+  cameraCloseBtn.addEventListener("click", closeCameraOverlay);
+}
+
+if (cameraIdentifyBtn) {
+  cameraIdentifyBtn.addEventListener("click", async () => {
+    if (isIdentifying || !cameraStream) return;
+    isIdentifying = true;
+    cameraIdentifyBtn.textContent = "Looking...";
+
+    try {
+      const videoWidth = cameraVideo.videoWidth || 1280;
+      const videoHeight = cameraVideo.videoHeight || 720;
+      cameraCanvas.width = videoWidth;
+      cameraCanvas.height = videoHeight;
+      const context = cameraCanvas.getContext("2d");
+      context.drawImage(cameraVideo, 0, 0, videoWidth, videoHeight);
+      const imageBase64 = cameraCanvas.toDataURL("image/jpeg", 0.85);
+
+      const response = await fetch("/api/identify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageBase64, mediaType: "image/jpeg" }),
+      });
+      const data = await response.json();
+
+      closeCameraOverlay();
+
+      if (!response.ok || !data.narration) {
+        showToast("Couldn't identify that — try again");
+        return;
+      }
+
+      placeName.textContent = "Sabri";
+      placeDescription.textContent = data.narration;
+      placeDescription.classList.remove("story-description--fallback");
+      playerCard.classList.remove("hidden");
+      playerCard.classList.add("is-open");
+      appEl.classList.add("has-player");
+      startPrompt.classList.add("hidden");
+      tourControls.classList.remove("hidden");
+
+      await speakNarration(data.narration);
+    } catch (error) {
+      closeCameraOverlay();
+      showToast("Couldn't identify that — try again");
+    } finally {
+      isIdentifying = false;
+      cameraIdentifyBtn.textContent = "Identify this";
+    }
+  });
 }
 
 let toastHideTimeout = null;
@@ -1092,6 +1535,7 @@ function onLocation(position) {
     lastHeading = heading;
   }
   recordTravelPosition(latitude, longitude);
+  updateUserLocationOnMap(latitude, longitude, lastHeading);
 
   // Immediate feedback the moment any fix arrives, before GPS has settled.
   if (!hasShownFastWelcome) {
@@ -1186,14 +1630,21 @@ async function showFastWelcome(latitude, longitude) {
     const data = await response.json();
 
     if (response.ok && data.locationName) {
-      statusText.textContent = `GPS finding you in ${data.locationName}...`;
+      statusText.textContent = `Welcome to ${data.locationName}`;
       if (!hasActivePlace) {
         locationName.textContent = data.locationName;
       }
+      if (data.neighborhood && neighborhoodNameEl) {
+        neighborhoodNameEl.textContent = data.neighborhood;
+      }
+      currentCity = data.city || currentCity;
+      currentCountry = data.country || currentCountry;
     }
   } catch (error) {
     // Leave the coordinates fallback in place if this quick check fails.
   }
+
+  startWeatherRefresh(latitude, longitude);
 }
 
 async function reverseGeocode(latitude, longitude) {
@@ -1208,10 +1659,17 @@ async function reverseGeocode(latitude, longitude) {
     });
     const data = await response.json();
 
-    // A narrated place's name is more precise than a general area name, so
-    // don't clobber it once one's already showing.
-    if (response.ok && data.locationName && !hasActivePlace) {
-      locationName.textContent = data.locationName;
+    if (response.ok) {
+      // A narrated place's name is more precise than a general area name, so
+      // don't clobber it once one's already showing.
+      if (data.locationName && !hasActivePlace) {
+        locationName.textContent = data.locationName;
+      }
+      if (data.neighborhood && neighborhoodNameEl && !hasActivePlace) {
+        neighborhoodNameEl.textContent = data.neighborhood;
+      }
+      currentCity = data.city || currentCity;
+      currentCountry = data.country || currentCountry;
     }
   } catch (error) {
     if (error.name === "AbortError") return;
@@ -1226,6 +1684,15 @@ async function reverseGeocode(latitude, longitude) {
 // immediately — the user can stand still and still get a narration.
 async function checkForNarration(latitude, longitude, heading) {
   if (isNarrating || isConversing) return;
+
+  // Interest-matched place within 30m — bypasses the normal cooldown
+  // entirely, since this is exactly the kind of place the user said they
+  // care about and they're standing right next to it.
+  const { immediate } = findNearbyInterestPlace(latitude, longitude, heading);
+  if (immediate) {
+    await narrateAndSpeak({ tier: "specific", places: [immediate], heading, triggerPosition: { latitude, longitude } });
+    return;
+  }
 
   if (lastNarrationEndTime > 0) {
     const cooledDown = Date.now() - lastNarrationEndTime >= NARRATION_COOLDOWN_MS;
@@ -1261,6 +1728,10 @@ async function checkForNarration(latitude, longitude, heading) {
 async function runNeighborhoodOrientation(latitude, longitude) {
   statusText.textContent = "Getting your bearings...";
 
+  // Refresh interest-matched places for this newly-entered area — powers
+  // both the priority map pins and the proactive "up ahead" guidance.
+  loadInterestPlaces(latitude, longitude);
+
   const place = await fetchNearbyPlace(latitude, longitude, NEIGHBORHOOD_PLACE_TYPES, { strategy: "nearest" });
   isOriented = true;
 
@@ -1279,6 +1750,7 @@ async function runNeighborhoodOrientation(latitude, longitude) {
 async function runSpecificZoomIn(latitude, longitude, heading) {
   const contextPlaces = await fetchContextPlaces(latitude, longitude, heading);
   lastContextPlaces = contextPlaces;
+  contextPlaces.forEach((place) => upsertPlaceMarker(place));
 
   const newPlaces = contextPlaces.filter(
     (place) => !narratedPlaceIds.has(place.placeId) && !visitedPlaceIds.has(place.placeId)
@@ -1365,6 +1837,9 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
   statusText.textContent = tier === "neighborhood" ? "Getting your bearings..." : "Generating your story...";
 
   const directionOfTravel = computeDirectionOfTravel();
+  const { proactive: nearbyInterestPlace } = triggerPosition
+    ? findNearbyInterestPlace(triggerPosition.latitude, triggerPosition.longitude, heading)
+    : { proactive: null };
 
   try {
     const response = await fetch("/api/narrate", {
@@ -1384,6 +1859,11 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
         crossSessionVisitedPlaces: crossSessionVisitedPlaceNames,
         returningUserContext,
         isFirstNarrationOfSession,
+        neighborhood: currentNeighborhoodName,
+        city: currentCity,
+        country: currentCountry,
+        weather: currentWeather,
+        nearbyInterestPlace,
       }),
     });
     const data = await response.json();
@@ -1416,8 +1896,16 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
       saveVisitToSupabase(focusedPlace, data.narration);
     }
 
-    const typeLabel = PLACE_TYPE_LABELS[focusedPlace.primaryType] || focusedPlace.primaryType;
-    locationName.textContent = `${focusedPlace.name} - ${typeLabel}`;
+    locationName.textContent = focusedPlace.name;
+    if (neighborhoodNameEl) neighborhoodNameEl.textContent = currentNeighborhoodName || "";
+
+    // Pin for the focused place gets the pulsing "narrating now" ring —
+    // upsert it first (covers pins we haven't drawn yet, e.g. the
+    // neighborhood-orientation tier's place) then refresh every other pin
+    // so any previous narrating-ring is cleared.
+    narratingPlaceId = focusedPlace.placeId;
+    upsertPlaceMarker(focusedPlace);
+    refreshAllPlaceMarkers();
 
     const photoUrl = focusedPlace.photoReference
       ? `/api/photo?ref=${encodeURIComponent(focusedPlace.photoReference)}&maxwidth=800`
@@ -1432,6 +1920,8 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
   } finally {
     isNarrating = false;
     lastNarrationEndTime = Date.now();
+    narratingPlaceId = null;
+    refreshAllPlaceMarkers();
   }
 }
 
@@ -1835,6 +2325,9 @@ async function askSabri(question) {
         correctionContext,
         crossSessionVisitedPlaces: crossSessionVisitedPlaceNames,
         language: settings.language,
+        city: currentCity,
+        country: currentCountry,
+        weather: currentWeather,
       }),
     });
     const data = await response.json();

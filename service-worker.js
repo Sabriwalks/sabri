@@ -1,4 +1,4 @@
-const CACHE_NAME = "sabri-cache-v12";
+const CACHE_NAME = "sabri-cache-v13";
 const ASSETS_TO_CACHE = ["/", "/index.html", "/style.css", "/app.js", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
@@ -41,8 +41,8 @@ function offlineResponse() {
 <title>Sabri — Offline</title>
 <style>
   body {
-    background: #0f1923;
-    color: #ffffff;
+    background: #0F1B2D;
+    color: #FAF7F2;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     display: flex;
     align-items: center;

@@ -13,6 +13,7 @@
   <link rel="stylesheet" href="/style.css" />
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <!--SUPABASE_ENV-->
+  <!--GOOGLE_MAPS_SCRIPT-->
 </head>
 <body>
   <!-- First-launch onboarding. Gates the whole app until "Start Exploring"
@@ -24,11 +25,13 @@
         <!-- SCREEN 0 - splash, auto-advances after 2s -->
         <div class="onboarding-step onboarding-step--splash is-active" data-step="0">
           <div class="onboarding-splash-logo" aria-hidden="true">
+            <!-- Sabri/Sabra cactus — tough outside, sweet inside. -->
             <svg viewBox="0 0 100 100" width="72" height="72">
-              <circle cx="50" cy="50" r="41" fill="none" stroke="#c9a84c" stroke-width="2" />
-              <path d="M50 12 L60 50 L50 88 L40 50 Z" fill="#c9a84c" />
-              <path d="M12 50 L50 40 L88 50 L50 60 Z" fill="#c9a84c" />
-              <circle cx="50" cy="50" r="5" fill="#c9a84c" />
+              <rect x="42" y="14" width="16" height="76" rx="8" fill="#D4A853" />
+              <rect x="24" y="20" width="14" height="38" rx="7" fill="#D4A853" />
+              <rect x="24" y="16" width="14" height="14" rx="7" fill="#D4A853" />
+              <rect x="62" y="12" width="14" height="32" rx="7" fill="#D4A853" />
+              <rect x="62" y="8" width="14" height="14" rx="7" fill="#D4A853" />
             </svg>
           </div>
           <p class="onboarding-splash-tagline">Your personal guide. Everywhere.</p>
@@ -202,28 +205,27 @@
   </div>
 
   <div class="app">
+    <!-- Floating header, always overlaid on the map with a warm blur. -->
     <header class="app-header">
       <button id="settings-btn" class="settings-btn" aria-label="Open settings">⚙️</button>
       <div class="logo">Sabri</div>
     </header>
 
-    <section id="status-card" class="location-section">
-      <div id="home-photo" class="home-photo" aria-hidden="true"></div>
-      <div class="home-photo-overlay" aria-hidden="true"></div>
+    <!-- Full-screen map — see app.js initMap()/updateUserLocationOnMap() for
+         the user location dot, place pins, and pin-tap-to-narrate wiring. -->
+    <div id="map" class="map-container" aria-hidden="true"></div>
 
-      <div class="location-content">
-        <h1 id="location-name" class="location-name">Nachlaot, Jerusalem</h1>
+    <!-- Legacy GPS-lock indicator — kept in the DOM (hidden) purely so
+         pulseEl.classList.add/remove("is-locked") in app.js keeps working
+         unchanged; the map's own user-location dot is the real visual now. -->
+    <div id="pulse" class="pulse hidden" aria-hidden="true">
+      <span class="pulse-ring"></span>
+      <span class="pulse-ring pulse-ring--delay"></span>
+      <span class="pulse-dot"></span>
+    </div>
 
-        <div id="pulse" class="pulse" aria-hidden="true">
-          <span class="pulse-ring"></span>
-          <span class="pulse-ring pulse-ring--delay"></span>
-          <span class="pulse-dot"></span>
-        </div>
-
-        <p id="status-text" class="status-text">Tap start to begin your tour.</p>
-      </div>
-    </section>
-
+    <!-- Floating bottom control bar — semi-transparent warm card over the
+         map, never a solid footer. -->
     <footer class="app-footer">
       <div id="start-prompt" class="start-prompt">
         <p class="tap-hint">Tap to talk</p>
@@ -231,10 +233,16 @@
       </div>
 
       <!-- Always-visible playback controls, anchored full-width across the
-           bottom control bar once a tour is active. Never floating, never
-           hidden inside the drawer — the drawer is for reading the
+           bottom control bar once a tour is active. Never floating loose,
+           never hidden inside the drawer — the drawer is for reading the
            narration text only. -->
       <div id="tour-controls" class="tour-controls hidden">
+        <div class="tour-location-row">
+          <h1 id="location-name" class="location-name">Finding your location...</h1>
+          <p id="neighborhood-name" class="neighborhood-name"></p>
+          <p id="status-text" class="status-text">Tap start to begin your tour.</p>
+        </div>
+
         <div class="speed-controls" role="group" aria-label="Narration speed">
           <button class="speed-btn" data-speed="0.75">0.75x</button>
           <button class="speed-btn is-active" data-speed="1">1.0x</button>
@@ -262,12 +270,27 @@
     </footer>
   </div>
 
+  <!-- Camera "point and learn" overlay — hidden until the camera button is
+       tapped. See CAMERA_ENABLED in app.js for the kill-switch. -->
+  <div id="camera-overlay" class="camera-overlay hidden">
+    <video id="camera-video" class="camera-video" autoplay playsinline muted></video>
+    <canvas id="camera-canvas" class="hidden" aria-hidden="true"></canvas>
+    <div class="camera-frame" aria-hidden="true"></div>
+    <button id="camera-close-btn" class="camera-close-btn" aria-label="Close camera">✕</button>
+    <button id="camera-identify-btn" class="camera-identify-btn">Identify this</button>
+  </div>
+
   <!-- Narration text drawer. Fully collapsed (zero height, untappable) until
        the "Tap to read" row is tapped, then slides up as an overlay above
        everything else. Contains narration text ONLY — playback controls
        live in the control bar so they're never trapped behind it. -->
   <section id="player-card" class="player-card hidden">
     <button id="drawer-close" class="drawer-close" aria-label="Hide story details">✕</button>
+
+    <!-- Reuses the existing applyHomePhoto(url) function unchanged — only
+         its CSS treatment and DOM position moved, from a full-screen photo
+         to the narration drawer's own photo header. -->
+    <div id="home-photo" class="drawer-place-photo" aria-hidden="true"></div>
 
     <p class="now-playing">Now Playing</p>
     <h2 id="place-name" class="story-title">—</h2>
@@ -353,8 +376,17 @@
       </section>
 
       <section class="settings-about">
-        <p>Sabri v1.0 — Your personal AI tour guide. Built with love in Jerusalem.</p>
+        <p>Sabri v1.0 — Your personal AI tour guide, everywhere you go.</p>
         <button id="reset-onboarding-btn" class="reset-onboarding-btn">Reset onboarding</button>
+      </section>
+
+      <section class="settings-danger">
+        <button id="delete-account-btn" class="delete-account-btn">Delete my account</button>
+        <p id="delete-account-confirm" class="delete-account-confirm hidden">
+          This will permanently delete your profile, walk history, and all saved data. This cannot be undone.
+          <button id="delete-account-confirm-btn" class="delete-account-confirm-btn">Yes, delete everything</button>
+        </p>
+        <p><a href="/privacy" class="privacy-link">Privacy Policy</a></p>
       </section>
     </div>
   </aside>

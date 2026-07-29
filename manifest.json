@@ -1,12 +1,13 @@
 {
   "name": "Sabri",
   "short_name": "Sabri",
-  "description": "Your personal AI tour guide",
+  "description": "Your personal AI tour guide — anywhere in the world",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0f1923",
-  "theme_color": "#c9a84c",
+  "background_color": "#0F1B2D",
+  "theme_color": "#D4A853",
   "orientation": "portrait",
+  "camera_usage_description": "Sabri uses your camera so you can point it at something you're curious about and have Sabri identify and tell you its story. Not a standard manifest field — kept here as documentation for when this app is wrapped with Capacitor for the App Store, where it becomes a real NSCameraUsageDescription/native permission string.",
   "icons": [
     {
       "src": "/icon-192.png",

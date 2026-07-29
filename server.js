@@ -15,6 +15,14 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+const OPENWEATHER_API_KEY = process.env.OPENWEATHER_API_KEY;
+const SERPER_API_KEY = process.env.SERPER_API_KEY;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+// Easy kill-switch for the camera "point and learn" feature — flip to false
+// if App Store review ever raises an issue with it, without needing a
+// separate deploy of removed code.
+const CAMERA_ENABLED = true;
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
@@ -139,6 +147,36 @@ const SABRI_SYSTEM_PROMPT =
   "Above all — you make people fall in love with wherever they are. That is " +
   "your gift. That is your purpose. That is what Sabri does.";
 
+// Added right after Sabri's core identity — most people using this app are
+// visiting somewhere unfamiliar, and Sabri's job is bigger than storytelling:
+// it's active spatial/emotional orientation for someone who doesn't know the
+// streets yet.
+const TOURIST_ORIENTATION_GUIDANCE =
+  "TOURIST ORIENTATION MISSION:\n" +
+  "Most people using Sabri are visitors to an unfamiliar place. They do not " +
+  "know the street names, the local context, or how to navigate. Your job " +
+  "goes beyond telling stories — you actively orient them and help them " +
+  "feel confident and excited in an unfamiliar environment.\n\n" +
+  "Always include:\n" +
+  "- Spatial orientation: cardinal directions and approximate distances " +
+  '(\'About 200 meters to your north...\', \'Just around the corner to ' +
+  "your left...')\n" +
+  "- Environmental context: help them understand where they are in the " +
+  "city ('You are in the oldest part of the city', 'This street runs from " +
+  "the old market down to the waterfront', 'You have just crossed from the " +
+  "modern city into the historic quarter')\n" +
+  "- Visual anchors: tell them what to look for ('Look for the blue tiled " +
+  "dome rising above the roofline', 'Notice how the street suddenly " +
+  "narrows — that is where the Ottoman-era boundary was')\n" +
+  "- Practical awareness woven naturally into stories ('This square comes " +
+  "alive in the evenings', 'The market stalls you see around you have been " +
+  "here in some form since the 12th century')\n" +
+  "- Emotional orientation for first-timers ('First-time visitors often " +
+  "feel a little overwhelmed here — that is part of the magic', 'Take a " +
+  "moment to just look around before we continue')\n\n" +
+  "You are their trusted companion in an unfamiliar place. Make them feel " +
+  "held, oriented, and excited. Never assume they know where anything is.";
+
 // Every narration must end with two things: a closing thought on the
 // current place, and a forward-looking transition that makes the walk feel
 // continuous rather than a series of disconnected stops.
@@ -217,8 +255,9 @@ const PLACE_TYPE_LABELS = {
 };
 
 // Ordered by how "interesting" a place type is; lower index wins when a
-// nearby result matches more than one of these. Synagogue/church/mosque are
-// ranked near the top since this app is built for touring Israel/Jerusalem.
+// nearby result matches more than one of these. Places of worship are
+// ranked near the top since they're consistently rich narration material
+// in almost any city Sabri gets used in, not specific to any one place.
 const ALLOWED_PLACE_TYPES = [
   "synagogue",
   "church",
@@ -252,7 +291,10 @@ const NEIGHBORHOOD_FALLBACK_MAX_METERS = 300;
 const CONTEXT_RADIUS_METERS = 50;
 const CONTEXT_PLACE_LIMIT = 5;
 
-app.use(express.json());
+// Default 100kb limit is far too small for a base64-encoded camera frame
+// (/api/identify) — everything else in this app sends small JSON bodies,
+// so raising the ceiling here doesn't loosen anything that mattered before.
+app.use(express.json({ limit: "8mb" }));
 
 // A real Supabase project URL or anon/publishable key never contains a
 // newline or another env var's name — if either does, something is
@@ -293,7 +335,19 @@ function renderIndexHtml() {
     `  window.SUPABASE_URL = ${JSON.stringify(safeUrl)};\n` +
     `  window.SUPABASE_ANON_KEY = ${JSON.stringify(safeAnonKey)};\n` +
     "</script>";
-  return html.replace("<!--SUPABASE_ENV-->", envScript);
+
+  // Unlike the Places/Geocoding/Photo proxies elsewhere in this file, the
+  // Maps JavaScript API fundamentally requires its key in client-side script
+  // src (the browser loads map tiles directly from Google) — this is
+  // standard practice, not a leak, as long as the key is restricted to
+  // this site's HTTP referrers in the Google Cloud Console.
+  const mapsScript = GOOGLE_MAPS_API_KEY
+    ? `<script src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}&loading=async" async defer></script>`
+    : "";
+
+  return html
+    .replace("<!--SUPABASE_ENV-->", envScript)
+    .replace("<!--GOOGLE_MAPS_SCRIPT-->", mapsScript);
 }
 
 // /auth/callback is where Google sends the user back after sign-in. It's
@@ -305,6 +359,269 @@ app.get(["/", "/index.html", "/auth/callback"], (req, res) => {
     console.log("auth callback route hit");
   }
   res.type("html").send(renderIndexHtml());
+});
+
+// No cookie-parser dependency — just enough manual parsing to read the
+// admin session cookie back. res.cookie() for SETTING cookies is native to
+// Express and needs no middleware.
+function parseCookies(req) {
+  const header = req.headers.cookie;
+  if (!header) return {};
+  return header.split(";").reduce((acc, pair) => {
+    const separatorIndex = pair.indexOf("=");
+    if (separatorIndex === -1) return acc;
+    const key = pair.slice(0, separatorIndex).trim();
+    const value = pair.slice(separatorIndex + 1).trim();
+    if (key) acc[key] = decodeURIComponent(value);
+    return acc;
+  }, {});
+}
+
+const ADMIN_SESSION_COOKIE = "sabri_admin_session";
+const ADMIN_SESSION_MS = 24 * 60 * 60 * 1000;
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[ch]);
+}
+
+function renderAdminShell(bodyHtml) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sabri Admin</title>
+<style>
+  body { background: #0F1B2D; color: #D4A853; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 24px; max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #B8A898; font-size: 12px; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 28px; }
+  .card { background: #1A2B3D; border-radius: 12px; padding: 16px; }
+  .card .label { font-size: 11px; color: #B8A898; text-transform: uppercase; letter-spacing: 0.05em; }
+  .card .value { font-family: "SF Mono", Consolas, monospace; font-size: 26px; color: #FAF7F2; margin-top: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 28px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid rgba(212,168,83,0.15); font-family: "SF Mono", Consolas, monospace; }
+  th { color: #B8A898; font-weight: 600; text-transform: uppercase; font-size: 10px; }
+  td { color: #FAF7F2; }
+  form input { background: #1A2B3D; border: 1px solid #D4A853; border-radius: 8px; padding: 10px 14px; color: #FAF7F2; font-size: 14px; }
+  form button { background: #D4A853; border: none; border-radius: 8px; padding: 10px 18px; font-weight: 700; margin-left: 8px; }
+  .note { font-size: 11px; color: #B8A898; margin-top: 8px; }
+  a { color: #D4A853; }
+</style>
+</head>
+${bodyHtml}
+</html>`;
+}
+
+function renderAdminLogin(error) {
+  return renderAdminShell(`
+<body>
+  <h1>Sabri Admin</h1>
+  ${error ? `<p class="sub" style="color:#C4622D;">${escapeHtml(error)}</p>` : ""}
+  <form method="GET" action="/admin">
+    <input type="password" name="password" placeholder="Password" autofocus />
+    <button type="submit">Enter</button>
+  </form>
+</body>`);
+}
+
+async function renderAdminDashboard() {
+  const [
+    profilesCount,
+    totalWalksCount,
+    recentSessionsResult,
+    allSessionsForStatsResult,
+  ] = await Promise.all([
+    supabaseAdmin.from("profiles").select("*", { count: "exact", head: true }),
+    supabaseAdmin.from("walk_sessions").select("*", { count: "exact", head: true }),
+    supabaseAdmin
+      .from("walk_sessions")
+      .select("city, neighborhood, total_narrations, questions_asked, started_at")
+      .order("started_at", { ascending: false })
+      .limit(10),
+    // supabase-js has no SUM/COUNT DISTINCT aggregate helpers without a raw
+    // SQL RPC, so pull a bounded set of rows and aggregate in memory — fine
+    // for an internal dashboard, not meant to scale past a few thousand rows.
+    supabaseAdmin
+      .from("walk_sessions")
+      .select("user_id, city, total_narrations, started_at")
+      .order("started_at", { ascending: false })
+      .limit(2000),
+  ]);
+
+  const allSessions = allSessionsForStatsResult.data || [];
+  const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+  const activeUsersToday = new Set(
+    allSessions.filter((s) => new Date(s.started_at).getTime() >= oneDayAgo).map((s) => s.user_id)
+  ).size;
+  const totalNarrations = allSessions.reduce((sum, s) => sum + (s.total_narrations || 0), 0);
+
+  const cityCounts = new Map();
+  for (const s of allSessions) {
+    if (!s.city) continue;
+    cityCounts.set(s.city, (cityCounts.get(s.city) || 0) + 1);
+  }
+  const topCities = [...cityCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+
+  const claudeCost = totalNarrations * 0.003;
+  const ttsCost = totalNarrations * 0.01;
+  const placesCost = totalNarrations * 0.002;
+  const totalCost = claudeCost + ttsCost + placesCost;
+
+  const recentRows = (recentSessionsResult.data || [])
+    .map(
+      (s) => `<tr>
+        <td>${escapeHtml(s.city || "—")}</td>
+        <td>${escapeHtml(s.neighborhood || "—")}</td>
+        <td>${s.total_narrations ?? 0}</td>
+        <td>${s.questions_asked ?? 0}</td>
+        <td>${escapeHtml(new Date(s.started_at).toLocaleString())}</td>
+      </tr>`
+    )
+    .join("");
+
+  const cityRows = topCities
+    .map(([city, count]) => `<tr><td>${escapeHtml(city)}</td><td>${count}</td></tr>`)
+    .join("");
+
+  return renderAdminShell(`
+<body>
+  <meta http-equiv="refresh" content="60">
+  <h1>Sabri Admin</h1>
+  <p class="sub">Auto-refreshes every 60 seconds — last loaded ${new Date().toLocaleTimeString()}</p>
+
+  <div class="grid">
+    <div class="card"><div class="label">Registered users</div><div class="value">${profilesCount.count ?? 0}</div></div>
+    <div class="card"><div class="label">Active today</div><div class="value">${activeUsersToday}</div></div>
+    <div class="card"><div class="label">Total walks</div><div class="value">${totalWalksCount.count ?? 0}</div></div>
+    <div class="card"><div class="label">Total narrations</div><div class="value">${totalNarrations}</div></div>
+    <div class="card"><div class="label">Est. cost (recent)</div><div class="value">$${totalCost.toFixed(2)}</div></div>
+  </div>
+
+  <h1 style="font-size:15px;">Last 10 walk sessions</h1>
+  <table>
+    <tr><th>City</th><th>Neighborhood</th><th>Narrations</th><th>Questions</th><th>Started</th></tr>
+    ${recentRows || "<tr><td colspan='5'>No sessions yet.</td></tr>"}
+  </table>
+
+  <h1 style="font-size:15px;">Top cities by walk count</h1>
+  <table>
+    <tr><th>City</th><th>Walks</th></tr>
+    ${cityRows || "<tr><td colspan='2'>No data yet.</td></tr>"}
+  </table>
+
+  <p class="note">Estimated costs are approximations based on average usage (Claude narrations × $0.003, OpenAI TTS × $0.010, Google Places × $0.002 per narration), computed over the last ${allSessions.length} sessions.</p>
+</body>`);
+}
+
+app.get("/admin", async (req, res) => {
+  if (!ADMIN_PASSWORD) {
+    return res.type("html").send(renderAdminLogin("ADMIN_PASSWORD is not configured on the server."));
+  }
+  if (!supabaseAdmin) {
+    return res.type("html").send(renderAdminLogin("Supabase is not configured on the server."));
+  }
+
+  const cookies = parseCookies(req);
+  const providedPassword = req.query.password;
+  const cookieValid = cookies[ADMIN_SESSION_COOKIE] === ADMIN_PASSWORD;
+  const passwordValid = providedPassword === ADMIN_PASSWORD;
+
+  if (!cookieValid && !passwordValid) {
+    return res.type("html").send(renderAdminLogin(providedPassword ? "Incorrect password." : null));
+  }
+
+  if (passwordValid && !cookieValid) {
+    res.cookie(ADMIN_SESSION_COOKIE, ADMIN_PASSWORD, {
+      maxAge: ADMIN_SESSION_MS,
+      httpOnly: true,
+      sameSite: "lax",
+    });
+  }
+
+  try {
+    const html = await renderAdminDashboard();
+    res.type("html").send(html);
+  } catch (error) {
+    res.status(502).type("html").send(renderAdminShell(`<body><p>Failed to load dashboard data.</p></body>`));
+  }
+});
+
+const PRIVACY_EFFECTIVE_DATE = new Date().toLocaleDateString("en-US", {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+});
+
+app.get("/privacy", (req, res) => {
+  res.type("html").send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sabri — Privacy Policy</title>
+<style>
+  body { background: #ffffff; color: #1a1a1a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; max-width: 680px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 { font-size: 26px; margin-bottom: 4px; }
+  h2 { font-size: 17px; margin-top: 32px; color: #0F1B2D; }
+  p, li { font-size: 15px; color: #333; }
+  .meta { color: #777; font-size: 13px; margin-bottom: 32px; }
+  a { color: #C4622D; }
+</style>
+</head>
+<body>
+  <h1>Sabri Privacy Policy</h1>
+  <p class="meta">Effective date: ${PRIVACY_EFFECTIVE_DATE}</p>
+
+  <p>Sabri is a personal AI-powered audio tour guide. This page explains what information we collect, how we use it, and how you can control it.</p>
+
+  <h2>What we collect</h2>
+  <ul>
+    <li>Your GPS location, only while the app is actively open and in use</li>
+    <li>Your name and preferences from onboarding (interests, companions, language, tour depth)</li>
+    <li>Places you have visited during tours, so Sabri doesn't repeat itself</li>
+    <li>Questions you ask Sabri during a tour</li>
+  </ul>
+
+  <h2>How we use it</h2>
+  <ul>
+    <li>To personalize your tour experience to your interests and preferences</li>
+    <li>To remember places you've already visited so we never repeat a narration</li>
+    <li>To improve Sabri over time</li>
+  </ul>
+
+  <h2>What we do not do</h2>
+  <ul>
+    <li>We do not sell your data</li>
+    <li>We do not share your data with advertisers</li>
+    <li>We do not store your precise location history beyond your current session</li>
+  </ul>
+
+  <h2>Data storage</h2>
+  <p>Your data is stored with Supabase, hosted in Zurich, Switzerland — a GDPR-compliant jurisdiction.</p>
+
+  <h2>Data retention</h2>
+  <p>Your profile and visit history are stored until you delete your account.</p>
+
+  <h2>How to delete your data</h2>
+  <p>You can delete your account and all associated data at any time from Settings → Delete my account, or by contacting <a href="mailto:hello@getsabri.com">hello@getsabri.com</a>.</p>
+
+  <h2>Your rights (GDPR)</h2>
+  <p>If you are located in the EU/EEA, you have the right to access, correct, and delete your personal data at any time.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy? Reach us at <a href="mailto:hello@getsabri.com">hello@getsabri.com</a>.</p>
+
+  <h2>Governing law</h2>
+  <p>This policy is currently maintained independently and will be updated to reflect the governing jurisdiction upon incorporation.</p>
+</body>
+</html>`);
 });
 
 app.use(express.static(__dirname, { index: false }));
@@ -451,7 +768,11 @@ app.get("/api/geocode", async (req, res) => {
       return res.status(502).json({ error: `Google Geocoding API error: ${data.status}` });
     }
 
-    res.json({ locationName: extractLocationName(data.results || []) });
+    const results = data.results || [];
+    res.json({
+      locationName: extractLocationName(results),
+      ...extractLocationComponents(results),
+    });
   } catch (error) {
     res.status(502).json({ error: "Failed to reach Google Geocoding API." });
   }
@@ -488,6 +809,219 @@ app.get("/api/photo", async (req, res) => {
   }
 });
 
+// Maps onboarding interest labels to Google Places types, used to
+// proactively search for places matching what this specific person cares
+// about (rather than only reacting to whatever's nearest).
+const INTEREST_TYPE_MAP = {
+  "Deep history": ["museum", "tourist_attraction", "church", "synagogue", "mosque", "cemetery"],
+  "Faith & spirituality": ["church", "synagogue", "mosque", "hindu_temple", "place_of_worship"],
+  "Hidden stories": ["local_government_office", "point_of_interest", "neighborhood"],
+  "Architecture & beauty": ["museum", "art_gallery", "city_hall", "library", "university"],
+  "Food & living culture": ["restaurant", "cafe", "bakery", "market", "bar"],
+  "People & community": ["park", "community_center", "market"],
+  "Art & creativity": ["art_gallery", "museum", "movie_theater", "performing_arts_theater"],
+  "Nature & landscape": ["park", "natural_feature", "campground", "beach"],
+};
+const INTEREST_PLACES_RADIUS_METERS = 800;
+const INTEREST_PLACES_LIMIT = 12;
+
+// Proactive pin loading: on tour start, search for places matching the
+// user's onboarding interests within a wide radius, so Sabri can highlight
+// and route toward things this specific person cares about instead of only
+// ever reacting to whatever's closest.
+app.get("/api/interest-places", async (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+  const interests = req.query.interests ? req.query.interests.split("|").filter(Boolean) : [];
+
+  if (Number.isNaN(lat) || Number.isNaN(lng)) {
+    return res.status(400).json({ error: "lat and lng query params are required." });
+  }
+  if (!GOOGLE_MAPS_API_KEY) {
+    return res.status(500).json({ error: "GOOGLE_MAPS_API_KEY is not configured on the server." });
+  }
+
+  const types = [...new Set(interests.flatMap((interest) => INTEREST_TYPE_MAP[interest] || []))];
+  if (types.length === 0) {
+    return res.json({ places: [] });
+  }
+
+  try {
+    const results = await fetchNearbySearch(lat, lng, INTEREST_PLACES_RADIUS_METERS);
+    const places = pickNearestPlaces(results, types, lat, lng, null, INTEREST_PLACES_LIMIT);
+    res.json({ places });
+  } catch (error) {
+    res.status(502).json({ error: "Failed to reach Google Places API." });
+  }
+});
+
+// In-memory cache, 30 minutes per rounded lat/lng — avoids burning through
+// OpenWeatherMap's free-tier daily call limit when the same small area gets
+// checked repeatedly during a walk.
+const WEATHER_CACHE_MS = 30 * 60 * 1000;
+const weatherCache = new Map();
+
+app.get("/api/weather", async (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+
+  if (Number.isNaN(lat) || Number.isNaN(lng)) {
+    return res.status(400).json({ error: "lat and lng query params are required." });
+  }
+
+  // Gracefully degrades: no key configured just means no weather context,
+  // never a broken app.
+  if (!OPENWEATHER_API_KEY) {
+    return res.json({ weather: null });
+  }
+
+  const cacheKey = `${lat.toFixed(2)},${lng.toFixed(2)}`;
+  const cached = weatherCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < WEATHER_CACHE_MS) {
+    return res.json({ weather: cached.weather });
+  }
+
+  try {
+    const url = new URL("https://api.openweathermap.org/data/2.5/weather");
+    url.searchParams.set("lat", String(lat));
+    url.searchParams.set("lon", String(lng));
+    url.searchParams.set("units", "metric");
+    url.searchParams.set("appid", OPENWEATHER_API_KEY);
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      return res.json({ weather: null });
+    }
+    const data = await response.json();
+
+    const celsius = data.main?.temp;
+    const weather = {
+      temperatureC: typeof celsius === "number" ? Math.round(celsius) : null,
+      temperatureF: typeof celsius === "number" ? Math.round((celsius * 9) / 5 + 32) : null,
+      conditions: data.weather?.[0]?.main || null,
+      description: data.weather?.[0]?.description || null,
+      feelsLikeC: typeof data.main?.feels_like === "number" ? Math.round(data.main.feels_like) : null,
+      humidity: data.main?.humidity ?? null,
+      windSpeed: data.wind?.speed ?? null,
+    };
+
+    weatherCache.set(cacheKey, { weather, timestamp: Date.now() });
+    res.json({ weather });
+  } catch (error) {
+    res.json({ weather: null });
+  }
+});
+
+// Weaves current weather into the prompt only when it adds something —
+// Claude decides when it's worth mentioning, this just makes the facts
+// available.
+function buildWeatherGuidance(weather) {
+  if (!weather || typeof weather !== "object" || weather.temperatureC === null) return null;
+  const parts = [`${weather.temperatureC}°C (${weather.temperatureF}°F)`];
+  if (weather.conditions) parts.push(weather.conditions);
+  if (weather.description) parts.push(weather.description);
+
+  return (
+    `Current conditions: ${parts.join(", ")}. Weave this in naturally when ` +
+    `it genuinely adds something (e.g. "it's a beautiful sunny afternoon — ` +
+    `perfect timing to see this courtyard in the golden light", or "given ` +
+    `the heat today, you might appreciate that this building was designed ` +
+    `to stay cool") — not every narration needs weather mentioned, only ` +
+    `when it's actually relevant.`
+  );
+}
+
+// Real-time web search (Serper/Google) so Claude can mention temporary
+// exhibitions, current happenings, or anything time-sensitive about a
+// specific place — degrades gracefully (returns []) with no API key.
+app.post("/api/search", async (req, res) => {
+  const { query } = req.body || {};
+  if (!query) return res.status(400).json({ error: "query is required." });
+  if (!SERPER_API_KEY) return res.json({ results: [] });
+
+  try {
+    const response = await fetch("https://google.serper.dev/search", {
+      method: "POST",
+      headers: { "X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ q: query }),
+    });
+    if (!response.ok) return res.json({ results: [] });
+
+    const data = await response.json();
+    const results = (data.organic || []).slice(0, 3).map((item) => ({
+      title: item.title || null,
+      snippet: item.snippet || null,
+      link: item.link || null,
+    }));
+    res.json({ results });
+  } catch (error) {
+    res.json({ results: [] });
+  }
+});
+
+async function fetchCurrentEventsContext(placeName, city) {
+  if (!SERPER_API_KEY || !placeName) return null;
+  try {
+    const now = new Date();
+    const monthYear = now.toLocaleString("en-US", { month: "long", year: "numeric" });
+    const query = [placeName, city, monthYear].filter(Boolean).join(" ");
+
+    const response = await fetch("https://google.serper.dev/search", {
+      method: "POST",
+      headers: { "X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ q: query }),
+    });
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const topSnippet = data.organic?.[0]?.snippet;
+    if (!topSnippet) return null;
+
+    return (
+      `Current information found via web search: "${topSnippet}"\n\n` +
+      `If this contains anything about current events, exhibitions, or ` +
+      `happenings relevant to this place, weave it in naturally (e.g. ` +
+      `"there happens to be a temporary exhibition here right now that's ` +
+      `worth checking out"). If it's not relevant or doesn't add anything, ` +
+      `ignore it entirely — never force it in.`
+    );
+  } catch (error) {
+    return null;
+  }
+}
+
+// Interest-matched place 100-300m away — Sabri proactively mentions it at
+// the END of the current narration (see TRANSITION_GUIDANCE for the general
+// pattern this feeds into). The client computes distance/direction; this
+// just turns that into an instruction.
+function buildNearbyInterestGuidance(nearbyInterestPlace) {
+  if (!nearbyInterestPlace || !nearbyInterestPlace.name) return null;
+  const { name, distanceMeters, direction } = nearbyInterestPlace;
+  const directionPhrase = direction ? `to your ${direction}` : "nearby";
+
+  return (
+    `There is a place this person will likely find fascinating about ` +
+    `${Math.round(distanceMeters)} meters ${directionPhrase}: ${name}. Since ` +
+    `it's not close enough to visit right now, proactively mention it at ` +
+    `the very end of this narration, after your usual transition — ` +
+    `something like "About ${Math.round(distanceMeters)} meters to your ` +
+    `${direction || "path ahead"} there is something I think you'll find ` +
+    `fascinating — keep walking and I'll tell you about it when you get ` +
+    `closer." Do not describe what it actually is yet — just build ` +
+    `anticipation.`
+  );
+}
+
+// "You are currently in [neighborhood], [city], [country]" — always built
+// from real reverse-geocoded GPS data passed up by the client, never a
+// hardcoded default. Guides Claude explicitly rather than relying on it to
+// infer location context from place names alone.
+function buildLocationGuidance(neighborhood, city, country) {
+  const parts = [neighborhood, city, country].filter(Boolean);
+  if (parts.length === 0) return null;
+  return `You are currently in ${parts.join(", ")}. Guide accordingly.`;
+}
+
 app.post("/api/narrate", async (req, res) => {
   const {
     tier,
@@ -503,6 +1037,11 @@ app.post("/api/narrate", async (req, res) => {
     crossSessionVisitedPlaces,
     returningUserContext,
     isFirstNarrationOfSession,
+    neighborhood,
+    city,
+    country,
+    weather,
+    nearbyInterestPlace,
   } = req.body || {};
   const resolvedTier = tier === "neighborhood" ? "neighborhood" : "specific";
 
@@ -521,12 +1060,27 @@ app.post("/api/narrate", async (req, res) => {
   const resolvedDepth = DEPTH_GUIDANCE[depth] ? depth : "standard";
   const languageName = LANGUAGE_NAMES[language];
 
+  // Current-events web search only makes sense once zoomed in on an actual
+  // place, not the broad neighborhood-orientation tier — and only for the
+  // most likely candidate, since the search has to run before Claude tells
+  // us which place it actually centers the story on.
+  let currentEventsGuidance = null;
+  if (resolvedTier === "specific") {
+    const likelyPlace = places.find((p) => p.relativePosition === "in front of") || places[0];
+    currentEventsGuidance = await fetchCurrentEventsContext(likelyPlace?.name, city);
+  }
+
   const systemPromptParts = [
     SABRI_SYSTEM_PROMPT,
+    TOURIST_ORIENTATION_GUIDANCE,
     buildUserProfileGuidance(userProfile),
+    buildLocationGuidance(neighborhood, city, country),
     buildSessionLogGuidance(sessionLog, userProfile?.name),
     isFirstNarrationOfSession ? buildReturningUserGuidance(returningUserContext, userProfile?.name) : null,
     buildCrossSessionVisitedGuidance(crossSessionVisitedPlaces),
+    buildWeatherGuidance(weather),
+    currentEventsGuidance,
+    buildNearbyInterestGuidance(nearbyInterestPlace),
     TRANSITION_GUIDANCE,
     buildPronunciationGuidance(languageName),
     TIER_GUIDANCE[resolvedTier],
@@ -640,6 +1194,9 @@ app.post("/api/ask", async (req, res) => {
     correctionContext,
     crossSessionVisitedPlaces,
     language,
+    city,
+    country,
+    weather,
   } = req.body || {};
 
   if (!question) {
@@ -660,9 +1217,12 @@ app.post("/api/ask", async (req, res) => {
       `conversationally, as if talking to them face to face. Keep answers to ` +
       `2-3 paragraphs maximum - they are walking and listening, not reading. ` +
       `Stay in character as Sabri at all times.`,
+    TOURIST_ORIENTATION_GUIDANCE,
     buildUserProfileGuidance(userProfile),
+    buildLocationGuidance(neighborhood, city, country),
     buildSessionLogGuidance(sessionLog, userProfile?.name),
     buildCrossSessionVisitedGuidance(crossSessionVisitedPlaces),
+    buildWeatherGuidance(weather),
   ].filter(Boolean);
 
   const compassWord = headingToCompassWord(heading);
@@ -891,6 +1451,65 @@ app.post("/api/speak", async (req, res) => {
   }
 });
 
+const IDENTIFY_SYSTEM_PROMPT =
+  "You are Sabri, a warm knowledgeable tour guide. The user has pointed " +
+  "their camera at something and wants to know about it. Look at the image " +
+  "carefully. Identify what it is (building, landmark, artwork, street " +
+  "sign, food, etc.), then tell the story of what you see in Sabri's warm " +
+  "conversational style. Keep it to 2-3 paragraphs. If you cannot identify " +
+  "something specific, describe what you observe and offer interesting " +
+  "context about that type of thing. Always end with something that makes " +
+  "the user want to explore further.";
+
+// "Point and learn" camera feature — see CAMERA_ENABLED above for the
+// kill-switch. NOTE for the eventual Capacitor/App Store conversion: this
+// currently receives a base64 frame captured via getUserMedia on the
+// frontend; the native camera plugin should replace getUserMedia there for
+// better performance/reliability, but this endpoint itself doesn't change.
+app.post("/api/identify", async (req, res) => {
+  if (!CAMERA_ENABLED) {
+    return res.status(404).json({ error: "Camera feature is disabled." });
+  }
+
+  const { imageBase64, mediaType } = req.body || {};
+  if (!imageBase64) {
+    return res.status(400).json({ error: "imageBase64 is required." });
+  }
+  if (!ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
+  }
+
+  const resolvedMediaType = ["image/jpeg", "image/png", "image/webp"].includes(mediaType)
+    ? mediaType
+    : "image/jpeg";
+  // Data URIs (data:image/jpeg;base64,....) come through from <canvas>.toDataURL
+  // — strip the prefix if present so we only send the raw base64 payload.
+  const rawBase64 = imageBase64.includes(",") ? imageBase64.split(",").pop() : imageBase64;
+
+  try {
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1024,
+      system: IDENTIFY_SYSTEM_PROMPT,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: resolvedMediaType, data: rawBase64 } },
+            { type: "text", text: "What am I looking at?" },
+          ],
+        },
+      ],
+    });
+
+    const narration = message.content.find((block) => block.type === "text")?.text || "";
+    res.json({ narration });
+  } catch (error) {
+    console.error("[debug] /api/identify failed:", error?.message || error);
+    res.status(502).json({ error: "Failed to identify image." });
+  }
+});
+
 // --- Auth / Supabase-backed history endpoints ---
 // All of these use supabaseAdmin (the service-role client), which bypasses
 // RLS — that's fine here because these routes are the trusted server side
@@ -1007,6 +1626,28 @@ app.get("/api/auth/visited-place-ids", async (req, res) => {
   res.json({ placeIds: [...new Set((data || []).map((row) => row.place_id))] });
 });
 
+// Permanently deletes a user's profile, walk history, and auth account.
+// Irreversible — the frontend requires an explicit confirmation tap before
+// ever calling this (see settings' "Delete my account").
+app.delete("/api/auth/delete-account", async (req, res) => {
+  const { userId } = req.body || {};
+  if (!userId) return res.status(400).json({ error: "userId is required." });
+  if (!supabaseAdmin) return res.status(500).json({ error: "Supabase is not configured on the server." });
+
+  try {
+    await Promise.all([
+      supabaseAdmin.from("visited_places").delete().eq("user_id", userId),
+      supabaseAdmin.from("walk_sessions").delete().eq("user_id", userId),
+      supabaseAdmin.from("user_questions").delete().eq("user_id", userId),
+      supabaseAdmin.from("profiles").delete().eq("id", userId),
+    ]);
+    await supabaseAdmin.auth.admin.deleteUser(userId);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(502).json({ error: "Failed to delete account." });
+  }
+});
+
 function extractLocationName(results) {
   const componentByType = {};
 
@@ -1029,6 +1670,31 @@ function extractLocationName(results) {
   if (neighborhood) return neighborhood;
   if (adminArea) return adminArea;
   return results[0]?.formatted_address || null;
+}
+
+// Structured neighborhood/city/country — used to fill in the
+// "You are currently in [neighborhood], [city], [country]" line sent with
+// every narration/ask call, and the returning-user/session-save city
+// fields. Never hardcoded to any specific place — always derived from
+// whatever GPS reverse geocoding actually returns.
+function extractLocationComponents(results) {
+  const componentByType = {};
+
+  for (const result of results) {
+    for (const component of result.address_components || []) {
+      for (const type of component.types) {
+        if (!componentByType[type]) {
+          componentByType[type] = component.long_name;
+        }
+      }
+    }
+  }
+
+  return {
+    neighborhood: componentByType.neighborhood || componentByType.sublocality || null,
+    city: componentByType.locality || componentByType.postal_town || componentByType.administrative_area_level_2 || null,
+    country: componentByType.country || null,
+  };
 }
 
 function pickMostInterestingPlace(results, allowedTypes) {
