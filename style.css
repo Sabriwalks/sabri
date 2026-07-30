@@ -51,6 +51,23 @@ body {
   display: none !important;
 }
 
+/* App-boot loading state — see index.html comment. Covers the whole
+   viewport above both .app and .onboarding until bootstrapApp() (app.js)
+   decides which one to show. */
+.app-boot-loading {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+}
+
+.app-boot-cactus {
+  animation: tour-loading-pulse 1.6s ease-in-out infinite;
+}
+
 /* Floating header — warm navy blur over the map. Absolutely positioned so
    it always sits above the map regardless of tour state, and can never be
    pushed off-screen or covered by anything below it. */
@@ -114,6 +131,49 @@ body {
   display: none !important;
 }
 
+/* Tour-start loading overlay — centered over the map from "Start Wandering"
+   until the first narration is ready. See advanceTourLoadingStage() in
+   app.js for the four progressive messages. */
+.tour-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background: rgba(15, 27, 45, 0.55);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+
+.tour-loading-cactus {
+  animation: tour-loading-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes tour-loading-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.85;
+  }
+  50% {
+    transform: scale(1.12);
+    opacity: 1;
+  }
+}
+
+.tour-loading-text {
+  color: var(--white);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-align: center;
+  padding: 0 32px;
+}
+
 /* Place photo header inside the narration drawer (reuses applyHomePhoto()
    unchanged — only its class/position moved here from a full-screen photo). */
 .drawer-place-photo {
@@ -157,6 +217,60 @@ body {
   color: var(--text-secondary);
   letter-spacing: 0.01em;
   margin-top: 4px;
+}
+
+/* "Sabri is preparing your story..." gets a subtle pulse so it reads as
+   active/alive rather than a static, possibly-stuck label. */
+.status-text.is-loading {
+  color: var(--gold);
+  animation: status-text-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes status-text-pulse {
+  0%,
+  100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Small animated wave shown under the place name while a narration is being
+   generated (place name + neighborhood already visible, story not yet
+   ready) — a quieter companion to the loading status text below it. */
+.narration-wave {
+  display: inline-flex;
+  gap: 3px;
+  align-items: flex-end;
+  height: 12px;
+  margin-top: 4px;
+}
+
+.narration-wave span {
+  width: 3px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--gold);
+  animation: narration-wave-bar 0.9s ease-in-out infinite;
+}
+
+.narration-wave span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.narration-wave span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes narration-wave-bar {
+  0%,
+  100% {
+    height: 4px;
+  }
+  50% {
+    height: 12px;
+  }
 }
 
 /* Narration text drawer — a fixed overlay that slides up from the bottom
@@ -278,6 +392,19 @@ body {
 
 .control-btn:active {
   transform: scale(0.96);
+}
+
+/* Play button's loading state — spinner replaces the play triangle while a
+   narration is being generated, so the button itself communicates "working
+   on it" rather than looking clickable-but-inert. */
+.control-btn .loading-spinner {
+  animation: control-btn-spin 0.9s linear infinite;
+}
+
+@keyframes control-btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* Floating control bar — a warm, blurred navy card anchored to the bottom
@@ -1443,4 +1570,235 @@ body {
   font-size: 12px;
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+
+/* --- Tour mode selector --- */
+
+.tour-mode-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgba(15, 27, 45, 0.92);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.tour-mode-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 380px;
+}
+
+.tour-mode-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  text-align: left;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--bg-elevated);
+}
+
+.tour-mode-card:active {
+  transform: scale(0.98);
+}
+
+.tour-mode-icon {
+  font-size: 32px;
+  margin-bottom: 4px;
+}
+
+.tour-mode-title {
+  font-family: var(--font-serif);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--white);
+}
+
+.tour-mode-desc {
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.tour-mode-cta {
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--gold);
+}
+
+/* --- Guided tour planner --- */
+
+.tour-planner {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: var(--bg);
+  overflow-y: auto;
+  padding: calc(env(safe-area-inset-top) + 24px) 24px calc(env(safe-area-inset-bottom) + 24px);
+}
+
+.planner-step {
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 420px;
+  margin: 0 auto;
+}
+
+.planner-step.is-active {
+  display: flex;
+}
+
+.planner-step--loading {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  min-height: 70vh;
+  gap: 18px;
+}
+
+.planner-title {
+  font-family: var(--font-serif);
+  font-size: 19px;
+  font-weight: 500;
+  color: var(--white);
+  margin-top: 18px;
+}
+
+.planner-step .planner-title:first-child {
+  margin-top: 8px;
+}
+
+.planner-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.planner-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--bg-elevated);
+  text-align: left;
+}
+
+.planner-card.is-selected {
+  border-color: var(--gold);
+  background: var(--gold-soft);
+}
+
+.planner-card-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--white);
+}
+
+.planner-card-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.planner-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.planner-pill,
+.planner-toggle-pill {
+  padding: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.planner-pill.is-selected,
+.planner-toggle-pill.is-active {
+  border-color: var(--gold);
+  background: var(--gold-soft);
+  color: var(--gold);
+}
+
+.planner-link-btn {
+  align-self: flex-start;
+  border: none;
+  background: transparent;
+  color: var(--gold);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  padding: 4px 0;
+}
+
+.planner-note {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+/* --- Planned-tour overview card --- */
+
+.planned-tour-card {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: calc(env(safe-area-inset-bottom) + 16px);
+  z-index: 15;
+  padding: 20px;
+  border-radius: 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--gold-soft);
+  box-shadow: 0 10px 30px var(--warm-shadow);
+}
+
+.planned-tour-title {
+  font-family: var(--font-serif);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--white);
+}
+
+.planned-tour-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin-top: 4px;
+}
+
+.planned-tour-meta {
+  font-size: 12px;
+  color: var(--gold);
+  font-weight: 600;
+  margin-top: 8px;
+}
+
+.planned-tour-discard-btn {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 8px;
 }

@@ -17,9 +17,20 @@ create table if not exists profiles (
   companions text,
   depth text,
   home_city text,
+  language text,
+  voice text,
+  onboarding_complete boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- Idempotent — safe to re-run against a database that already has the
+-- original profiles table from before language/voice/onboarding_complete
+-- existed (create table if not exists is a no-op there, so these columns
+-- would otherwise never get added).
+alter table profiles add column if not exists language text;
+alter table profiles add column if not exists voice text;
+alter table profiles add column if not exists onboarding_complete boolean not null default false;
 
 create table if not exists walk_sessions (
   id uuid primary key default gen_random_uuid(),

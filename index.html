@@ -16,6 +16,23 @@
   <!--GOOGLE_MAPS_SCRIPT-->
 </head>
 <body>
+  <!-- App-boot loading state — covers everything from first paint until
+       bootstrapApp() (app.js) has decided whether to show onboarding or
+       skip straight to the map for a returning signed-in user with
+       onboarding_complete=true. Prevents a flash of the wrong screen while
+       the Supabase session/profile check is in flight. -->
+  <div id="app-boot-loading" class="app-boot-loading">
+    <div class="app-boot-cactus" aria-hidden="true">
+      <svg viewBox="0 0 100 100" width="56" height="56">
+        <rect x="42" y="14" width="16" height="76" rx="8" fill="#D4A853" />
+        <rect x="24" y="20" width="14" height="38" rx="7" fill="#D4A853" />
+        <rect x="24" y="16" width="14" height="14" rx="7" fill="#D4A853" />
+        <rect x="62" y="12" width="14" height="32" rx="7" fill="#D4A853" />
+        <rect x="62" y="8" width="14" height="14" rx="7" fill="#D4A853" />
+      </svg>
+    </div>
+  </div>
+
   <!-- First-launch onboarding. Gates the whole app until "Start Exploring"
        is tapped; never shown again unless reset from settings. -->
   <div id="onboarding" class="onboarding hidden">
@@ -215,6 +232,23 @@
          the user location dot, place pins, and pin-tap-to-narrate wiring. -->
     <div id="map" class="map-container" aria-hidden="true"></div>
 
+    <!-- Tour-start loading state — shown over the map from the moment
+         "Start Wandering" is tapped until the first narration is ready, so
+         the multi-step GPS/places/Claude pipeline never looks frozen. See
+         advanceTourLoadingStage() in app.js. -->
+    <div id="tour-loading-overlay" class="tour-loading-overlay hidden">
+      <div class="tour-loading-cactus" aria-hidden="true">
+        <svg viewBox="0 0 100 100" width="64" height="64">
+          <rect x="42" y="14" width="16" height="76" rx="8" fill="#D4A853" />
+          <rect x="24" y="20" width="14" height="38" rx="7" fill="#D4A853" />
+          <rect x="24" y="16" width="14" height="14" rx="7" fill="#D4A853" />
+          <rect x="62" y="12" width="14" height="32" rx="7" fill="#D4A853" />
+          <rect x="62" y="8" width="14" height="14" rx="7" fill="#D4A853" />
+        </svg>
+      </div>
+      <p id="tour-loading-text" class="tour-loading-text">Finding your location...</p>
+    </div>
+
     <!-- Legacy GPS-lock indicator — kept in the DOM (hidden) purely so
          pulseEl.classList.add/remove("is-locked") in app.js keeps working
          unchanged; the map's own user-location dot is the real visual now. -->
@@ -240,6 +274,9 @@
         <div class="tour-location-row">
           <h1 id="location-name" class="location-name">Finding your location...</h1>
           <p id="neighborhood-name" class="neighborhood-name"></p>
+          <span id="narration-wave" class="narration-wave hidden" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </span>
           <p id="status-text" class="status-text">Tap start to begin your tour.</p>
         </div>
 
@@ -256,7 +293,10 @@
           </button>
 
           <button id="play-btn" class="control-btn control-btn--main" aria-label="Play">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            <svg class="play-icon" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            <svg class="loading-spinner hidden" viewBox="0 0 24 24" width="22" height="22" fill="none">
+              <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-dasharray="42 14" />
+            </svg>
           </button>
           <button id="pause-btn" class="control-btn control-btn--main hidden" aria-label="Pause">
             <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
@@ -278,6 +318,125 @@
     <div class="camera-frame" aria-hidden="true"></div>
     <button id="camera-close-btn" class="camera-close-btn" aria-label="Close camera">✕</button>
     <button id="camera-identify-btn" class="camera-identify-btn">Identify this</button>
+  </div>
+
+  <!-- Tour mode selector — shown instead of immediately starting GPS when
+       "Start Tour" is tapped. Wander = existing flow unchanged; Plan My
+       Tour opens the multi-step planner below. See app.js startBtn handler. -->
+  <div id="tour-mode-modal" class="tour-mode-modal hidden">
+    <button id="tour-mode-close" class="drawer-close" aria-label="Cancel">✕</button>
+    <div class="tour-mode-cards">
+      <button id="tour-mode-wander-btn" class="tour-mode-card">
+        <span class="tour-mode-icon" aria-hidden="true">🚶</span>
+        <span class="tour-mode-title">Wander with Sabri</span>
+        <span class="tour-mode-desc">Follow your feet. Sabri tells you the story of wherever you go.</span>
+        <span class="tour-mode-cta">Start Wandering →</span>
+      </button>
+      <button id="tour-mode-plan-btn" class="tour-mode-card">
+        <span class="tour-mode-icon" aria-hidden="true">🗺️</span>
+        <span class="tour-mode-title">Plan My Tour</span>
+        <span class="tour-mode-desc">Tell Sabri where you are going and what you love. Get a custom route built just for you.</span>
+        <span class="tour-mode-cta">Plan My Tour →</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Guided tour planner — 4 steps: time/distance, start/end points,
+       today's interests, then a loading stage while /api/plan-tour runs.
+       See buildPlannedTourRequestBody()/generatePlannedTour() in app.js. -->
+  <div id="tour-planner" class="tour-planner hidden">
+    <button id="planner-close" class="drawer-close" aria-label="Close planner">✕</button>
+
+    <div class="planner-step is-active" data-planner-step="0">
+      <h2 class="planner-title">How long do you have?</h2>
+      <div class="planner-cards" id="planner-duration-cards">
+        <button class="planner-card" data-value="30-60 minutes">
+          <span class="planner-card-name">Short stroll</span>
+          <span class="planner-card-desc">30-60 minutes</span>
+        </button>
+        <button class="planner-card" data-value="1-2 hours">
+          <span class="planner-card-name">Comfortable walk</span>
+          <span class="planner-card-desc">1-2 hours</span>
+        </button>
+        <button class="planner-card" data-value="2-4 hours">
+          <span class="planner-card-name">Deep exploration</span>
+          <span class="planner-card-desc">2-4 hours</span>
+        </button>
+        <button class="planner-card" data-value="half day">
+          <span class="planner-card-name">Full immersion</span>
+          <span class="planner-card-desc">Half day</span>
+        </button>
+      </div>
+
+      <h2 class="planner-title">How far are you happy to walk?</h2>
+      <div class="planner-pills" id="planner-distance-pills">
+        <button class="planner-pill" data-value="under 1km (easy)">Easy (under 1km)</button>
+        <button class="planner-pill" data-value="1-3km (moderate)">Moderate (1-3km)</button>
+        <button class="planner-pill" data-value="3-5km (active)">Active (3-5km)</button>
+      </div>
+
+      <button class="onboarding-next" id="planner-step0-next" disabled>Continue</button>
+    </div>
+
+    <div class="planner-step" data-planner-step="1">
+      <h2 class="planner-title">Where are you starting?</h2>
+      <input type="text" id="planner-start-input" class="onboarding-input" placeholder="Search for a starting point..." />
+      <button type="button" class="planner-link-btn" id="planner-use-current-location">Use my current location</button>
+
+      <h2 class="planner-title">Do you need to end somewhere specific?</h2>
+      <div class="planner-pills">
+        <button type="button" class="planner-toggle-pill is-active" id="planner-end-no" data-value="no">No, bring me back</button>
+        <button type="button" class="planner-toggle-pill" id="planner-end-yes" data-value="yes">Yes, specific end point</button>
+      </div>
+      <div id="planner-end-field" class="hidden">
+        <input type="text" id="planner-end-input" class="onboarding-input" placeholder="Search for an end point..." />
+      </div>
+
+      <button class="onboarding-next" id="planner-step1-next">Continue</button>
+    </div>
+
+    <div class="planner-step" data-planner-step="2">
+      <h2 class="planner-title">What do you want to focus on today?</h2>
+      <p class="planner-note" id="planner-saved-interests-note"></p>
+      <div class="onboarding-pills" id="planner-interest-pills">
+        <button class="onboarding-pill" data-value="Deep history">Deep history</button>
+        <button class="onboarding-pill" data-value="Faith &amp; spirituality">Faith &amp; spirituality</button>
+        <button class="onboarding-pill" data-value="Hidden stories">Hidden stories</button>
+        <button class="onboarding-pill" data-value="Architecture &amp; beauty">Architecture &amp; beauty</button>
+        <button class="onboarding-pill" data-value="Food &amp; living culture">Food &amp; living culture</button>
+        <button class="onboarding-pill" data-value="People &amp; community">People &amp; community</button>
+        <button class="onboarding-pill" data-value="Politics &amp; society">Politics &amp; society</button>
+        <button class="onboarding-pill" data-value="Art &amp; creativity">Art &amp; creativity</button>
+        <button class="onboarding-pill" data-value="Nature &amp; landscape">Nature &amp; landscape</button>
+        <button class="onboarding-pill" data-value="All of it">All of it</button>
+      </div>
+      <input type="text" id="planner-specific-focus" class="onboarding-input" placeholder="Anything specific? (e.g. 'Roman aqueducts')" />
+
+      <button class="onboarding-next" id="planner-generate-btn">Plan My Tour →</button>
+    </div>
+
+    <div class="planner-step planner-step--loading" data-planner-step="3">
+      <div class="tour-loading-cactus" aria-hidden="true">
+        <svg viewBox="0 0 100 100" width="64" height="64">
+          <rect x="42" y="14" width="16" height="76" rx="8" fill="#D4A853" />
+          <rect x="24" y="20" width="14" height="38" rx="7" fill="#D4A853" />
+          <rect x="24" y="16" width="14" height="14" rx="7" fill="#D4A853" />
+          <rect x="62" y="12" width="14" height="32" rx="7" fill="#D4A853" />
+          <rect x="62" y="8" width="14" height="14" rx="7" fill="#D4A853" />
+        </svg>
+      </div>
+      <p class="tour-loading-text">Sabri is planning your tour...</p>
+    </div>
+  </div>
+
+  <!-- Planned-tour overview card — floats over the map once /api/plan-tour
+       has resolved and stops have been dropped as numbered pins. -->
+  <div id="planned-tour-card" class="planned-tour-card hidden">
+    <h3 id="planned-tour-title" class="planned-tour-title"></h3>
+    <p id="planned-tour-desc" class="planned-tour-desc"></p>
+    <p id="planned-tour-meta" class="planned-tour-meta"></p>
+    <button id="planned-tour-start-btn" class="start-btn">Start This Tour</button>
+    <button id="planned-tour-discard-btn" class="planned-tour-discard-btn">Discard this tour</button>
   </div>
 
   <!-- Narration text drawer. Fully collapsed (zero height, untappable) until
@@ -327,6 +486,10 @@
             <span class="voice-card-name">Shimmer</span>
             <span class="voice-card-desc">Soft &amp; Gentle</span>
           </button>
+          <button class="voice-card" data-voice="echo">
+            <span class="voice-card-name">Echo</span>
+            <span class="voice-card-desc">Rich &amp; Rounded</span>
+          </button>
         </div>
       </section>
 
@@ -366,6 +529,7 @@
         <div id="account-signed-in" class="account-signed-in hidden">
           <p class="account-name" id="account-name">—</p>
           <p class="account-email" id="account-email">—</p>
+          <button id="edit-preferences-btn" class="account-btn account-btn--outline">Edit Preferences</button>
           <button id="sign-out-btn" class="account-btn account-btn--outline">Sign Out</button>
         </div>
 
@@ -388,6 +552,95 @@
         </p>
         <p><a href="/privacy" class="privacy-link">Privacy Policy</a></p>
       </section>
+    </div>
+  </aside>
+
+  <!-- Edit Preferences — reachable from Settings > Account for any signed-in
+       user. Reuses the same pill/card components as onboarding and Settings,
+       pre-populated with the user's saved profile. Never shown to a user who
+       hasn't completed onboarding (see editPreferencesBtn handler in app.js). -->
+  <div id="preferences-overlay" class="settings-overlay hidden"></div>
+  <aside id="preferences-drawer" class="settings-drawer" aria-hidden="true">
+    <div class="settings-drawer-header">
+      <h2>Your Preferences</h2>
+      <button id="preferences-close" class="drawer-close" aria-label="Close preferences">✕</button>
+    </div>
+
+    <div class="settings-drawer-body">
+      <section class="settings-section">
+        <h3 class="settings-section-title">Name</h3>
+        <input type="text" id="preferences-name" class="onboarding-input" placeholder="Your name..." />
+      </section>
+
+      <section class="settings-section">
+        <h3 class="settings-section-title">Interests</h3>
+        <div id="preferences-interests" class="onboarding-pills">
+          <button class="onboarding-pill" data-value="Deep history">Deep history</button>
+          <button class="onboarding-pill" data-value="Faith &amp; spirituality">Faith &amp; spirituality</button>
+          <button class="onboarding-pill" data-value="Hidden stories">Hidden stories</button>
+          <button class="onboarding-pill" data-value="Architecture &amp; beauty">Architecture &amp; beauty</button>
+          <button class="onboarding-pill" data-value="Food &amp; living culture">Food &amp; living culture</button>
+          <button class="onboarding-pill" data-value="People &amp; community">People &amp; community</button>
+          <button class="onboarding-pill" data-value="Politics &amp; society">Politics &amp; society</button>
+          <button class="onboarding-pill" data-value="Art &amp; creativity">Art &amp; creativity</button>
+          <button class="onboarding-pill" data-value="Nature &amp; landscape">Nature &amp; landscape</button>
+          <button class="onboarding-pill" data-value="All of it">All of it</button>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3 class="settings-section-title">Guide Voice</h3>
+        <div id="preferences-voice" class="voice-options">
+          <button class="voice-card" data-voice="onyx">
+            <span class="voice-card-name">Onyx</span>
+            <span class="voice-card-desc">Deep &amp; Warm</span>
+          </button>
+          <button class="voice-card" data-voice="nova">
+            <span class="voice-card-name">Nova</span>
+            <span class="voice-card-desc">Clear &amp; Bright</span>
+          </button>
+          <button class="voice-card" data-voice="shimmer">
+            <span class="voice-card-name">Shimmer</span>
+            <span class="voice-card-desc">Soft &amp; Gentle</span>
+          </button>
+          <button class="voice-card" data-voice="echo">
+            <span class="voice-card-name">Echo</span>
+            <span class="voice-card-desc">Rich &amp; Rounded</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3 class="settings-section-title">Tour Depth</h3>
+        <div id="preferences-depth" class="depth-options">
+          <button class="depth-pill" data-depth="surface">
+            <span class="depth-pill-name">Surface</span>
+            <span class="depth-pill-desc">Quick highlights</span>
+          </button>
+          <button class="depth-pill" data-depth="standard">
+            <span class="depth-pill-name">Standard</span>
+            <span class="depth-pill-desc">Balanced</span>
+          </button>
+          <button class="depth-pill" data-depth="deep">
+            <span class="depth-pill-name">Deep</span>
+            <span class="depth-pill-desc">Full stories</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3 class="settings-section-title">Language</h3>
+        <select id="preferences-language" class="language-select">
+          <option value="en">English</option>
+          <option value="he">Hebrew</option>
+          <option value="ar">Arabic</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+          <option value="ru">Russian</option>
+        </select>
+      </section>
+
+      <button id="preferences-save-btn" class="start-btn">Save Changes</button>
     </div>
   </aside>
 

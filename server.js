@@ -61,7 +61,27 @@ const supabaseAdmin =
 // from the settings panel. `model` never varies; `voice` must be one of
 // VALID_VOICES; `speed` falls back to VOICE_CONFIG.speed when omitted.
 const VOICE_CONFIG = { voice: "onyx", speed: 1.0, model: "tts-1" };
-const VALID_VOICES = ["onyx", "nova", "shimmer"];
+const VALID_VOICES = ["onyx", "nova", "shimmer", "echo"];
+
+// Per-language voice override — some voices simply handle non-English
+// phonemes better than others. English has no entry here, so it always
+// falls back to the user's own Settings preference (see resolveSpeakVoice).
+const LANGUAGE_VOICE_MAP = {
+  he: "shimmer",
+  ar: "shimmer",
+  es: "nova",
+  fr: "nova",
+  ru: "echo",
+};
+
+// Language correctness wins over the user's stored voice preference for
+// non-English tours (an "Onyx" preference doesn't matter if Onyx mangles
+// Hebrew) — English is the only language where the user's own choice applies.
+function resolveSpeakVoice(language, preferredVoice) {
+  const languageVoice = LANGUAGE_VOICE_MAP[language];
+  if (languageVoice) return languageVoice;
+  return VALID_VOICES.includes(preferredVoice) ? preferredVoice : VOICE_CONFIG.voice;
+}
 
 const HEBREW_PRONUNCIATION_GUIDE = {
   Nachlaot: "Nakh-lah-OHT",
@@ -176,6 +196,25 @@ const TOURIST_ORIENTATION_GUIDANCE =
   "moment to just look around before we continue')\n\n" +
   "You are their trusted companion in an unfamiliar place. Make them feel " +
   "held, oriented, and excited. Never assume they know where anything is.";
+
+// Makes the very first narration of a session feel like meeting a person,
+// not opening a guidebook. See buildFirstNarrationContext() for the
+// per-request firstVisitToCity/timeOfDay values this references.
+const GREETING_AND_CONTEXT_RULES =
+  "GREETING AND CONTEXT RULES:\n" +
+  "- For the very first narration of every session, begin with a warm " +
+  "personal greeting. Use the user's name. Comment on the weather and time " +
+  "of day naturally. If this is their first visit to this city or country " +
+  "(indicated by firstVisitToCity: true in the context), give 2-3 sentences " +
+  "of big picture orientation before diving into place-specific content. If " +
+  "they are a returning visitor, acknowledge it warmly and reference what " +
+  "they saw before.\n" +
+  "- Never start a narration by immediately describing a place. Always " +
+  "ground the user first - in the moment, in the place, in the experience. " +
+  "A great tour guide says hello before they start teaching.\n" +
+  "- For subsequent narrations in the same session, you can dive straight " +
+  "into the story - the greeting has been done. But always maintain " +
+  "warmth and conversational presence.";
 
 // Every narration must end with two things: a closing thought on the
 // current place, and a forward-looking transition that makes the walk feel
@@ -341,8 +380,10 @@ function renderIndexHtml() {
   // src (the browser loads map tiles directly from Google) — this is
   // standard practice, not a leak, as long as the key is restricted to
   // this site's HTTP referrers in the Google Cloud Console.
+  // libraries=places powers the tour planner's start/end location
+  // autocomplete inputs (google.maps.places.Autocomplete — see app.js).
   const mapsScript = GOOGLE_MAPS_API_KEY
-    ? `<script src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}&loading=async" async defer></script>`
+    ? `<script src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}&loading=async&libraries=places" async defer></script>`
     : "";
 
   return html
@@ -1022,6 +1063,196 @@ function buildLocationGuidance(neighborhood, city, country) {
   return `You are currently in ${parts.join(", ")}. Guide accordingly.`;
 }
 
+// Fed by /api/ask's userStatedDestination/userStatedDirection extraction
+// (see the JSON schema there) — real-world testing showed Sabri kept
+// narrating a street the user had already told it they were leaving, so
+// this makes a spoken stated intent outrank raw GPS/distance-based
+// candidate ranking rather than being forgotten after one conversational
+// reply. app.js persists these client-side for the rest of the session.
+function buildUserStatedIntentGuidance(userStatedDirection, userStatedDestination) {
+  if (!userStatedDirection && !userStatedDestination) return null;
+  const details = [];
+  if (userStatedDestination) details.push(`heading toward: "${userStatedDestination}"`);
+  if (userStatedDirection) details.push(`stated direction: ${userStatedDirection}`);
+  return (
+    `The user recently told you where they're headed next (${details.join(", ")}). ` +
+    `Weight this stated intent over raw GPS-inferred proximity when deciding what ` +
+    `to focus this narration on — if any of the candidate places match or relate ` +
+    `to where they said they're going, strongly prefer that one even if it isn't ` +
+    `the closest. Orient the narration toward where they're headed, not where ` +
+    `they're walking away from.`
+  );
+}
+
+// Only relevant on the first narration of a session (see
+// GREETING_AND_CONTEXT_RULES) — tells Claude whether this is genuinely the
+// user's first time in this city (from Supabase visited_places history, see
+// app.js) and what time of day it is, so the opening greeting can reference
+// both correctly instead of guessing.
+function buildFirstNarrationContext(isFirstNarrationOfSession, firstVisitToCity, timeOfDay) {
+  if (!isFirstNarrationOfSession) return null;
+  const parts = [
+    "This is the first narration of the session.",
+    `firstVisitToCity: ${firstVisitToCity ? "true" : "false"}.`,
+  ];
+  if (timeOfDay) parts.push(`Time of day: ${timeOfDay}.`);
+  return parts.join(" ");
+}
+
+// Shared by /api/narrate and /api/ask — non-English languages need more than
+// "translate this"; Hebrew in particular sounds stilted/transliterated if
+// Claude isn't told explicitly to write native, spoken Hebrew.
+function buildLanguageGuidance(languageName) {
+  if (!languageName || languageName === "English") return null;
+  const parts = [
+    `Narrate entirely and naturally in ${languageName}. Write as a native ` +
+      "speaker would speak, not as a translation. Use natural idioms, " +
+      "rhythm, and expression of that language. Do not mix languages " +
+      "unless it is genuinely natural to do so.",
+  ];
+  if (languageName === "Hebrew") {
+    parts.push(
+      "When narrating in Hebrew, write naturally flowing Hebrew as a " +
+        "native Israeli would speak it. Avoid mixing in English words " +
+        "unless they are genuinely used in everyday Israeli Hebrew. Use " +
+        "natural Israeli speech patterns and rhythm. Do not transliterate " +
+        "- write in actual Hebrew characters when narrating in Hebrew."
+    );
+  }
+  return parts.join("\n\n");
+}
+
+// Resolves a Claude-generated searchQuery (e.g. "Trevi Fountain Rome") into
+// a real Google Place with coordinates/placeId, biased toward the tour's
+// starting area so ambiguous queries ("the old market") resolve to the
+// right city. Uses the classic Find Place From Text endpoint — same family
+// of API as the rest of server.js's Places calls (fetchNearbySearch etc.).
+async function findPlaceForQuery(query, biasLat, biasLng) {
+  if (!query || !GOOGLE_MAPS_API_KEY) return null;
+
+  const url = new URL("https://maps.googleapis.com/maps/api/place/findplacefromtext/json");
+  url.searchParams.set("input", query);
+  url.searchParams.set("inputtype", "textquery");
+  // Note: "vicinity" is valid on Nearby Search results (see
+  // fetchNearbySearch) but NOT on Find Place From Text — requesting it here
+  // causes an INVALID_REQUEST for every single query.
+  url.searchParams.set("fields", "place_id,name,geometry,types,photos,rating,formatted_address");
+  if (typeof biasLat === "number" && typeof biasLng === "number") {
+    url.searchParams.set("locationbias", `circle:20000@${biasLat},${biasLng}`);
+  }
+  url.searchParams.set("key", GOOGLE_MAPS_API_KEY);
+
+  try {
+    const response = await fetch(url);
+    const data = await response.json();
+    if (data.status !== "OK" || !Array.isArray(data.candidates) || data.candidates.length === 0) {
+      console.log(`[debug] findPlaceForQuery("${query}") status=${data.status} error=${data.error_message || "none"}`);
+      return null;
+    }
+
+    const result = data.candidates[0];
+    const primaryType = result.types?.find((type) => ALLOWED_PLACE_TYPES.includes(type)) || result.types?.[0] || null;
+    return toPlaceResponse(result, primaryType);
+  } catch (error) {
+    return null;
+  }
+}
+
+app.post("/api/plan-tour", async (req, res) => {
+  const { startLocation, endLocation, duration, maxDistance, interests, specificFocus, userProfile, currentCity } =
+    req.body || {};
+
+  if (!ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
+  }
+  if (!startLocation || typeof startLocation.lat !== "number" || typeof startLocation.lng !== "number") {
+    return res.status(400).json({ error: "A valid startLocation with lat/lng is required." });
+  }
+
+  const interestList = Array.isArray(interests) && interests.length > 0 ? interests.join(", ") : "a bit of everything";
+  const startDescription = startLocation.name || "their current location";
+  const endDescription = endLocation && endLocation.name ? endLocation.name : "back at the starting point";
+
+  const userMessage =
+    `You are Sabri planning a walking tour. The user is in ${currentCity || "an unfamiliar city"}. ` +
+    `They have ${duration || "a couple of hours"} and want to walk a maximum of ${maxDistance || "a few kilometers"}. ` +
+    `They are interested in ${interestList}` +
+    (specificFocus ? `, with specific focus on ${specificFocus}` : "") +
+    `. Starting at ${startDescription}, ending ${endDescription}.\n\n` +
+    `Generate a tour plan as JSON with this structure: { tourTitle: string, ` +
+    `tourDescription: string (2-3 sentences overview), estimatedDuration: string, ` +
+    `estimatedDistance: string, stops: [ { stopNumber: integer, placeName: string, ` +
+    `placeType: string, searchQuery: string (a search query precise enough for a ` +
+    `Google Places lookup — include the place name and city), whyThisStop: string ` +
+    `(1 sentence - why this fits their interests), estimatedTimeHere: string } ], ` +
+    `openingNote: string (what Sabri will say to start the tour) }. Plan between ` +
+    `3 and 8 stops depending on the available time, in a sensible walking order ` +
+    `from the start point to the end point. Return ONLY valid JSON, no other text.`;
+
+  try {
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 2048,
+      system: SABRI_SYSTEM_PROMPT + "\n\n" + buildUserProfileGuidance(userProfile),
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              tourTitle: { type: "string" },
+              tourDescription: { type: "string" },
+              estimatedDuration: { type: "string" },
+              estimatedDistance: { type: "string" },
+              stops: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    stopNumber: { type: "integer" },
+                    placeName: { type: "string" },
+                    placeType: { type: "string" },
+                    searchQuery: { type: "string" },
+                    whyThisStop: { type: "string" },
+                    estimatedTimeHere: { type: "string" },
+                  },
+                  required: ["stopNumber", "placeName", "placeType", "searchQuery", "whyThisStop", "estimatedTimeHere"],
+                  additionalProperties: false,
+                },
+              },
+              openingNote: { type: "string" },
+            },
+            required: ["tourTitle", "tourDescription", "estimatedDuration", "estimatedDistance", "stops", "openingNote"],
+            additionalProperties: false,
+          },
+        },
+      },
+      messages: [{ role: "user", content: userMessage }],
+    });
+
+    const textBlock = message.content.find((block) => block.type === "text");
+    const plan = textBlock ? JSON.parse(textBlock.text) : null;
+    if (!plan) return res.status(502).json({ error: "Failed to generate a tour plan." });
+    console.log(`[debug] /api/plan-tour: Claude proposed ${plan.stops?.length || 0} stops`);
+
+    // Resolve each Claude-invented stop against a real Google Place so the
+    // client has coordinates/placeId to drop a pin on and narrate from.
+    const resolvedStops = await Promise.all(
+      (plan.stops || [])
+        .sort((a, b) => (a.stopNumber || 0) - (b.stopNumber || 0))
+        .map(async (stop) => {
+          const place = await findPlaceForQuery(stop.searchQuery, startLocation.lat, startLocation.lng);
+          console.log(`[debug] /api/plan-tour: "${stop.searchQuery}" ->`, place ? place.name : "NOT FOUND");
+          return { ...stop, place };
+        })
+    );
+
+    res.json({ ...plan, stops: resolvedStops.filter((stop) => stop.place) });
+  } catch (error) {
+    res.status(502).json({ error: "Failed to generate a tour plan." });
+  }
+});
+
 app.post("/api/narrate", async (req, res) => {
   const {
     tier,
@@ -1042,6 +1273,10 @@ app.post("/api/narrate", async (req, res) => {
     country,
     weather,
     nearbyInterestPlace,
+    firstVisitToCity,
+    timeOfDay,
+    userStatedDirection,
+    userStatedDestination,
   } = req.body || {};
   const resolvedTier = tier === "neighborhood" ? "neighborhood" : "specific";
 
@@ -1073,25 +1308,24 @@ app.post("/api/narrate", async (req, res) => {
   const systemPromptParts = [
     SABRI_SYSTEM_PROMPT,
     TOURIST_ORIENTATION_GUIDANCE,
+    GREETING_AND_CONTEXT_RULES,
+    buildFirstNarrationContext(isFirstNarrationOfSession, firstVisitToCity, timeOfDay),
     buildUserProfileGuidance(userProfile),
     buildLocationGuidance(neighborhood, city, country),
     buildSessionLogGuidance(sessionLog, userProfile?.name),
     isFirstNarrationOfSession ? buildReturningUserGuidance(returningUserContext, userProfile?.name) : null,
     buildCrossSessionVisitedGuidance(crossSessionVisitedPlaces),
     buildWeatherGuidance(weather),
+    buildUserStatedIntentGuidance(userStatedDirection, userStatedDestination),
     currentEventsGuidance,
     buildNearbyInterestGuidance(nearbyInterestPlace),
     TRANSITION_GUIDANCE,
     buildPronunciationGuidance(languageName),
+    buildLanguageGuidance(languageName),
     TIER_GUIDANCE[resolvedTier],
     DEPTH_GUIDANCE[resolvedDepth],
   ].filter(Boolean);
 
-  if (languageName && languageName !== "English") {
-    systemPromptParts.push(
-      `Narrate entirely in ${languageName}. Every word of the narration must be in ${languageName}, not English.`
-    );
-  }
   if (correctionContext) {
     systemPromptParts.push(
       `IMPORTANT LOCATION CORRECTION: The user has told you their actual ` +
@@ -1197,6 +1431,8 @@ app.post("/api/ask", async (req, res) => {
     city,
     country,
     weather,
+    userStatedDirection,
+    userStatedDestination,
   } = req.body || {};
 
   if (!question) {
@@ -1223,6 +1459,7 @@ app.post("/api/ask", async (req, res) => {
     buildSessionLogGuidance(sessionLog, userProfile?.name),
     buildCrossSessionVisitedGuidance(crossSessionVisitedPlaces),
     buildWeatherGuidance(weather),
+    buildUserStatedIntentGuidance(userStatedDirection, userStatedDestination),
   ].filter(Boolean);
 
   const compassWord = headingToCompassWord(heading);
@@ -1255,14 +1492,22 @@ app.post("/api/ask", async (req, res) => {
       `mislabeled their location (for example, they say something like "I'm not ` +
       `in the Armenian Quarter, I'm outside the walls"), extract a short ` +
       `description of their corrected location into locationCorrection. ` +
-      `Otherwise set locationCorrection to null.`
+      `Otherwise set locationCorrection to null.\n\n` +
+      `Separately, if the user's question or statement reveals where they are ` +
+      `heading or intend to go next (for example, "I'm heading toward the old ` +
+      `market now", "we're walking back to my neighborhood", "let's go check ` +
+      `out the waterfront") — extract a short plain description of that stated ` +
+      `destination into userStatedDestination (e.g. "the old market", "their ` +
+      `neighborhood", "the waterfront"), and if a cardinal direction is stated ` +
+      `or can be reasonably inferred, extract it into userStatedDirection as ` +
+      `exactly one of: north, northeast, east, southeast, south, southwest, ` +
+      `west, northwest. Otherwise set both to null. This is separate from ` +
+      `locationCorrection — a stated destination is about where they're GOING, ` +
+      `not a correction of where they currently ARE.`
   );
 
-  if (languageName && languageName !== "English") {
-    systemPromptParts.push(
-      `Answer entirely in ${languageName}. Every word of your answer must be in ${languageName}, not English.`
-    );
-  }
+  const languageGuidance = buildLanguageGuidance(languageName);
+  if (languageGuidance) systemPromptParts.push(languageGuidance);
 
   const pronunciationGuidance = buildPronunciationGuidance(languageName);
   if (pronunciationGuidance) systemPromptParts.push(pronunciationGuidance);
@@ -1282,8 +1527,10 @@ app.post("/api/ask", async (req, res) => {
             properties: {
               answer: { type: "string" },
               locationCorrection: { anyOf: [{ type: "string" }, { type: "null" }] },
+              userStatedDestination: { anyOf: [{ type: "string" }, { type: "null" }] },
+              userStatedDirection: { anyOf: [{ type: "string" }, { type: "null" }] },
             },
-            required: ["answer", "locationCorrection"],
+            required: ["answer", "locationCorrection", "userStatedDestination", "userStatedDirection"],
             additionalProperties: false,
           },
         },
@@ -1292,7 +1539,9 @@ app.post("/api/ask", async (req, res) => {
     });
 
     const textBlock = message.content.find((block) => block.type === "text");
-    const parsed = textBlock ? JSON.parse(textBlock.text) : { answer: "", locationCorrection: null };
+    const parsed = textBlock
+      ? JSON.parse(textBlock.text)
+      : { answer: "", locationCorrection: null, userStatedDestination: null, userStatedDirection: null };
     res.json(parsed);
   } catch (error) {
     res.status(502).json({ error: "Failed to generate a response." });
@@ -1414,7 +1663,7 @@ function buildCrossSessionVisitedGuidance(placeNames) {
 }
 
 app.post("/api/speak", async (req, res) => {
-  const { text, speed, voice } = req.body || {};
+  const { text, speed, voice, language } = req.body || {};
 
   if (!text) {
     return res.status(400).json({ error: "text is required." });
@@ -1424,11 +1673,12 @@ app.post("/api/speak", async (req, res) => {
     return res.status(500).json({ error: "OPENAI_API_KEY is not configured on the server." });
   }
 
-  // Model never varies. Voice must be one of VALID_VOICES (the settings
-  // panel's three options) or it falls back to VOICE_CONFIG.voice — never
-  // an arbitrary/unvalidated value. Speed is clamped to OpenAI's valid
-  // range and falls back to VOICE_CONFIG.speed when not provided.
-  const resolvedVoice = VALID_VOICES.includes(voice) ? voice : VOICE_CONFIG.voice;
+  // Model never varies. Voice is resolved per-language first (see
+  // LANGUAGE_VOICE_MAP — some voices simply pronounce non-English phonemes
+  // better), falling back to the settings panel's voice preference for
+  // English. Speed is clamped to OpenAI's valid range and falls back to
+  // VOICE_CONFIG.speed when not provided.
+  const resolvedVoice = resolveSpeakVoice(language, voice);
   const requestedSpeed = typeof speed === "number" && Number.isFinite(speed) ? speed : VOICE_CONFIG.speed;
   const resolvedSpeed = Math.min(4.0, Math.max(0.25, requestedSpeed));
   // OpenAI TTS rejects input over 4096 characters outright — deep-depth
@@ -1516,7 +1766,7 @@ app.post("/api/identify", async (req, res) => {
 // of the app, not a path a browser talks to directly with its own key.
 
 app.post("/api/auth/save-profile", async (req, res) => {
-  const { userId, profile } = req.body || {};
+  const { userId, profile, onboardingComplete } = req.body || {};
   if (!userId || !profile) {
     return res.status(400).json({ error: "userId and profile are required." });
   }
@@ -1524,19 +1774,26 @@ app.post("/api/auth/save-profile", async (req, res) => {
     return res.status(500).json({ error: "Supabase is not configured on the server." });
   }
 
-  const { error } = await supabaseAdmin.from("profiles").upsert(
-    {
-      id: userId,
-      name: profile.name || null,
-      reason: profile.reason || null,
-      interests: Array.isArray(profile.interests) ? profile.interests : [],
-      companions: profile.companions || null,
-      depth: profile.depth || null,
-      home_city: profile.homeCity || null,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: "id" }
-  );
+  const row = {
+    id: userId,
+    name: profile.name || null,
+    reason: profile.reason || null,
+    interests: Array.isArray(profile.interests) ? profile.interests : [],
+    companions: profile.companions || null,
+    depth: profile.depth || null,
+    home_city: profile.homeCity || null,
+    language: profile.language || null,
+    voice: profile.voice || null,
+    updated_at: new Date().toISOString(),
+  };
+  // Only set onboarding_complete when explicitly told to — a mid-session
+  // "Edit Preferences" save shouldn't accidentally flip it back to
+  // undefined/false for an already-onboarded user.
+  if (typeof onboardingComplete === "boolean") {
+    row.onboarding_complete = onboardingComplete;
+  }
+
+  const { error } = await supabaseAdmin.from("profiles").upsert(row, { onConflict: "id" });
 
   if (error) return res.status(502).json({ error: "Failed to save profile." });
   res.json({ success: true });
@@ -1772,6 +2029,11 @@ function toPlaceResponse(result, primaryType) {
     rating: result.rating ?? null,
     placeId: result.place_id,
     photoReference: result.photos?.[0]?.photo_reference || null,
+    // Was missing entirely before — every place response silently had no
+    // coordinates, which meant upsertPlaceMarker's lat/lng guard (app.js)
+    // rejected every single place and no map pin ever rendered.
+    latitude: result.geometry?.location?.lat ?? null,
+    longitude: result.geometry?.location?.lng ?? null,
   };
 }
 

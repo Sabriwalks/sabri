@@ -8,6 +8,9 @@ const neighborhoodNameEl = document.getElementById("neighborhood-name");
 const homePhoto = document.getElementById("home-photo");
 const pulseEl = document.getElementById("pulse");
 const mapEl = document.getElementById("map");
+const tourLoadingOverlay = document.getElementById("tour-loading-overlay");
+const tourLoadingText = document.getElementById("tour-loading-text");
+const narrationWaveEl = document.getElementById("narration-wave");
 const cameraOverlay = document.getElementById("camera-overlay");
 const cameraVideo = document.getElementById("camera-video");
 const cameraCanvas = document.getElementById("camera-canvas");
@@ -38,9 +41,53 @@ const settingsBtn = document.getElementById("settings-btn");
 const settingsDrawer = document.getElementById("settings-drawer");
 const settingsOverlay = document.getElementById("settings-overlay");
 const settingsClose = document.getElementById("settings-close");
-const voiceCards = document.querySelectorAll(".voice-card");
-const depthPills = document.querySelectorAll(".depth-pill");
+// Scoped to #settings-drawer specifically — #preferences-drawer below
+// reuses the same .voice-card/.depth-pill classes for visual consistency
+// but needs its own independent selection state (see preferences* refs),
+// so a global querySelectorAll(".voice-card") would wrongly double-bind.
+const voiceCards = document.querySelectorAll("#settings-drawer .voice-card");
+const depthPills = document.querySelectorAll("#settings-drawer .depth-pill");
 const languageSelect = document.getElementById("language-select");
+
+const preferencesDrawer = document.getElementById("preferences-drawer");
+const preferencesOverlay = document.getElementById("preferences-overlay");
+const preferencesClose = document.getElementById("preferences-close");
+const editPreferencesBtn = document.getElementById("edit-preferences-btn");
+const preferencesNameInput = document.getElementById("preferences-name");
+const preferencesInterestsContainer = document.getElementById("preferences-interests");
+const preferencesVoiceCards = document.querySelectorAll("#preferences-drawer .voice-card");
+const preferencesDepthPills = document.querySelectorAll("#preferences-drawer .depth-pill");
+const preferencesLanguageSelect = document.getElementById("preferences-language");
+const preferencesSaveBtn = document.getElementById("preferences-save-btn");
+
+const tourModeModal = document.getElementById("tour-mode-modal");
+const tourModeClose = document.getElementById("tour-mode-close");
+const tourModeWanderBtn = document.getElementById("tour-mode-wander-btn");
+const tourModePlanBtn = document.getElementById("tour-mode-plan-btn");
+
+const tourPlanner = document.getElementById("tour-planner");
+const plannerClose = document.getElementById("planner-close");
+const plannerDurationCards = document.getElementById("planner-duration-cards");
+const plannerDistancePills = document.getElementById("planner-distance-pills");
+const plannerStep0NextBtn = document.getElementById("planner-step0-next");
+const plannerStartInput = document.getElementById("planner-start-input");
+const plannerUseCurrentLocationBtn = document.getElementById("planner-use-current-location");
+const plannerEndNoBtn = document.getElementById("planner-end-no");
+const plannerEndYesBtn = document.getElementById("planner-end-yes");
+const plannerEndField = document.getElementById("planner-end-field");
+const plannerEndInput = document.getElementById("planner-end-input");
+const plannerStep1NextBtn = document.getElementById("planner-step1-next");
+const plannerSavedInterestsNote = document.getElementById("planner-saved-interests-note");
+const plannerInterestPillsContainer = document.getElementById("planner-interest-pills");
+const plannerSpecificFocus = document.getElementById("planner-specific-focus");
+const plannerGenerateBtn = document.getElementById("planner-generate-btn");
+
+const plannedTourCard = document.getElementById("planned-tour-card");
+const plannedTourTitleEl = document.getElementById("planned-tour-title");
+const plannedTourDescEl = document.getElementById("planned-tour-desc");
+const plannedTourMetaEl = document.getElementById("planned-tour-meta");
+const plannedTourStartBtn = document.getElementById("planned-tour-start-btn");
+const plannedTourDiscardBtn = document.getElementById("planned-tour-discard-btn");
 const resetOnboardingBtn = document.getElementById("reset-onboarding-btn");
 const accountSignedIn = document.getElementById("account-signed-in");
 const accountGuest = document.getElementById("account-guest");
@@ -104,6 +151,35 @@ let currentCity = null;
 let currentCountry = null;
 let lastContextPlaces = [];
 let correctionContext = null;
+
+// Extracted from user speech (see askSabri's userStatedDirection/
+// userStatedDestination handling) — persists for the rest of the session
+// (or until overwritten by a newer stated intent) and is both (a) sent to
+// /api/narrate so Claude weights it over raw GPS proximity when choosing
+// what to focus on, and (b) used to bias the effective heading used for
+// context-place lookups (see computeEffectiveHeading), so a stated "I'm
+// heading to X" starts reorienting the app immediately rather than waiting
+// for GPS heading to catch up.
+let userStatedDirection = null;
+let userStatedDestination = null;
+
+const COMPASS_WORD_TO_DEGREES = {
+  north: 0,
+  northeast: 45,
+  east: 90,
+  southeast: 135,
+  south: 180,
+  southwest: 225,
+  west: 270,
+  northwest: 315,
+};
+
+function computeEffectiveHeading() {
+  if (userStatedDirection && COMPASS_WORD_TO_DEGREES[userStatedDirection] !== undefined) {
+    return COMPASS_WORD_TO_DEGREES[userStatedDirection];
+  }
+  return lastHeading;
+}
 
 // Weather — fetched on tour start and refreshed every 30 min; passed as
 // context to /api/narrate and /api/ask. Never blocks the tour if it fails.
@@ -505,7 +581,10 @@ async function handleOAuthSignIn(session) {
     completeOnboarding();
   }
 
-  saveProfileToSupabase();
+  // By this point onboarding is definitely complete — either it just ran
+  // (the branch above) or it already was (a guest signing in later from
+  // Settings mid-session, isOnboarded() already true).
+  saveProfileToSupabase(true);
   await loadVisitedPlaceIds();
   updateAccountSettingsUI();
 }
@@ -534,18 +613,89 @@ const hasPendingAuthResume = (() => {
   }
 })();
 
-if (isOnboarded()) {
-  onboarding.classList.add("hidden");
-} else {
-  onboarding.classList.remove("hidden");
+function hideAppBootLoading() {
+  const el = document.getElementById("app-boot-loading");
+  if (el) el.classList.add("hidden");
+}
+
+// Maps a Supabase profiles row (persistent sign-in restore) into the same
+// in-memory shape completeOnboarding() produces from a fresh onboarding
+// run, so every downstream consumer of userProfile/settings behaves
+// identically either way.
+function applyProfileFromSupabase(profile) {
+  userProfile = {
+    name: profile.name || "",
+    reason: profile.reason || "",
+    interests: Array.isArray(profile.interests) ? profile.interests : [],
+    companions: profile.companions || "",
+    language: profile.language || "en",
+    depth: profile.depth || "standard",
+  };
+  try {
+    localStorage.setItem(USER_PROFILE_KEY, JSON.stringify(userProfile));
+    localStorage.setItem(ONBOARDED_KEY, "true");
+  } catch (error) {
+    // Non-fatal — restored profile just won't persist locally this run.
+  }
+  settings.depth = userProfile.depth;
+  settings.language = userProfile.language;
+  if (profile.voice) settings.voice = profile.voice;
+  saveSettings();
+  applySettingsToUI();
+}
+
+// Decides, once, which of three screens to show: the OAuth-redirect resume
+// flow, straight to the map (returning signed-in user with a completed
+// profile), or the normal onboarding flow (new user, guest, or a signed-in
+// user who never finished onboarding). Runs behind #app-boot-loading so
+// there's no flash of the wrong screen while the session/profile check
+// (network round trip) is in flight.
+async function bootstrapApp() {
   if (hasPendingAuthResume) {
-    resumeOnboardingAfterAuth();
+    onboarding.classList.remove("hidden");
+    hideAppBootLoading();
+    await resumeOnboardingAfterAuth();
+    initializeAuthState();
+    return;
+  }
+
+  if (supabaseClient) {
+    try {
+      const { data } = await supabaseClient.auth.getSession();
+      const session = data?.session || null;
+      if (session) {
+        currentUser = session.user;
+        const response = await fetch(`/api/auth/user-history?userId=${encodeURIComponent(session.user.id)}`);
+        const historyData = response.ok ? await response.json() : null;
+        const profile = historyData?.profile || null;
+
+        if (profile && profile.onboarding_complete) {
+          applyProfileFromSupabase(profile);
+          onboarding.classList.add("hidden");
+          hideAppBootLoading();
+          await initializeAuthState();
+          return;
+        }
+      }
+    } catch (error) {
+      // Session/profile check failed — fall through to the normal
+      // localStorage-driven onboarding gate below rather than getting stuck.
+    }
+  }
+
+  hideAppBootLoading();
+  if (isOnboarded()) {
+    onboarding.classList.add("hidden");
   } else {
+    onboarding.classList.remove("hidden");
     setTimeout(() => {
       if (onboardingStepIndex === 0) advanceOnboarding();
     }, 2000);
   }
+  initializeAuthState();
 }
+
+bootstrapApp();
 
 // --- Auth state (Supabase session, cross-session history) ---
 
@@ -613,13 +763,20 @@ async function loadReturningUserContext() {
   }
 }
 
-async function saveProfileToSupabase() {
+async function saveProfileToSupabase(onboardingComplete) {
   if (!currentUser) return;
   try {
     await fetch("/api/auth/save-profile", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: currentUser.id, profile: userProfile }),
+      body: JSON.stringify({
+        userId: currentUser.id,
+        // voice lives in `settings`, not `userProfile` (it's a Settings-panel
+        // choice, not an onboarding question) — merge it in here so the
+        // saved row still has it for persistent-sign-in restore.
+        profile: { ...userProfile, language: settings.language, voice: settings.voice },
+        onboardingComplete,
+      }),
     });
   } catch (error) {
     // Non-fatal — profile still persists locally via localStorage.
@@ -637,7 +794,7 @@ async function saveVisitToSupabase(place, narrationText) {
         placeId: place.placeId,
         placeName: place.name,
         neighborhood: currentNeighborhoodName,
-        city: null,
+        city: currentCity,
         narrationSummary: narrationText.slice(0, 200),
       }),
     });
@@ -654,7 +811,7 @@ function saveSessionToSupabase() {
   const payload = JSON.stringify({
     userId: currentUser.id,
     neighborhood: currentNeighborhoodName,
-    city: null,
+    city: currentCity,
     placesVisited: Array.from(narratedPlaceIds),
     totalNarrations: totalNarrationsThisSession,
     questionsAsked: totalQuestionsThisSession,
@@ -743,7 +900,9 @@ if (deleteAccountConfirmBtn) {
   });
 }
 
-initializeAuthState();
+// initializeAuthState() is invoked once from bootstrapApp() (see above,
+// near hasPendingAuthResume) after it's decided which screen to show —
+// not called bare here, so it never races the boot-loading/onboarding gate.
 
 // --- Settings (voice / tour depth / language), persisted to localStorage ---
 
@@ -849,6 +1008,109 @@ function closeSettings() {
   settingsDrawer.classList.remove("is-open");
   settingsDrawer.setAttribute("aria-hidden", "true");
   settingsOverlay.classList.add("hidden");
+}
+
+// --- Edit Preferences (Settings > Account, signed-in users only) ---
+// Reuses the onboarding pill/voice-card/depth-pill components but tracks
+// its own draft selection independently of the live settings object —
+// nothing takes effect until Save Changes commits it all at once (see
+// preferencesSaveBtn handler), matching "update in-memory state at the
+// same time as the Supabase write."
+
+function openPreferences() {
+  if (!isOnboarded()) {
+    // Shouldn't normally be reachable (the button only shows once signed
+    // in, which by then always implies onboarding is complete) — but route
+    // to onboarding rather than showing a broken/empty preferences form.
+    closeSettings();
+    onboarding.classList.remove("hidden");
+    return;
+  }
+  closeSettings();
+  populatePreferencesForm();
+  preferencesDrawer.classList.add("is-open");
+  preferencesDrawer.setAttribute("aria-hidden", "false");
+  preferencesOverlay.classList.remove("hidden");
+}
+
+function closePreferences() {
+  preferencesDrawer.classList.remove("is-open");
+  preferencesDrawer.setAttribute("aria-hidden", "true");
+  preferencesOverlay.classList.add("hidden");
+}
+
+function populatePreferencesForm() {
+  preferencesNameInput.value = userProfile?.name || "";
+  const currentInterests = new Set(userProfile?.interests || []);
+  preferencesInterestsContainer.querySelectorAll(".onboarding-pill").forEach((pill) => {
+    pill.classList.toggle("is-selected", currentInterests.has(pill.dataset.value));
+  });
+  preferencesVoiceCards.forEach((card) => card.classList.toggle("is-active", card.dataset.voice === settings.voice));
+  const currentDepth = userProfile?.depth || settings.depth;
+  preferencesDepthPills.forEach((pill) => pill.classList.toggle("is-active", pill.dataset.depth === currentDepth));
+  if (preferencesLanguageSelect) preferencesLanguageSelect.value = settings.language;
+}
+
+preferencesInterestsContainer.querySelectorAll(".onboarding-pill").forEach((pill) => {
+  pill.addEventListener("click", () => pill.classList.toggle("is-selected"));
+});
+
+preferencesVoiceCards.forEach((card) => {
+  card.addEventListener("click", () => {
+    preferencesVoiceCards.forEach((c) => c.classList.remove("is-active"));
+    card.classList.add("is-active");
+  });
+});
+
+preferencesDepthPills.forEach((pill) => {
+  pill.addEventListener("click", () => {
+    preferencesDepthPills.forEach((p) => p.classList.remove("is-active"));
+    pill.classList.add("is-active");
+  });
+});
+
+if (editPreferencesBtn) editPreferencesBtn.addEventListener("click", openPreferences);
+if (preferencesClose) preferencesClose.addEventListener("click", closePreferences);
+if (preferencesOverlay) preferencesOverlay.addEventListener("click", closePreferences);
+
+if (preferencesSaveBtn) {
+  preferencesSaveBtn.addEventListener("click", async () => {
+    const name = preferencesNameInput.value.trim();
+    const interests = Array.from(preferencesInterestsContainer.querySelectorAll(".onboarding-pill.is-selected")).map(
+      (pill) => pill.dataset.value
+    );
+    const activeVoiceCard = Array.from(preferencesVoiceCards).find((card) => card.classList.contains("is-active"));
+    const activeDepthPill = Array.from(preferencesDepthPills).find((pill) => pill.classList.contains("is-active"));
+    const voice = activeVoiceCard ? activeVoiceCard.dataset.voice : settings.voice;
+    const depth = activeDepthPill ? activeDepthPill.dataset.depth : settings.depth;
+    const language = preferencesLanguageSelect ? preferencesLanguageSelect.value : settings.language;
+
+    // Commit the draft to live app state (affects the very next narration,
+    // no restart needed) at the same time as the Supabase write below.
+    userProfile = { ...userProfile, name, interests, depth, language };
+    settings.voice = voice;
+    settings.depth = depth;
+    settings.language = language;
+
+    try {
+      localStorage.setItem(USER_PROFILE_KEY, JSON.stringify(userProfile));
+    } catch (error) {
+      // Non-fatal — still applied in-memory for this session.
+    }
+    saveSettings();
+    applySettingsToUI();
+    updateNameSlots();
+
+    preferencesSaveBtn.disabled = true;
+    preferencesSaveBtn.textContent = "Saving...";
+    await saveProfileToSupabase();
+    preferencesSaveBtn.disabled = false;
+    preferencesSaveBtn.textContent = "Save Changes";
+
+    updateAccountSettingsUI();
+    closePreferences();
+    showToast("Preferences updated");
+  });
 }
 
 // --- PWA: service worker ---
@@ -988,8 +1250,13 @@ function waitForGoogleMaps() {
 }
 
 async function initMap() {
-  if (!mapEl) return;
+  if (!mapEl) {
+    console.log("[map] initMap aborted — #map element not found in DOM");
+    return;
+  }
+  console.log("[map] waiting for Google Maps JS API to load...");
   await waitForGoogleMaps();
+  console.log("[map] Google Maps JS API ready, creating map instance");
 
   // Neutral world view — no specific city — until the user's real GPS fix
   // re-centers this (see updateUserLocationOnMap).
@@ -1000,6 +1267,7 @@ async function initMap() {
     gestureHandling: "greedy",
     styles: MAP_STYLE,
   });
+  console.log("[map] map instance created");
 }
 
 initMap();
@@ -1090,7 +1358,12 @@ function buildPinPopupContent(place) {
 // determine its size/color (see buildPlaceMarkerIcon). Safe to call
 // repeatedly for the same placeId — just updates the existing marker.
 function upsertPlaceMarker(place, { isInterestMatch } = {}) {
-  if (!map || !place || !place.placeId || typeof place.latitude !== "number" || typeof place.longitude !== "number") {
+  if (!map) {
+    console.log("[map] upsertPlaceMarker skipped — map not initialized yet", place?.name);
+    return;
+  }
+  if (!place || !place.placeId || typeof place.latitude !== "number" || typeof place.longitude !== "number") {
+    console.log("[map] upsertPlaceMarker skipped — missing placeId or invalid lat/lng", place);
     return;
   }
 
@@ -1114,9 +1387,88 @@ function upsertPlaceMarker(place, { isInterestMatch } = {}) {
       activeInfoWindow.open({ map, anchor: marker });
     });
     placeMarkersByPlaceId.set(place.placeId, marker);
+    console.log(`[map] pin added for "${place.name}" (total pins: ${placeMarkersByPlaceId.size})`);
+    pinsEverLoaded = true;
+    clearTimeout(noPinsToastTimeout);
   } else {
     marker.setIcon(icon);
   }
+}
+
+// Independent of the narration-triggering pipeline (see onLocation) — keeps
+// map pins fresh purely based on GPS movement/time, so pins show up even if
+// the user is standing still or moving slowly. Uses its own fetch (no
+// shared AbortController with the narration pipeline's fetchContextPlaces)
+// since an occasional overlapping/stale response here is harmless and
+// shouldn't cancel/be cancelled by narration-triggering requests.
+let lastPinRefreshPosition = null;
+let lastPinRefreshTime = 0;
+const PIN_REFRESH_MIN_METERS = 30;
+const PIN_REFRESH_MIN_MS = 8000;
+let pinsEverLoaded = false;
+let noPinsToastTimeout = null;
+
+async function refreshMapPinsAroundUser(latitude, longitude, heading) {
+  if (!map) {
+    console.log("[map] refreshMapPinsAroundUser skipped — map not ready yet");
+    return;
+  }
+
+  const now = Date.now();
+  if (
+    lastPinRefreshPosition &&
+    distanceInMeters(lastPinRefreshPosition, { latitude, longitude }) < PIN_REFRESH_MIN_METERS &&
+    now - lastPinRefreshTime < PIN_REFRESH_MIN_MS
+  ) {
+    return;
+  }
+  lastPinRefreshPosition = { latitude, longitude };
+  lastPinRefreshTime = now;
+
+  try {
+    const params = new URLSearchParams({
+      lat: String(latitude),
+      lng: String(longitude),
+      radius: String(CONTEXT_RADIUS_METERS),
+      types: SPECIFIC_PLACE_TYPES.join(","),
+    });
+    if (typeof heading === "number" && !Number.isNaN(heading)) params.set("heading", String(heading));
+
+    console.log("[map] fetching /api/context for pins", { latitude, longitude });
+    const response = await fetch(`/api/context?${params.toString()}`);
+    const data = await response.json();
+    const places = response.ok && Array.isArray(data.places) ? data.places : [];
+    console.log(`[map] /api/context returned ${places.length} place(s) for pins`);
+
+    lastContextPlaces = places;
+    places.forEach((place) => {
+      const hasCoords = typeof place.latitude === "number" && typeof place.longitude === "number";
+      if (!hasCoords) {
+        console.log("[map] skipping place with invalid coordinates", place.name, place.placeId);
+        return;
+      }
+      upsertPlaceMarker(place);
+    });
+
+    if (places.length > 0) {
+      pinsEverLoaded = true;
+      clearTimeout(noPinsToastTimeout);
+    }
+  } catch (error) {
+    console.log("[map] pin refresh failed", error);
+  }
+}
+
+// If genuinely nothing has loaded within 10s of tour start, reassure the
+// user the app isn't frozen — it's just that Google Places hasn't returned
+// any nearby candidates yet (or the request is still in flight).
+function scheduleNoPinsFallback() {
+  clearTimeout(noPinsToastTimeout);
+  noPinsToastTimeout = setTimeout(() => {
+    if (!pinsEverLoaded && placeMarkersByPlaceId.size === 0) {
+      showToast("Loading nearby places...");
+    }
+  }, 10000);
 }
 
 function refreshAllPlaceMarkers() {
@@ -1139,6 +1491,414 @@ async function triggerNarrationForPlace(place) {
     heading: lastHeading,
     triggerPosition: lastPosition || { latitude: place.latitude, longitude: place.longitude },
   });
+}
+
+// --- Tour mode selector + guided tour planner ---
+// Two entry points from the Start Tour button: Wander (existing GPS-driven
+// discovery flow, unchanged) or Plan My Tour (multi-step planner ->
+// /api/plan-tour -> route drawn on the map -> guided walk between stops).
+
+const plannerAnswers = {
+  duration: null,
+  maxDistance: null,
+  startLocation: null, // {lat, lng, name}
+  hasCustomEnd: false,
+  endLocation: null, // {lat, lng, name} or null
+  interests: [],
+  specificFocus: "",
+};
+
+let plannedTour = null; // {tourTitle, tourDescription, estimatedDuration, estimatedDistance, stops:[{...,place}], openingNote}
+let plannedTourActive = false;
+let plannedTourStopIndex = 0;
+let plannedTourMarkers = [];
+let plannedTourRouteLine = null;
+const GUIDED_TOUR_ARRIVAL_METERS = 30;
+
+let startAutocomplete = null;
+let endAutocomplete = null;
+
+function openTourModeModal() {
+  tourModeModal.classList.remove("hidden");
+}
+
+function closeTourModeModal() {
+  tourModeModal.classList.add("hidden");
+}
+
+if (tourModeClose) tourModeClose.addEventListener("click", closeTourModeModal);
+if (tourModeWanderBtn) {
+  tourModeWanderBtn.addEventListener("click", () => {
+    closeTourModeModal();
+    startTour();
+  });
+}
+if (tourModePlanBtn) {
+  tourModePlanBtn.addEventListener("click", () => {
+    closeTourModeModal();
+    openTourPlanner();
+  });
+}
+
+async function openTourPlanner() {
+  showPlannerStep(0);
+  populatePlannerInterests();
+  tourPlanner.classList.remove("hidden");
+  initPlannerAutocomplete();
+}
+
+function closeTourPlanner() {
+  tourPlanner.classList.add("hidden");
+}
+
+if (plannerClose) plannerClose.addEventListener("click", closeTourPlanner);
+
+function showPlannerStep(index) {
+  document.querySelectorAll(".planner-step").forEach((step) => {
+    step.classList.toggle("is-active", Number(step.dataset.plannerStep) === index);
+  });
+}
+
+async function initPlannerAutocomplete() {
+  await waitForGoogleMaps();
+  if (!window.google?.maps?.places) return;
+
+  if (!startAutocomplete && plannerStartInput) {
+    startAutocomplete = new google.maps.places.Autocomplete(plannerStartInput, {
+      fields: ["geometry", "name", "formatted_address"],
+    });
+    startAutocomplete.addListener("place_changed", () => {
+      const place = startAutocomplete.getPlace();
+      if (place.geometry?.location) {
+        plannerAnswers.startLocation = {
+          lat: place.geometry.location.lat(),
+          lng: place.geometry.location.lng(),
+          name: place.name || place.formatted_address,
+        };
+      }
+    });
+  }
+
+  if (!endAutocomplete && plannerEndInput) {
+    endAutocomplete = new google.maps.places.Autocomplete(plannerEndInput, {
+      fields: ["geometry", "name", "formatted_address"],
+    });
+    endAutocomplete.addListener("place_changed", () => {
+      const place = endAutocomplete.getPlace();
+      if (place.geometry?.location) {
+        plannerAnswers.endLocation = {
+          lat: place.geometry.location.lat(),
+          lng: place.geometry.location.lng(),
+          name: place.name || place.formatted_address,
+        };
+      }
+    });
+  }
+}
+
+// --- Planner Step 0: time + distance ---
+
+if (plannerDurationCards) {
+  plannerDurationCards.querySelectorAll(".planner-card").forEach((card) => {
+    card.addEventListener("click", () => {
+      plannerDurationCards.querySelectorAll(".planner-card").forEach((c) => c.classList.remove("is-selected"));
+      card.classList.add("is-selected");
+      plannerAnswers.duration = card.dataset.value;
+      updatePlannerStep0NextState();
+    });
+  });
+}
+
+if (plannerDistancePills) {
+  plannerDistancePills.querySelectorAll(".planner-pill").forEach((pill) => {
+    pill.addEventListener("click", () => {
+      plannerDistancePills.querySelectorAll(".planner-pill").forEach((p) => p.classList.remove("is-selected"));
+      pill.classList.add("is-selected");
+      plannerAnswers.maxDistance = pill.dataset.value;
+      updatePlannerStep0NextState();
+    });
+  });
+}
+
+function updatePlannerStep0NextState() {
+  plannerStep0NextBtn.disabled = !(plannerAnswers.duration && plannerAnswers.maxDistance);
+}
+
+if (plannerStep0NextBtn) {
+  plannerStep0NextBtn.addEventListener("click", () => showPlannerStep(1));
+}
+
+// --- Planner Step 1: start / end points ---
+
+if (plannerUseCurrentLocationBtn) {
+  plannerUseCurrentLocationBtn.addEventListener("click", () => {
+    if (!("geolocation" in navigator)) {
+      showToast("Location isn't available on this device");
+      return;
+    }
+    plannerUseCurrentLocationBtn.textContent = "Locating...";
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const { latitude, longitude } = position.coords;
+        let name = "Current location";
+        try {
+          const response = await fetch(`/api/geocode?lat=${latitude}&lng=${longitude}`);
+          const data = await response.json();
+          if (response.ok && data.locationName) name = data.locationName;
+        } catch (error) {
+          // Fall back to the generic label.
+        }
+        plannerAnswers.startLocation = { lat: latitude, lng: longitude, name };
+        plannerStartInput.value = name;
+        plannerUseCurrentLocationBtn.textContent = "Use my current location";
+      },
+      () => {
+        plannerUseCurrentLocationBtn.textContent = "Use my current location";
+        showToast("Couldn't get your location");
+      },
+      { enableHighAccuracy: true, timeout: 15000 }
+    );
+  });
+}
+
+if (plannerEndNoBtn) {
+  plannerEndNoBtn.addEventListener("click", () => {
+    plannerAnswers.hasCustomEnd = false;
+    plannerEndNoBtn.classList.add("is-active");
+    plannerEndYesBtn.classList.remove("is-active");
+    plannerEndField.classList.add("hidden");
+  });
+}
+
+if (plannerEndYesBtn) {
+  plannerEndYesBtn.addEventListener("click", () => {
+    plannerAnswers.hasCustomEnd = true;
+    plannerEndYesBtn.classList.add("is-active");
+    plannerEndNoBtn.classList.remove("is-active");
+    plannerEndField.classList.remove("hidden");
+  });
+}
+
+if (plannerStep1NextBtn) {
+  plannerStep1NextBtn.addEventListener("click", () => {
+    if (!plannerAnswers.startLocation) {
+      showToast("Please choose a starting point from the suggestions");
+      return;
+    }
+    if (plannerAnswers.hasCustomEnd && !plannerAnswers.endLocation) {
+      showToast("Please choose an end point from the suggestions");
+      return;
+    }
+    showPlannerStep(2);
+  });
+}
+
+// --- Planner Step 2: today's interests ---
+
+function populatePlannerInterests() {
+  const savedInterests = userProfile?.interests || [];
+  if (plannerSavedInterestsNote) {
+    plannerSavedInterestsNote.textContent = savedInterests.length
+      ? `Your saved interests are ${savedInterests.join(", ")} — but today might be different.`
+      : "";
+  }
+  if (!plannerInterestPillsContainer) return;
+  const pills = plannerInterestPillsContainer.querySelectorAll(".onboarding-pill");
+  pills.forEach((pill) => {
+    pill.classList.toggle("is-selected", savedInterests.includes(pill.dataset.value));
+  });
+  plannerAnswers.interests = Array.from(pills)
+    .filter((pill) => pill.classList.contains("is-selected"))
+    .map((pill) => pill.dataset.value);
+}
+
+if (plannerInterestPillsContainer) {
+  plannerInterestPillsContainer.querySelectorAll(".onboarding-pill").forEach((pill) => {
+    pill.addEventListener("click", () => {
+      pill.classList.toggle("is-selected");
+      plannerAnswers.interests = Array.from(
+        plannerInterestPillsContainer.querySelectorAll(".onboarding-pill.is-selected")
+      ).map((p) => p.dataset.value);
+    });
+  });
+}
+
+// --- Planner Step 3: generate ---
+
+if (plannerGenerateBtn) {
+  plannerGenerateBtn.addEventListener("click", async () => {
+    plannerAnswers.specificFocus = plannerSpecificFocus.value.trim();
+    showPlannerStep(3);
+    await generatePlannedTour();
+  });
+}
+
+async function generatePlannedTour() {
+  try {
+    const response = await fetch("/api/plan-tour", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        startLocation: plannerAnswers.startLocation,
+        endLocation: plannerAnswers.hasCustomEnd ? plannerAnswers.endLocation : null,
+        duration: plannerAnswers.duration,
+        maxDistance: plannerAnswers.maxDistance,
+        interests: plannerAnswers.interests,
+        specificFocus: plannerAnswers.specificFocus,
+        userProfile,
+        currentCity: currentCity || plannerAnswers.startLocation?.name,
+      }),
+    });
+    const data = await response.json();
+
+    if (!response.ok || !Array.isArray(data.stops) || data.stops.length === 0) {
+      showToast("Couldn't plan a tour — try again");
+      closeTourPlanner();
+      return;
+    }
+
+    plannedTour = data;
+    closeTourPlanner();
+    showPlannedTourOnMap(data);
+  } catch (error) {
+    showToast("Couldn't plan a tour — try again");
+    closeTourPlanner();
+  }
+}
+
+// --- Rendering the planned tour on the map ---
+
+function showPlannedTourOnMap(tour) {
+  clearPlannedTourFromMap();
+  if (!map || !window.google) return;
+
+  const bounds = new google.maps.LatLngBounds();
+  const path = [];
+
+  tour.stops.forEach((stop, index) => {
+    const place = stop.place;
+    if (!place || typeof place.latitude !== "number" || typeof place.longitude !== "number") return;
+    const position = { lat: place.latitude, lng: place.longitude };
+    path.push(position);
+    bounds.extend(position);
+
+    const marker = new google.maps.Marker({
+      position,
+      map,
+      label: { text: String(index + 1), color: "#0F1B2D", fontWeight: "700", fontSize: "13px" },
+      icon: {
+        path: google.maps.SymbolPath.CIRCLE,
+        fillColor: "#D4A853",
+        fillOpacity: 1,
+        strokeColor: "#0F1B2D",
+        strokeWeight: 1.5,
+        scale: 16,
+      },
+      zIndex: 700,
+    });
+    marker.addListener("click", () => {
+      if (activeInfoWindow) activeInfoWindow.close();
+      activeInfoWindow = new google.maps.InfoWindow({ content: buildPlannedStopPopupContent(stop, index) });
+      activeInfoWindow.open({ map, anchor: marker });
+    });
+    plannedTourMarkers.push(marker);
+  });
+
+  if (path.length > 1) {
+    plannedTourRouteLine = new google.maps.Polyline({
+      path,
+      map,
+      strokeColor: "#D4A853",
+      strokeOpacity: 0.8,
+      strokeWeight: 3,
+    });
+  }
+
+  if (!bounds.isEmpty()) map.fitBounds(bounds, 60);
+
+  plannedTourTitleEl.textContent = tour.tourTitle || "Your custom tour";
+  plannedTourDescEl.textContent = tour.tourDescription || "";
+  plannedTourMetaEl.textContent = `${tour.estimatedDuration || ""} · ${tour.estimatedDistance || ""} · ${tour.stops.length} stops`;
+  plannedTourCard.classList.remove("hidden");
+}
+
+// Simple preview popup — "tap a numbered pin to preview what stop is about."
+function buildPlannedStopPopupContent(stop, index) {
+  const container = document.createElement("div");
+  container.className = "map-pin-popup";
+  container.innerHTML = `<div class="map-pin-popup-name"></div><div class="map-pin-popup-type"></div>`;
+  container.querySelector(".map-pin-popup-name").textContent = `${index + 1}. ${stop.placeName}`;
+  container.querySelector(".map-pin-popup-type").textContent = stop.whyThisStop || stop.placeType || "";
+  return container;
+}
+
+function clearPlannedTourFromMap() {
+  plannedTourMarkers.forEach((marker) => marker.setMap(null));
+  plannedTourMarkers = [];
+  if (plannedTourRouteLine) {
+    plannedTourRouteLine.setMap(null);
+    plannedTourRouteLine = null;
+  }
+}
+
+if (plannedTourDiscardBtn) {
+  plannedTourDiscardBtn.addEventListener("click", () => {
+    plannedTourCard.classList.add("hidden");
+    clearPlannedTourFromMap();
+    plannedTour = null;
+  });
+}
+
+if (plannedTourStartBtn) {
+  plannedTourStartBtn.addEventListener("click", async () => {
+    if (!plannedTour) return;
+    plannedTourCard.classList.add("hidden");
+    plannedTourActive = true;
+    plannedTourStopIndex = 0;
+
+    unlockAudio();
+    startTour();
+
+    if (plannedTour.openingNote) {
+      startStory(plannedTour.tourTitle || "Your Tour", plannedTour.openingNote);
+      await speakNarration(plannedTour.openingNote);
+    }
+  });
+}
+
+// Called from checkForNarration (in place of the normal
+// orientation/specific-zoom-in flow) whenever a guided tour is active —
+// narrates the current target stop once the user is within
+// GUIDED_TOUR_ARRIVAL_METERS of it, then advances to the next stop.
+async function checkGuidedTourProgress(latitude, longitude, heading) {
+  if (!plannedTour || plannedTourStopIndex >= plannedTour.stops.length) {
+    plannedTourActive = false;
+    statusText.textContent = "Tour complete! Keep exploring or start a new one.";
+    return;
+  }
+
+  const stop = plannedTour.stops[plannedTourStopIndex];
+  const place = stop.place;
+  if (!place || typeof place.latitude !== "number" || typeof place.longitude !== "number") {
+    plannedTourStopIndex += 1;
+    return;
+  }
+
+  const distance = distanceInMeters({ latitude, longitude }, { latitude: place.latitude, longitude: place.longitude });
+
+  if (distance <= GUIDED_TOUR_ARRIVAL_METERS) {
+    if (narratedPlaceIds.has(place.placeId)) {
+      plannedTourStopIndex += 1;
+      return;
+    }
+    await narrateAndSpeak({ tier: "specific", places: [place], heading, triggerPosition: { latitude, longitude } });
+    plannedTourStopIndex += 1;
+    return;
+  }
+
+  const bearing = travelBearingDegrees(latitude, longitude, place.latitude, place.longitude);
+  const direction = bearingToCompassWord(bearing);
+  statusText.textContent = `Head ${direction || "ahead"} toward ${stop.placeName} (${Math.round(distance)}m)`;
 }
 
 // --- Weather ---
@@ -1168,6 +1928,7 @@ function startWeatherRefresh(latitude, longitude) {
 
 async function loadInterestPlaces(latitude, longitude) {
   if (!userProfile || !Array.isArray(userProfile.interests) || userProfile.interests.length === 0) {
+    console.log("[map] loadInterestPlaces skipped — no saved interests on profile");
     interestPlaces = [];
     return;
   }
@@ -1180,8 +1941,14 @@ async function loadInterestPlaces(latitude, longitude) {
     const response = await fetch(`/api/interest-places?${params.toString()}`);
     const data = await response.json();
     interestPlaces = response.ok && Array.isArray(data.places) ? data.places : [];
+    console.log(`[map] /api/interest-places returned ${interestPlaces.length} place(s)`);
+    if (interestPlaces.length > 0) {
+      pinsEverLoaded = true;
+      clearTimeout(noPinsToastTimeout);
+    }
     interestPlaces.forEach((place) => upsertPlaceMarker(place, { isInterestMatch: true }));
   } catch (error) {
+    console.log("[map] loadInterestPlaces failed", error);
     interestPlaces = [];
   }
 }
@@ -1237,7 +2004,7 @@ startBtn.addEventListener("click", () => {
   // location-triggered narration can call .play() on this same element
   // without a fresh tap, including with the screen locked.
   unlockAudio();
-  startTour();
+  openTourModeModal();
 });
 playBtn.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -1360,6 +2127,75 @@ function showToast(message) {
   }, 2200);
 }
 
+// --- Tour-start loading overlay (Wander mode) ---
+// Covers the map from "Start Wandering" until the first narration is ready,
+// so the GPS-lock -> places-search -> Claude pipeline never looks frozen.
+// Stages only ever move forward — advanceTourLoadingStage ignores calls for
+// a stage at or before the current one (e.g. a second GPS fix arriving
+// after we've already moved on to "discovering").
+const TOUR_LOADING_STAGES = ["locating", "locking", "discovering", "preparing"];
+const TOUR_LOADING_MESSAGES = {
+  locating: "Finding your location...",
+  locking: "Locking GPS...",
+  discovering: "Discovering nearby places...",
+  preparing: "Preparing your guide...",
+};
+let tourLoadingStageIndex = -1;
+
+function showTourLoadingOverlay() {
+  if (!tourLoadingOverlay) return;
+  tourLoadingStageIndex = -1;
+  tourLoadingOverlay.classList.remove("hidden");
+  advanceTourLoadingStage("locating");
+}
+
+function advanceTourLoadingStage(stage) {
+  if (!tourLoadingOverlay || tourLoadingOverlay.classList.contains("hidden")) return;
+  const index = TOUR_LOADING_STAGES.indexOf(stage);
+  if (index < 0 || index <= tourLoadingStageIndex) return;
+  tourLoadingStageIndex = index;
+  tourLoadingText.textContent = TOUR_LOADING_MESSAGES[stage];
+}
+
+function hideTourLoadingOverlay() {
+  if (!tourLoadingOverlay) return;
+  tourLoadingOverlay.classList.add("hidden");
+}
+
+// --- Narration loading state (place-name-visible, story-not-ready-yet) ---
+// Typically 3-8 seconds (Claude narration + OpenAI TTS) — the wave/spinner
+// keep it feeling alive, and the 15s fallback message covers the rare slow
+// call so it never reads as frozen.
+const NARRATION_LOADING_SLOW_MS = 15000;
+let narrationLoadingTimeout = null;
+
+function showNarrationLoadingState(bestGuessPlaceName) {
+  if (bestGuessPlaceName) {
+    locationName.textContent = bestGuessPlaceName;
+  }
+  if (narrationWaveEl) narrationWaveEl.classList.remove("hidden");
+  statusText.classList.add("is-loading");
+  const playIcon = playBtn.querySelector(".play-icon");
+  const spinner = playBtn.querySelector(".loading-spinner");
+  if (playIcon) playIcon.classList.add("hidden");
+  if (spinner) spinner.classList.remove("hidden");
+
+  clearTimeout(narrationLoadingTimeout);
+  narrationLoadingTimeout = setTimeout(() => {
+    statusText.textContent = "Still working on it... great stories take a moment";
+  }, NARRATION_LOADING_SLOW_MS);
+}
+
+function hideNarrationLoadingState() {
+  clearTimeout(narrationLoadingTimeout);
+  if (narrationWaveEl) narrationWaveEl.classList.add("hidden");
+  statusText.classList.remove("is-loading");
+  const playIcon = playBtn.querySelector(".play-icon");
+  const spinner = playBtn.querySelector(".loading-spinner");
+  if (playIcon) playIcon.classList.remove("hidden");
+  if (spinner) spinner.classList.add("hidden");
+}
+
 let drawerTouchStartY = null;
 playerCard.addEventListener(
   "touchstart",
@@ -1393,6 +2229,8 @@ speedButtons.forEach((button) => {
 // drawer, or the lock-screen/AirPods media controls.
 audioPlayer.addEventListener("play", () => {
   play();
+  hideNarrationLoadingState();
+  hideTourLoadingOverlay();
   statusText.textContent = "Playing...";
   if ("mediaSession" in navigator) {
     navigator.mediaSession.playbackState = "playing";
@@ -1520,6 +2358,10 @@ function startTour() {
     loadReturningUserContext();
   }
 
+  pinsEverLoaded = false;
+  scheduleNoPinsFallback();
+  showTourLoadingOverlay();
+
   statusText.textContent = "Finding your location...";
   watchId = navigator.geolocation.watchPosition(onLocation, onLocationError, {
     enableHighAccuracy: true,
@@ -1537,6 +2379,15 @@ function onLocation(position) {
   recordTravelPosition(latitude, longitude);
   updateUserLocationOnMap(latitude, longitude, lastHeading);
 
+  // Pin loading used to be entirely gated behind the narration pipeline
+  // (orientation -> 15m of further movement -> runSpecificZoomIn), so a
+  // stationary or slow-moving user could go a long time without seeing any
+  // pins besides interest-matched ones. Pins are cosmetic/map-only, so they
+  // get their own lightweight, independently-throttled refresh here that
+  // runs on every GPS tick regardless of the narration cooldown/movement
+  // gates below.
+  refreshMapPinsAroundUser(latitude, longitude, computeEffectiveHeading());
+
   // Immediate feedback the moment any fix arrives, before GPS has settled.
   if (!hasShownFastWelcome) {
     hasShownFastWelcome = true;
@@ -1553,6 +2404,7 @@ function onLocation(position) {
     if (recentPositions.length === GPS_STABILIZATION_READINGS && isGpsStable(recentPositions)) {
       gpsStabilized = true;
       pulseEl.classList.add("is-locked");
+      advanceTourLoadingStage("locking");
     } else {
       return;
     }
@@ -1568,7 +2420,7 @@ function onLocation(position) {
   }
 
   reverseGeocode(latitude, longitude);
-  checkForNarration(latitude, longitude, lastHeading);
+  checkForNarration(latitude, longitude, computeEffectiveHeading());
 }
 
 function isGpsStable(positions) {
@@ -1589,6 +2441,25 @@ function recordTravelPosition(latitude, longitude) {
   if (travelHistory.length > TRAVEL_HISTORY_SIZE) {
     travelHistory.shift();
   }
+}
+
+// True unless returningUserContext (loaded from Supabase for a signed-in
+// user, see loadReturningUserContext) shows a prior session already in this
+// exact city — feeds the first-narration "give big picture orientation"
+// vs. "welcome back" framing server-side (see GREETING_AND_CONTEXT_RULES).
+function computeFirstVisitToCity() {
+  if (!currentCity) return true;
+  if (!returningUserContext || !Array.isArray(returningUserContext.recentSessions)) return true;
+  const priorCities = returningUserContext.recentSessions.map((session) => session.city).filter(Boolean);
+  return !priorCities.includes(currentCity);
+}
+
+function computeTimeOfDay() {
+  const hour = new Date().getHours();
+  if (hour >= 5 && hour < 12) return "morning";
+  if (hour >= 12 && hour < 17) return "afternoon";
+  if (hour >= 17 && hour < 21) return "evening";
+  return "night";
 }
 
 // Direction of TRAVEL (which way the user is actually walking) as derived
@@ -1684,6 +2555,12 @@ async function reverseGeocode(latitude, longitude) {
 // immediately — the user can stand still and still get a narration.
 async function checkForNarration(latitude, longitude, heading) {
   if (isNarrating || isConversing) return;
+  advanceTourLoadingStage("discovering");
+
+  if (plannedTourActive) {
+    await checkGuidedTourProgress(latitude, longitude, heading);
+    return;
+  }
 
   // Interest-matched place within 30m — bypasses the normal cooldown
   // entirely, since this is exactly the kind of place the user said they
@@ -1834,7 +2711,11 @@ function choosePrimaryPlace(places) {
 async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }) {
   isNarrating = true;
   lastNarrationPosition = triggerPosition;
-  statusText.textContent = tier === "neighborhood" ? "Getting your bearings..." : "Generating your story...";
+  statusText.textContent = "Sabri is preparing your story...";
+
+  advanceTourLoadingStage("preparing");
+  const bestGuessName = tier === "neighborhood" ? place?.name : choosePrimaryPlace(places)?.name;
+  showNarrationLoadingState(bestGuessName);
 
   const directionOfTravel = computeDirectionOfTravel();
   const { proactive: nearbyInterestPlace } = triggerPosition
@@ -1864,12 +2745,18 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
         country: currentCountry,
         weather: currentWeather,
         nearbyInterestPlace,
+        firstVisitToCity: computeFirstVisitToCity(),
+        timeOfDay: computeTimeOfDay(),
+        userStatedDirection,
+        userStatedDestination,
       }),
     });
     const data = await response.json();
+    hideTourLoadingOverlay();
 
     if (!response.ok || !data.narration) {
       statusText.textContent = "Couldn't generate your story.";
+      hideNarrationLoadingState();
       return;
     }
 
@@ -1878,6 +2765,7 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
 
     if (!focusedPlace) {
       statusText.textContent = "Couldn't generate your story.";
+      hideNarrationLoadingState();
       return;
     }
 
@@ -1917,11 +2805,13 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
     await speakNarration(data.narration);
   } catch (error) {
     statusText.textContent = "Couldn't generate your story.";
+    hideTourLoadingOverlay();
   } finally {
     isNarrating = false;
     lastNarrationEndTime = Date.now();
     narratingPlaceId = null;
     refreshAllPlaceMarkers();
+    hideNarrationLoadingState();
   }
 }
 
@@ -2016,7 +2906,7 @@ async function speakNarration(text) {
     const response = await fetch("/api/speak", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, speed: selectedSpeed, voice: settings.voice }),
+      body: JSON.stringify({ text, speed: selectedSpeed, voice: settings.voice, language: settings.language }),
       signal: speakAbortController.signal,
     });
 
@@ -2328,6 +3218,8 @@ async function askSabri(question) {
         city: currentCity,
         country: currentCountry,
         weather: currentWeather,
+        userStatedDirection,
+        userStatedDestination,
       }),
     });
     const data = await response.json();
@@ -2340,6 +3232,17 @@ async function askSabri(question) {
 
     if (data.locationCorrection) {
       correctionContext = data.locationCorrection;
+    }
+
+    // Real-world testing found Sabri kept narrating a street the user had
+    // already said they were leaving — this is the fix: a stated
+    // destination/direction persists (see userStatedDirection/Destination
+    // declarations above) and outweighs raw GPS proximity for the rest of
+    // the session, not just this one reply.
+    if (data.userStatedDestination || data.userStatedDirection) {
+      userStatedDestination = data.userStatedDestination || null;
+      userStatedDirection = data.userStatedDirection || null;
+      console.log("[intent] user stated new direction/destination:", userStatedDirection, userStatedDestination);
     }
 
     recordQuestionLog(question, data.answer, lastHeading);
