@@ -125,6 +125,42 @@ body {
   background: var(--bg-elevated);
 }
 
+/* Recenter button — bottom-right, floats above the control bar. Hidden by
+   default; only fades in once the user has manually panned away from their
+   own location (see userHasManuallyPanned in app.js), so it never clutters
+   the screen during normal auto-follow wandering. */
+.recenter-btn {
+  position: absolute;
+  right: 16px;
+  bottom: calc(env(safe-area-inset-bottom) + 300px);
+  z-index: 12;
+  width: 44px;
+  height: 44px;
+  border: none;
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  color: var(--gold);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 6px 20px var(--warm-shadow);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.2s ease;
+}
+
+/* Note: deliberately NOT the shared .hidden utility (display:none
+   !important) — that can't be faded. is-visible is toggled instead of
+   hidden so the opacity transition actually plays. */
+.recenter-btn.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.recenter-btn:active {
+  transform: scale(0.94);
+}
+
 /* Legacy GPS-lock indicator — permanently hidden (see index.html comment);
    pulseEl.classList still gets toggled by app.js but has no visual effect. */
 .pulse {

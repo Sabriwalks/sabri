@@ -14,6 +14,19 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <!--SUPABASE_ENV-->
   <!--GOOGLE_MAPS_SCRIPT-->
+  <!-- Marker clustering for map pins — without this, dozens of individual
+       DOM-backed markers each repaint every pan/zoom frame, which is what
+       was causing the sluggish/jerky map feel. This package ships ESM-only
+       with no reliable classic-script global, so it's imported as a module
+       and re-exposed on window for app.js (a plain classic script) to use —
+       see waitForMarkerClusterer() in app.js, which polls for
+       window.MarkerClusterer before enabling clustering. jsDelivr's
+       "+esm" endpoint guarantees a proper ESM build with named exports
+       regardless of how the package itself is bundled. -->
+  <script type="module">
+    import { MarkerClusterer } from "https://cdn.jsdelivr.net/npm/@googlemaps/markerclusterer@2.5.3/+esm";
+    window.MarkerClusterer = MarkerClusterer;
+  </script>
 </head>
 <body>
   <!-- App-boot loading state — covers everything from first paint until
@@ -231,6 +244,17 @@
     <!-- Full-screen map — see app.js initMap()/updateUserLocationOnMap() for
          the user location dot, place pins, and pin-tap-to-narrate wiring. -->
     <div id="map" class="map-container" aria-hidden="true"></div>
+
+    <!-- Recenter button — hidden until the user manually drags the map
+         (see setupManualPanDetection/userHasManuallyPanned in app.js), so it
+         doesn't clutter the screen during normal auto-follow wandering. -->
+    <button id="recenter-btn" class="recenter-btn" aria-label="Recenter on my location">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none" />
+        <path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke-linecap="round" />
+        <circle cx="12" cy="12" r="7" />
+      </svg>
+    </button>
 
     <!-- Tour-start loading state — shown over the map from the moment
          "Start Wandering" is tapped until the first narration is ready, so

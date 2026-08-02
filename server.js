@@ -896,6 +896,237 @@ app.get("/api/interest-places", async (req, res) => {
   }
 });
 
+// --- Map pins: relevance-filtered nearby places ---
+// Separate from /api/context (which stays tight-radius/heading-based on
+// purpose — that's what runSpecificZoomIn uses to reason about "what's
+// directly in front of the user right now" for narration, and shouldn't be
+// touched). This is specifically for what shows up as a pin on the map:
+// wider coverage, filtered through both a cheap Places-type exclusion list
+// and a Claude relevance pass so every pin has actually earned its place.
+
+// Categories that are almost never what a tour guide would point out,
+// filtered out before anything reaches Claude — cheaper and more reliable
+// than hoping the relevance prompt catches every generic business.
+const EXCLUDED_PLACE_TYPES = [
+  "real_estate_agency",
+  "electronics_store",
+  "car_repair",
+  "car_dealer",
+  "car_rental",
+  "car_wash",
+  "gas_station",
+  "insurance_agency",
+  "lawyer",
+  "accounting",
+  "bank",
+  "atm",
+  "finance",
+  "laundry",
+  "storage",
+  "moving_company",
+  "locksmith",
+  "plumber",
+  "electrician",
+  "painter",
+  "roofing_contractor",
+  "general_contractor",
+  "corporate_office",
+  "warehouse",
+  "travel_agency",
+  "dentist",
+  "doctor",
+  "physiotherapist",
+  "veterinary_care",
+  "gym",
+  "hair_care",
+  "beauty_salon",
+  "car_parts_store",
+  "pest_control",
+];
+
+// Grid/radial search pattern: a center point plus a ring of points around
+// it, each with its own Nearby Search call. This exists because Google's
+// Nearby Search caps out at ~20 results per call *regardless of radius* —
+// one call with a huge radius still only sees the 20 closest results, which
+// isn't enough coverage for "something interesting in every direction" when
+// the map is zoomed out. A ring of overlapping searches gives real coverage
+// instead.
+const PIN_GRID_RING_BEARINGS = [0, 60, 120, 180, 240, 300];
+const PIN_GRID_RING_DISTANCE_METERS = 350;
+const PIN_SEARCH_RADIUS_METERS = 400;
+
+function offsetLatLng(lat, lng, bearingDeg, distanceMeters) {
+  const earthRadius = 6371000;
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const toDeg = (rad) => (rad * 180) / Math.PI;
+  const bearing = toRad(bearingDeg);
+  const lat1 = toRad(lat);
+  const lng1 = toRad(lng);
+  const angularDistance = distanceMeters / earthRadius;
+
+  const lat2 = Math.asin(
+    Math.sin(lat1) * Math.cos(angularDistance) + Math.cos(lat1) * Math.sin(angularDistance) * Math.cos(bearing)
+  );
+  const lng2 =
+    lng1 +
+    Math.atan2(
+      Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(lat1),
+      Math.cos(angularDistance) - Math.sin(lat1) * Math.sin(lat2)
+    );
+
+  return { lat: toDeg(lat2), lng: toDeg(lng2) };
+}
+
+// Session-length cache of relevance-scored results per rough grid cell
+// (~110m at the equator) + interests/focus combination — re-panning over
+// the same area shouldn't repeatedly hit Claude for the same verdict.
+const MAP_PINS_CACHE_MS = 30 * 60 * 1000;
+const mapPinsCache = new Map();
+
+function mapPinsCacheKey(lat, lng, interests, specificFocus) {
+  const roundedLat = lat.toFixed(3);
+  const roundedLng = lng.toFixed(3);
+  const interestKey = [...interests].sort().join(",");
+  return `${roundedLat},${roundedLng}|${interestKey}|${specificFocus || ""}`;
+}
+
+// Second-pass relevance filter: given a broader candidate pool (already
+// past the type-exclusion list), asks Claude which of these a knowledgeable
+// local guide would actually point out to THIS user, tagged by tier. If
+// nothing here is genuinely relevant, this can and should come back empty —
+// no filler pins just to have something to show.
+async function scorePlaceRelevance(results, interests, specificFocus) {
+  if (!ANTHROPIC_API_KEY || results.length === 0) return [];
+
+  const candidateLines = results
+    .slice(0, 50)
+    .map((result, index) => {
+      const types = (result.types || []).slice(0, 5).join(", ");
+      const reviews = result.user_ratings_total ? `${result.user_ratings_total} reviews` : "no review data";
+      return `${index + 1}. placeId: ${result.place_id} | name: ${result.name} | types: ${types} | rating: ${
+        result.rating ?? "n/a"
+      } (${reviews})`;
+    })
+    .join("\n");
+
+  const interestList = interests.length > 0 ? interests.join(", ") : "general sightseeing";
+  const focusLine = specificFocus ? `Specific focus right now: ${specificFocus}.` : "";
+
+  const userMessage =
+    `Given this user's interests (${interestList}), filter this list of nearby places to only ` +
+    `those a knowledgeable local guide would actually point out to this specific user. Exclude ` +
+    `generic businesses (repair shops, offices, agencies, banks, clinics, etc.) unless they have ` +
+    `unusual historical/cultural significance. ${focusLine}\n\nPlaces:\n${candidateLines}\n\n` +
+    `Return only placeIds worth showing as a map pin, each tagged with a relevance tier: high, ` +
+    `medium, or low. If nothing here is genuinely worth showing, return an empty list — do not ` +
+    `include filler places just to have something to show.`;
+
+  try {
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1024,
+      system: "You are Sabri, a discerning local tour guide deciding which nearby places are worth showing on a map.",
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              relevantPlaces: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    placeId: { type: "string" },
+                    relevanceTier: { type: "string", enum: ["high", "medium", "low"] },
+                  },
+                  required: ["placeId", "relevanceTier"],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ["relevantPlaces"],
+            additionalProperties: false,
+          },
+        },
+      },
+      messages: [{ role: "user", content: userMessage }],
+    });
+
+    const textBlock = message.content.find((block) => block.type === "text");
+    const parsed = textBlock ? JSON.parse(textBlock.text) : { relevantPlaces: [] };
+    const tierByPlaceId = new Map((parsed.relevantPlaces || []).map((p) => [p.placeId, p.relevanceTier]));
+
+    return results
+      .filter((result) => tierByPlaceId.has(result.place_id))
+      .map((result) => {
+        const primaryType = result.types?.find((type) => ALLOWED_PLACE_TYPES.includes(type)) || result.types?.[0] || null;
+        return {
+          ...toPlaceResponse(result, primaryType),
+          relevanceTier: tierByPlaceId.get(result.place_id),
+        };
+      });
+  } catch (error) {
+    console.log("[debug] scorePlaceRelevance failed:", error?.message || error);
+    return [];
+  }
+}
+
+app.get("/api/map-pins", async (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+  const interests = req.query.interests ? req.query.interests.split("|").filter(Boolean) : [];
+  const specificFocus = req.query.specificFocus || "";
+
+  if (Number.isNaN(lat) || Number.isNaN(lng)) {
+    return res.status(400).json({ error: "lat and lng query params are required." });
+  }
+  if (!GOOGLE_MAPS_API_KEY) {
+    return res.status(500).json({ error: "GOOGLE_MAPS_API_KEY is not configured on the server." });
+  }
+
+  const cacheKey = mapPinsCacheKey(lat, lng, interests, specificFocus);
+  const cached = mapPinsCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < MAP_PINS_CACHE_MS) {
+    return res.json({ places: cached.places, cached: true });
+  }
+
+  try {
+    const centers = [
+      { lat, lng },
+      ...PIN_GRID_RING_BEARINGS.map((bearing) => offsetLatLng(lat, lng, bearing, PIN_GRID_RING_DISTANCE_METERS)),
+    ];
+    const resultBatches = await Promise.all(
+      centers.map((center) => fetchNearbySearch(center.lat, center.lng, PIN_SEARCH_RADIUS_METERS).catch(() => []))
+    );
+
+    const seen = new Map();
+    for (const batch of resultBatches) {
+      for (const result of batch) {
+        if (!result.place_id || seen.has(result.place_id)) continue;
+        seen.set(result.place_id, result);
+      }
+    }
+
+    // Cheap first-pass filter — exclude generic business categories outright
+    // before spending a Claude call scoring them.
+    const filtered = [...seen.values()].filter(
+      (result) => !(result.types || []).some((type) => EXCLUDED_PLACE_TYPES.includes(type))
+    );
+
+    if (filtered.length === 0) {
+      mapPinsCache.set(cacheKey, { places: [], timestamp: Date.now() });
+      return res.json({ places: [] });
+    }
+
+    const scoredPlaces = await scorePlaceRelevance(filtered, interests, specificFocus);
+    mapPinsCache.set(cacheKey, { places: scoredPlaces, timestamp: Date.now() });
+    res.json({ places: scoredPlaces });
+  } catch (error) {
+    res.status(502).json({ error: "Failed to load map pins." });
+  }
+});
+
 // In-memory cache, 30 minutes per rounded lat/lng — avoids burning through
 // OpenWeatherMap's free-tier daily call limit when the same small area gets
 // checked repeatedly during a walk.

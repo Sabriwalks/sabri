@@ -8,6 +8,7 @@ const neighborhoodNameEl = document.getElementById("neighborhood-name");
 const homePhoto = document.getElementById("home-photo");
 const pulseEl = document.getElementById("pulse");
 const mapEl = document.getElementById("map");
+const recenterBtn = document.getElementById("recenter-btn");
 const tourLoadingOverlay = document.getElementById("tour-loading-overlay");
 const tourLoadingText = document.getElementById("tour-loading-text");
 const narrationWaveEl = document.getElementById("narration-wave");
@@ -1249,6 +1250,36 @@ function waitForGoogleMaps() {
   });
 }
 
+// Waits briefly for the @googlemaps/markerclusterer module (see index.html
+// — loaded as an ES module and re-exposed as window.MarkerClusterer, since
+// this package ships ESM-only with no reliable classic-script global) to
+// finish loading. Clustering is a performance optimization, not a
+// correctness requirement, so this gives up after a few seconds and lets
+// initMap() fall back to unclustered markers rather than blocking the whole
+// map on a slow/failed third-party script load.
+function waitForMarkerClusterer(timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    if (window.MarkerClusterer) {
+      resolve(true);
+      return;
+    }
+    const started = Date.now();
+    const interval = setInterval(() => {
+      if (window.MarkerClusterer) {
+        clearInterval(interval);
+        resolve(true);
+      } else if (Date.now() - started > timeoutMs) {
+        clearInterval(interval);
+        resolve(false);
+      }
+    }, 150);
+  });
+}
+
+// The clusterer instance (distinct from window.MarkerClusterer, which is
+// the constructor/class itself).
+let mapMarkerClusterer = null;
+
 async function initMap() {
   if (!mapEl) {
     console.log("[map] initMap aborted — #map element not found in DOM");
@@ -1264,10 +1295,34 @@ async function initMap() {
     center: { lat: 20, lng: 0 },
     zoom: MAP_WORLD_ZOOM,
     disableDefaultUI: true,
+    // "greedy" is correct here specifically because the map fills the
+    // entire viewport with nothing scrollable behind it — there's no page
+    // scroll for a one-finger drag to conflict with, unlike a map embedded
+    // within a scrollable page (where "cooperative" would be the right
+    // choice). Re-verified this is still the right call while investigating
+    // the sluggish pan/zoom complaint — gestureHandling wasn't the cause.
     gestureHandling: "greedy",
     styles: MAP_STYLE,
   });
   console.log("[map] map instance created");
+
+  setupManualPanDetection();
+  setupViewportPinRefresh();
+
+  // Dozens of individual DOM-backed google.maps.Marker instances (one per
+  // nearby place, and this count is only going up now that pin discovery
+  // covers a wider area — see refreshMapPinsAroundUser) is exactly the kind
+  // of thing that makes pan/zoom feel jerky: the browser has to reposition
+  // every one of them on every frame. Clustering collapses nearby pins into
+  // a single circle until the user zooms in, which is both faster to
+  // render and less visually noisy.
+  const hasClusterer = await waitForMarkerClusterer();
+  if (hasClusterer) {
+    mapMarkerClusterer = new window.MarkerClusterer({ map, markers: [] });
+    console.log("[map] marker clustering enabled");
+  } else {
+    console.log("[map] marker clustering unavailable — falling back to unclustered markers");
+  }
 }
 
 initMap();
@@ -1291,9 +1346,39 @@ function buildUserLocationIcon(heading) {
   };
 }
 
+// Set true the moment the user manually drags the map (see
+// setupManualPanDetection) and only cleared by tapping the Recenter button.
+// While true, updateUserLocationOnMap keeps the location dot itself moving
+// live but stops fighting the user by recentering the viewport out from
+// under them — this was the actual cause of "panning to look at the route
+// gets snapped back."
+let userHasManuallyPanned = false;
+let lastKnownUserPosition = null;
+
+function setupManualPanDetection() {
+  if (!map) return;
+  map.addListener("dragstart", () => {
+    userHasManuallyPanned = true;
+    if (recenterBtn) recenterBtn.classList.add("is-visible");
+  });
+}
+
+function recenterMapOnUser() {
+  userHasManuallyPanned = false;
+  if (recenterBtn) recenterBtn.classList.remove("is-visible");
+  if (map && lastKnownUserPosition) {
+    map.panTo(lastKnownUserPosition);
+  }
+}
+
+if (recenterBtn) {
+  recenterBtn.addEventListener("click", recenterMapOnUser);
+}
+
 function updateUserLocationOnMap(latitude, longitude, heading) {
   if (!map) return;
   const position = { lat: latitude, lng: longitude };
+  lastKnownUserPosition = position;
   const icon = buildUserLocationIcon(heading);
 
   if (!userLocationMarker) {
@@ -1307,17 +1392,24 @@ function updateUserLocationOnMap(latitude, longitude, heading) {
     hasMapCenteredOnUser = true;
     map.setCenter(position);
     map.setZoom(MAP_CITY_ZOOM);
-  } else {
+  } else if (!userHasManuallyPanned) {
     map.panTo(position);
   }
 }
 
-// Pin size/color: large gold for interest-matched places, medium gold for
-// other nearby candidates, small warm grey for already-visited-this-session,
-// and a pulsing gold ring layered on top for whichever place is currently
-// narrating.
-function buildPlaceMarkerIcon({ isInterestMatch, isVisited, isNarratingNow }) {
-  const size = isNarratingNow ? 30 : isInterestMatch ? 26 : isVisited ? 14 : 18;
+// Pin size/color: large gold for interest-matched places, size otherwise
+// driven by the Claude-assigned relevanceTier (see /api/map-pins) —
+// high/medium/low — small warm grey for already-visited-this-session, and
+// a pulsing gold ring layered on top for whichever place is currently
+// narrating. Every pin here has already been through both the Places-API
+// exclusion filter and the Claude relevance filter server-side (see
+// server.js scorePlaceRelevance), so nothing reaches this point that
+// wasn't judged worth showing — size just communicates how worth it.
+const RELEVANCE_TIER_SIZES = { high: 24, medium: 18, low: 12 };
+
+function buildPlaceMarkerIcon({ isInterestMatch, isVisited, isNarratingNow, relevanceTier }) {
+  const tierSize = RELEVANCE_TIER_SIZES[relevanceTier] || 18;
+  const size = isNarratingNow ? 30 : isInterestMatch ? 26 : isVisited ? 14 : tierSize;
   const color = isVisited && !isNarratingNow ? "#B8A898" : "#D4A853";
   const ringSvg = isNarratingNow
     ? `<circle cx="20" cy="20" r="18" fill="none" stroke="#D4A853" stroke-width="2" opacity="0.6">` +
@@ -1354,10 +1446,13 @@ function buildPinPopupContent(place) {
   return container;
 }
 
-// Adds/updates a pin for a place. isInterestMatch/isVisited/isNarratingNow
-// determine its size/color (see buildPlaceMarkerIcon). Safe to call
-// repeatedly for the same placeId — just updates the existing marker.
-function upsertPlaceMarker(place, { isInterestMatch } = {}) {
+// Adds/updates a pin for a place. isInterestMatch/isVisited/isNarratingNow/
+// relevanceTier determine its size/color (see buildPlaceMarkerIcon). Safe to
+// call repeatedly for the same placeId — just updates the existing marker.
+// New markers are handed to the clusterer (see initMap) instead of being
+// added to the map directly, so pan/zoom doesn't have to reposition every
+// individual pin every frame once there are more than a handful.
+function upsertPlaceMarker(place, { isInterestMatch, relevanceTier } = {}) {
   if (!map) {
     console.log("[map] upsertPlaceMarker skipped — map not initialized yet", place?.name);
     return;
@@ -1371,13 +1466,13 @@ function upsertPlaceMarker(place, { isInterestMatch } = {}) {
     typeof isInterestMatch === "boolean" ? isInterestMatch : interestPlaces.some((p) => p.placeId === place.placeId);
   const isVisited = narratedPlaceIds.has(place.placeId) || visitedPlaceIds.has(place.placeId);
   const isNarratingNow = narratingPlaceId === place.placeId;
-  const icon = buildPlaceMarkerIcon({ isInterestMatch: resolvedIsInterestMatch, isVisited, isNarratingNow });
+  const resolvedTier = relevanceTier || place.relevanceTier;
+  const icon = buildPlaceMarkerIcon({ isInterestMatch: resolvedIsInterestMatch, isVisited, isNarratingNow, relevanceTier: resolvedTier });
 
   let marker = placeMarkersByPlaceId.get(place.placeId);
   if (!marker) {
     marker = new google.maps.Marker({
       position: { lat: place.latitude, lng: place.longitude },
-      map,
       icon,
       zIndex: isNarratingNow ? 900 : resolvedIsInterestMatch ? 500 : 200,
     });
@@ -1386,6 +1481,14 @@ function upsertPlaceMarker(place, { isInterestMatch } = {}) {
       activeInfoWindow = new google.maps.InfoWindow({ content: buildPinPopupContent(place) });
       activeInfoWindow.open({ map, anchor: marker });
     });
+    // Stashed directly on the marker so refreshAllPlaceMarkers() can rebuild
+    // the icon later without needing a separate place-data lookup table.
+    marker.sabriRelevanceTier = resolvedTier;
+    if (mapMarkerClusterer) {
+      mapMarkerClusterer.addMarker(marker);
+    } else {
+      marker.setMap(map);
+    }
     placeMarkersByPlaceId.set(place.placeId, marker);
     console.log(`[map] pin added for "${place.name}" (total pins: ${placeMarkersByPlaceId.size})`);
     pinsEverLoaded = true;
@@ -1408,6 +1511,43 @@ const PIN_REFRESH_MIN_MS = 8000;
 let pinsEverLoaded = false;
 let noPinsToastTimeout = null;
 
+// Fetches relevance-filtered pins (see /api/map-pins — Places-type
+// exclusion + Claude relevance scoring + grid search for density) around a
+// given point and drops them on the map. Shared by the GPS-tied refresh
+// (refreshMapPinsAroundUser) and the map-idle/viewport-tied refresh
+// (refreshMapPinsAroundViewport) below — deliberately does NOT touch
+// lastContextPlaces, which is /api/context's shape (with
+// distanceMeters/relativePosition) used for narration/conversation context,
+// not this endpoint's relevance-tiered shape.
+async function fetchAndPlacePins(latitude, longitude, logLabel) {
+  try {
+    const params = new URLSearchParams({ lat: String(latitude), lng: String(longitude) });
+    if (userProfile?.interests?.length) params.set("interests", userProfile.interests.join("|"));
+
+    console.log(`[map] fetching /api/map-pins for ${logLabel}`, { latitude, longitude });
+    const response = await fetch(`/api/map-pins?${params.toString()}`);
+    const data = await response.json();
+    const places = response.ok && Array.isArray(data.places) ? data.places : [];
+    console.log(`[map] /api/map-pins returned ${places.length} relevant place(s) for ${logLabel}`);
+
+    places.forEach((place) => {
+      const hasCoords = typeof place.latitude === "number" && typeof place.longitude === "number";
+      if (!hasCoords) {
+        console.log("[map] skipping place with invalid coordinates", place.name, place.placeId);
+        return;
+      }
+      upsertPlaceMarker(place, { relevanceTier: place.relevanceTier });
+    });
+
+    if (places.length > 0) {
+      pinsEverLoaded = true;
+      clearTimeout(noPinsToastTimeout);
+    }
+  } catch (error) {
+    console.log(`[map] pin refresh failed for ${logLabel}`, error);
+  }
+}
+
 async function refreshMapPinsAroundUser(latitude, longitude, heading) {
   if (!map) {
     console.log("[map] refreshMapPinsAroundUser skipped — map not ready yet");
@@ -1425,38 +1565,29 @@ async function refreshMapPinsAroundUser(latitude, longitude, heading) {
   lastPinRefreshPosition = { latitude, longitude };
   lastPinRefreshTime = now;
 
-  try {
-    const params = new URLSearchParams({
-      lat: String(latitude),
-      lng: String(longitude),
-      radius: String(CONTEXT_RADIUS_METERS),
-      types: SPECIFIC_PLACE_TYPES.join(","),
-    });
-    if (typeof heading === "number" && !Number.isNaN(heading)) params.set("heading", String(heading));
+  await fetchAndPlacePins(latitude, longitude, "user location");
+}
 
-    console.log("[map] fetching /api/context for pins", { latitude, longitude });
-    const response = await fetch(`/api/context?${params.toString()}`);
-    const data = await response.json();
-    const places = response.ok && Array.isArray(data.places) ? data.places : [];
-    console.log(`[map] /api/context returned ${places.length} place(s) for pins`);
+// Zoomed-out / manually-panned density: refreshes pins around wherever the
+// user is currently LOOKING (the map's center), not just their physical GPS
+// location — this is what gives "something interesting in every direction"
+// when the map is zoomed out or panned away from the user's own position.
+// Debounced on the map's 'idle' event (fires once panning/zooming has
+// genuinely settled), not on every intermediate 'bounds_changed'/'drag'
+// frame, per the pan/zoom performance investigation.
+let viewportPinRefreshTimeout = null;
+const VIEWPORT_PIN_REFRESH_DEBOUNCE_MS = 250;
 
-    lastContextPlaces = places;
-    places.forEach((place) => {
-      const hasCoords = typeof place.latitude === "number" && typeof place.longitude === "number";
-      if (!hasCoords) {
-        console.log("[map] skipping place with invalid coordinates", place.name, place.placeId);
-        return;
-      }
-      upsertPlaceMarker(place);
-    });
-
-    if (places.length > 0) {
-      pinsEverLoaded = true;
-      clearTimeout(noPinsToastTimeout);
-    }
-  } catch (error) {
-    console.log("[map] pin refresh failed", error);
-  }
+function setupViewportPinRefresh() {
+  if (!map) return;
+  map.addListener("idle", () => {
+    clearTimeout(viewportPinRefreshTimeout);
+    viewportPinRefreshTimeout = setTimeout(() => {
+      const center = map.getCenter();
+      if (!center) return;
+      fetchAndPlacePins(center.lat(), center.lng(), "map viewport");
+    }, VIEWPORT_PIN_REFRESH_DEBOUNCE_MS);
+  });
 }
 
 // If genuinely nothing has loaded within 10s of tour start, reassure the
@@ -1476,7 +1607,14 @@ function refreshAllPlaceMarkers() {
   for (const [placeId, marker] of placeMarkersByPlaceId) {
     const isVisited = narratedPlaceIds.has(placeId) || visitedPlaceIds.has(placeId);
     const isNarratingNow = narratingPlaceId === placeId;
-    marker.setIcon(buildPlaceMarkerIcon({ isInterestMatch: interestPlaceIds.has(placeId), isVisited, isNarratingNow }));
+    marker.setIcon(
+      buildPlaceMarkerIcon({
+        isInterestMatch: interestPlaceIds.has(placeId),
+        isVisited,
+        isNarratingNow,
+        relevanceTier: marker.sabriRelevanceTier,
+      })
+    );
   }
 }
 
