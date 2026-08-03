@@ -9,6 +9,8 @@ const homePhoto = document.getElementById("home-photo");
 const pulseEl = document.getElementById("pulse");
 const mapEl = document.getElementById("map");
 const recenterBtn = document.getElementById("recenter-btn");
+const personaChipEl = document.getElementById("persona-chip");
+const personaChipNameEl = document.getElementById("persona-chip-name");
 const tourLoadingOverlay = document.getElementById("tour-loading-overlay");
 const tourLoadingText = document.getElementById("tour-loading-text");
 const narrationWaveEl = document.getElementById("narration-wave");
@@ -26,6 +28,8 @@ const drawerClose = document.getElementById("drawer-close");
 const placeName = document.getElementById("place-name");
 const placeDescription = document.getElementById("place-description");
 const speedButtons = document.querySelectorAll(".speed-btn");
+const moodButtons = document.querySelectorAll(".mood-btn");
+const plannerMoodCardsContainer = document.getElementById("planner-mood-cards");
 const playBtn = document.getElementById("play-btn");
 const pauseBtn = document.getElementById("pause-btn");
 const audioPlayer = document.getElementById("audio-player");
@@ -56,6 +60,7 @@ const preferencesClose = document.getElementById("preferences-close");
 const editPreferencesBtn = document.getElementById("edit-preferences-btn");
 const preferencesNameInput = document.getElementById("preferences-name");
 const preferencesInterestsContainer = document.getElementById("preferences-interests");
+const preferencesArchetypeContainer = document.getElementById("preferences-archetype");
 const preferencesVoiceCards = document.querySelectorAll("#preferences-drawer .voice-card");
 const preferencesDepthPills = document.querySelectorAll("#preferences-drawer .depth-pill");
 const preferencesLanguageSelect = document.getElementById("preferences-language");
@@ -132,6 +137,7 @@ let isFirstNarrationOfSession = true;
 let tourStartedAt = null;
 let totalNarrationsThisSession = 0;
 let totalQuestionsThisSession = 0;
+let totalDistanceWalkedMeters = 0;
 
 let watchId = null;
 let lastPosition = null;
@@ -148,6 +154,7 @@ let currentAudioObjectUrl = null;
 let selectedSpeed = 1;
 let currentNeighborhoodName = null;
 let currentPlaceName = null;
+let currentPlaceId = null;
 let currentCity = null;
 let currentCountry = null;
 let lastContextPlaces = [];
@@ -163,6 +170,11 @@ let correctionContext = null;
 // for GPS heading to catch up.
 let userStatedDirection = null;
 let userStatedDestination = null;
+
+// Session-only ("how are you feeling today") — never saved to the profile,
+// resets to the default every time a new tour starts. See
+// MOOD_OPTIONS/setSessionMood below for the selector UI wiring.
+let sessionMood = "curious";
 
 const COMPASS_WORD_TO_DEGREES = {
   north: 0,
@@ -293,6 +305,17 @@ const onboardingWelcomeNextBtn = document.getElementById("onboarding-welcome-nex
 const onboardingGoogleBtn = document.getElementById("onboarding-google-btn");
 const onboardingGuestBtn = document.getElementById("onboarding-guest-btn");
 const onboardingFinishBtn = document.getElementById("onboarding-finish");
+const onboardingPathChatBtn = document.getElementById("onboarding-path-chat");
+const onboardingPathQuickBtn = document.getElementById("onboarding-path-quick");
+
+const onboardingChatEl = document.getElementById("onboarding-chat");
+const onboardingChatMessagesEl = document.getElementById("onboarding-chat-messages");
+const onboardingChatLoadingEl = document.getElementById("onboarding-chat-loading");
+const onboardingChatInput = document.getElementById("onboarding-chat-input");
+const onboardingChatSendBtn = document.getElementById("onboarding-chat-send-btn");
+const onboardingChatMicBtn = document.getElementById("onboarding-chat-mic-btn");
+const onboardingChatSkipBtn = document.getElementById("onboarding-chat-skip");
+const onboardingChatProgressEl = document.getElementById("onboarding-chat-progress");
 
 let onboardingStepIndex = 0;
 const onboardingAnswers = {
@@ -302,6 +325,7 @@ const onboardingAnswers = {
   companions: "",
   language: "en",
   depth: "standard",
+  preferredArchetype: "local_friend",
 };
 
 function isOnboarded() {
@@ -417,6 +441,195 @@ function completeOnboarding() {
 
 if (onboardingFinishBtn) {
   onboardingFinishBtn.addEventListener("click", completeOnboarding);
+}
+
+// --- Conversational onboarding ("Talk to Sabri") ---
+// Alternative to the 8-screen form flow — a short (3-5 turn) natural
+// conversation that extracts the same profile fields via /api/onboarding-chat.
+// Stateless server, so the client owns the full conversation history.
+const ONBOARDING_CHAT_OPENING =
+  "Hey! I'm Sabri, I'll be your guide. Before we start exploring - tell me a bit about yourself. " +
+  "What should I call you, and what kind of things do you love learning about when you travel?";
+
+let onboardingChatHistory = [];
+let onboardingChatTurnCount = 0;
+let onboardingChatBusy = false;
+
+function addOnboardingChatMessage(role, text) {
+  const bubble = document.createElement("div");
+  bubble.className = `onboarding-chat-message ${role === "assistant" ? "is-sabri" : "is-user"}`;
+  bubble.textContent = text;
+  onboardingChatMessagesEl.appendChild(bubble);
+  onboardingChatMessagesEl.scrollTop = onboardingChatMessagesEl.scrollHeight;
+}
+
+function updateOnboardingChatProgress() {
+  if (!onboardingChatProgressEl) return;
+  onboardingChatProgressEl.textContent =
+    onboardingChatTurnCount === 0 ? "Getting to know you..." : `Getting to know you${".".repeat((onboardingChatTurnCount % 3) + 1)}`;
+}
+
+async function openOnboardingChat() {
+  onboarding.classList.add("hidden");
+  onboardingChatEl.classList.remove("hidden");
+  onboardingChatHistory = [{ role: "assistant", content: ONBOARDING_CHAT_OPENING }];
+  onboardingChatTurnCount = 0;
+  onboardingChatMessagesEl.innerHTML = "";
+  updateOnboardingChatProgress();
+  addOnboardingChatMessage("assistant", ONBOARDING_CHAT_OPENING);
+  // Spoken aloud like the rest of the app's voice-first feel — not awaited,
+  // so the user can start typing/speaking immediately without waiting for
+  // playback to finish.
+  speakNarration(ONBOARDING_CHAT_OPENING).catch(() => {});
+}
+
+function closeOnboardingChatToQuickSetup() {
+  onboardingChatEl.classList.add("hidden");
+  onboarding.classList.remove("hidden");
+  logEvent("onboarding_path_chosen", { path: "quick_setup_after_chat_escape", turns: onboardingChatTurnCount });
+  // Land on the name screen (Quick Setup's actual first step) rather than
+  // the path-choice screen the user already moved past.
+  goToOnboardingStep(2);
+}
+
+async function sendOnboardingChatMessage(userText) {
+  if (onboardingChatBusy || !userText.trim()) return;
+  onboardingChatBusy = true;
+  onboardingChatInput.value = "";
+  onboardingChatInput.disabled = true;
+  onboardingChatSendBtn.disabled = true;
+
+  addOnboardingChatMessage("user", userText);
+  onboardingChatHistory.push({ role: "user", content: userText });
+  onboardingChatTurnCount += 1;
+  updateOnboardingChatProgress();
+  onboardingChatLoadingEl.classList.remove("hidden");
+
+  try {
+    const response = await fetch("/api/onboarding-chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: onboardingChatHistory }),
+    });
+    const data = await response.json();
+
+    if (!response.ok || !data.reply) {
+      addOnboardingChatMessage("assistant", "Sorry, I lost my train of thought — could you say that again?");
+      return;
+    }
+
+    onboardingChatHistory.push({ role: "assistant", content: data.reply });
+    addOnboardingChatMessage("assistant", data.reply);
+    speakNarration(data.reply).catch(() => {});
+
+    if (data.isComplete) {
+      completeConversationalOnboarding(data.extractedProfile || {});
+    }
+  } catch (error) {
+    addOnboardingChatMessage("assistant", "Sorry, I lost my train of thought — could you say that again?");
+  } finally {
+    onboardingChatLoadingEl.classList.add("hidden");
+    onboardingChatBusy = false;
+    onboardingChatInput.disabled = false;
+    onboardingChatSendBtn.disabled = false;
+    onboardingChatInput.focus();
+  }
+}
+
+// Reuses completeOnboarding()'s existing localStorage/settings-sync/
+// initializeAuthState plumbing (same as the form flow) — just populates
+// onboardingAnswers from the chat-extracted fields first, then layers on
+// the voice preference (which the form flow gathers later, in Settings,
+// not during onboarding at all).
+function completeConversationalOnboarding(extractedProfile) {
+  onboardingAnswers.name = extractedProfile.name || "friend";
+  onboardingAnswers.language = extractedProfile.language || "en";
+  onboardingAnswers.interests =
+    Array.isArray(extractedProfile.interests) && extractedProfile.interests.length
+      ? extractedProfile.interests
+      : ["All of it"];
+  onboardingAnswers.depth = extractedProfile.depth || "standard";
+
+  onboardingChatEl.classList.add("hidden");
+  completeOnboarding();
+
+  if (extractedProfile.voice) {
+    settings.voice = extractedProfile.voice;
+    saveSettings();
+    applySettingsToUI();
+  }
+
+  saveProfileToSupabase(true);
+  logEvent("onboarding_path_chosen", { path: "conversational", turns: onboardingChatTurnCount });
+}
+
+if (onboardingPathChatBtn) {
+  onboardingPathChatBtn.addEventListener("click", openOnboardingChat);
+}
+if (onboardingPathQuickBtn) {
+  onboardingPathQuickBtn.addEventListener("click", () => {
+    logEvent("onboarding_path_chosen", { path: "quick_setup" });
+    advanceOnboarding();
+  });
+}
+if (onboardingChatSkipBtn) {
+  onboardingChatSkipBtn.addEventListener("click", closeOnboardingChatToQuickSetup);
+}
+if (onboardingChatSendBtn) {
+  onboardingChatSendBtn.addEventListener("click", () => sendOnboardingChatMessage(onboardingChatInput.value));
+}
+if (onboardingChatInput) {
+  onboardingChatInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") sendOnboardingChatMessage(onboardingChatInput.value);
+  });
+}
+
+// Lightweight, self-contained mic handler for the chat input — deliberately
+// does NOT touch isConversing/isNarrating (the tour Q&A flags) since
+// onboarding always happens before any tour starts; reuses the same
+// recognition instance/pickBestAlternative the tour's tap-to-talk uses.
+if (onboardingChatMicBtn) {
+  onboardingChatMicBtn.addEventListener("click", () => {
+    if (!recognition) {
+      showToast("Voice input isn't supported on this device");
+      return;
+    }
+    if (onboardingChatMicBtn.classList.contains("is-listening")) {
+      try {
+        recognition.stop();
+      } catch (error) {
+        // Already stopped — harmless.
+      }
+      return;
+    }
+
+    onboardingChatMicBtn.classList.add("is-listening");
+    recognition.lang = SPEECH_RECOGNITION_LANGS[settings.language] || "en-US";
+    let finalTranscript = "";
+
+    recognition.onresult = (event) => {
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = pickBestAlternative(event.results[i]).transcript;
+        if (event.results[i].isFinal) finalTranscript += transcript;
+        else interim += transcript;
+      }
+      onboardingChatInput.value = finalTranscript || interim;
+    };
+    recognition.onend = () => {
+      onboardingChatMicBtn.classList.remove("is-listening");
+      if (finalTranscript.trim()) sendOnboardingChatMessage(finalTranscript.trim());
+    };
+    recognition.onerror = () => {
+      onboardingChatMicBtn.classList.remove("is-listening");
+    };
+
+    try {
+      recognition.start();
+    } catch (error) {
+      onboardingChatMicBtn.classList.remove("is-listening");
+    }
+  });
 }
 
 if (onboardingGuestBtn) {
@@ -631,6 +844,8 @@ function applyProfileFromSupabase(profile) {
     companions: profile.companions || "",
     language: profile.language || "en",
     depth: profile.depth || "standard",
+    preferredArchetype: profile.preferred_archetype || "local_friend",
+    inferredInterests: Array.isArray(profile.inferred_interests) ? profile.inferred_interests : [],
   };
   try {
     localStorage.setItem(USER_PROFILE_KEY, JSON.stringify(userProfile));
@@ -804,11 +1019,103 @@ async function saveVisitToSupabase(place, narrationText) {
   }
 }
 
+async function saveQuestionToSupabase(question, answer) {
+  if (!currentUser) return;
+  try {
+    await fetch("/api/auth/save-question", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: currentUser.id,
+        placeId: currentPlaceId,
+        question,
+        answerSummary: answer.slice(0, 200),
+      }),
+    });
+  } catch (error) {
+    // Non-fatal — local session state still works this run.
+  }
+}
+
+let currentSessionId = null;
+
+function generateSessionId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  return `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+// Fire-and-forget behavioral event logging (see interaction_events in
+// supabase/schema.sql) — never awaited by callers, never blocks the UX.
+// No-ops for guests (no userId to attribute it to) and swallows any
+// failure, since losing an analytics event is never worth surfacing to the
+// user or retrying.
+function logEvent(eventType, eventData = {}) {
+  if (!currentUser) return;
+  try {
+    fetch("/api/log-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: currentUser.id,
+        sessionId: currentSessionId,
+        eventType,
+        eventData,
+        city: currentCity,
+      }),
+    }).catch(() => {});
+  } catch (error) {
+    // Non-fatal.
+  }
+}
+
 // Fired when the app is backgrounded/closed — uses sendBeacon so the
 // request actually survives the page being torn down, which a plain fetch
 // often doesn't.
+// sendBeacon (not plain fetch) for both calls here — this fires as the page
+// is being backgrounded/torn down, and sendBeacon is the one delivery
+// mechanism reliably guaranteed to survive that, unlike a normal fetch.
+function logEventViaBeacon(eventType, eventData) {
+  if (!currentUser || !navigator.sendBeacon) return;
+  const payload = JSON.stringify({
+    userId: currentUser.id,
+    sessionId: currentSessionId,
+    eventType,
+    eventData,
+    city: currentCity,
+  });
+  navigator.sendBeacon("/api/log-event", new Blob([payload], { type: "application/json" }));
+}
+
+// Client-triggered stand-in for a periodic cron job (this app has no
+// background worker infra) — every 3rd completed session, fires a
+// fire-and-forget request to re-derive inferred_interests from recent
+// behavior. Non-blocking and silently skipped for guests/on failure.
+const INTEREST_INFERENCE_SESSION_INTERVAL = 3;
+const SESSION_COUNT_KEY = "sabri_session_count";
+
+function maybeTriggerInterestInference() {
+  if (!currentUser) return;
+  let sessionCount = 0;
+  try {
+    sessionCount = parseInt(localStorage.getItem(SESSION_COUNT_KEY) || "0", 10) + 1;
+    localStorage.setItem(SESSION_COUNT_KEY, String(sessionCount));
+  } catch (error) {
+    return;
+  }
+  if (sessionCount % INTEREST_INFERENCE_SESSION_INTERVAL !== 0) return;
+
+  fetch("/api/infer-interests", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId: currentUser.id }),
+  }).catch(() => {});
+}
+
 function saveSessionToSupabase() {
   if (!currentUser) return;
+  maybeTriggerInterestInference();
   const payload = JSON.stringify({
     userId: currentUser.id,
     neighborhood: currentNeighborhoodName,
@@ -827,6 +1134,20 @@ function saveSessionToSupabase() {
       body: payload,
       keepalive: true,
     }).catch(() => {});
+  }
+
+  if (tourStartedAt) {
+    logEventViaBeacon("session_duration", {
+      durationMs: Date.now() - tourStartedAt,
+      totalDistanceWalkedMeters: Math.round(totalDistanceWalkedMeters),
+      totalNarrations: totalNarrationsThisSession,
+    });
+  }
+  if (plannedTourActive && plannedTour) {
+    logEventViaBeacon("tour_abandoned", {
+      totalStops: plannedTour.stops.length,
+      stopsReached: plannedTourStopIndex,
+    });
   }
 }
 
@@ -1050,6 +1371,23 @@ function populatePreferencesForm() {
   const currentDepth = userProfile?.depth || settings.depth;
   preferencesDepthPills.forEach((pill) => pill.classList.toggle("is-active", pill.dataset.depth === currentDepth));
   if (preferencesLanguageSelect) preferencesLanguageSelect.value = settings.language;
+  const currentArchetype = userProfile?.preferredArchetype || "local_friend";
+  if (preferencesArchetypeContainer) {
+    preferencesArchetypeContainer.querySelectorAll(".onboarding-pace-option").forEach((option) => {
+      option.classList.toggle("is-selected", option.dataset.archetype === currentArchetype);
+    });
+  }
+}
+
+if (preferencesArchetypeContainer) {
+  preferencesArchetypeContainer.querySelectorAll(".onboarding-pace-option").forEach((option) => {
+    option.addEventListener("click", () => {
+      preferencesArchetypeContainer
+        .querySelectorAll(".onboarding-pace-option")
+        .forEach((o) => o.classList.remove("is-selected"));
+      option.classList.add("is-selected");
+    });
+  });
 }
 
 preferencesInterestsContainer.querySelectorAll(".onboarding-pill").forEach((pill) => {
@@ -1085,13 +1423,28 @@ if (preferencesSaveBtn) {
     const voice = activeVoiceCard ? activeVoiceCard.dataset.voice : settings.voice;
     const depth = activeDepthPill ? activeDepthPill.dataset.depth : settings.depth;
     const language = preferencesLanguageSelect ? preferencesLanguageSelect.value : settings.language;
+    const activeArchetypeOption = preferencesArchetypeContainer
+      ? preferencesArchetypeContainer.querySelector(".onboarding-pace-option.is-selected")
+      : null;
+    const preferredArchetype = activeArchetypeOption
+      ? activeArchetypeOption.dataset.archetype
+      : userProfile?.preferredArchetype || "local_friend";
 
     // Commit the draft to live app state (affects the very next narration,
     // no restart needed) at the same time as the Supabase write below.
-    userProfile = { ...userProfile, name, interests, depth, language };
+    const archetypeChanged = preferredArchetype !== userProfile?.preferredArchetype;
+    userProfile = { ...userProfile, name, interests, depth, language, preferredArchetype };
     settings.voice = voice;
     settings.depth = depth;
     settings.language = language;
+
+    // A different guide means a different persona — clear the cached one so
+    // the next narration fetches (and introduces) the new one, rather than
+    // silently keeping the old name around.
+    if (archetypeChanged) {
+      currentPersona = null;
+      currentPersonaCity = null;
+    }
 
     try {
       localStorage.setItem(USER_PROFILE_KEY, JSON.stringify(userProfile));
@@ -1441,6 +1794,9 @@ function buildPinPopupContent(place) {
   container.querySelector(".map-pin-popup-type").textContent = typeLabel;
   container.querySelector(".map-pin-popup-btn").addEventListener("click", () => {
     if (activeInfoWindow) activeInfoWindow.close();
+    logEvent("pin_tapped", { placeId: place.placeId, placeType: place.primaryType, relevanceTier: place.relevanceTier || null });
+    const marker = placeMarkersByPlaceId.get(place.placeId);
+    if (marker) marker.sabriTapped = true;
     triggerNarrationForPlace(place);
   });
   return container;
@@ -1483,7 +1839,10 @@ function upsertPlaceMarker(place, { isInterestMatch, relevanceTier } = {}) {
     });
     // Stashed directly on the marker so refreshAllPlaceMarkers() can rebuild
     // the icon later without needing a separate place-data lookup table.
+    // sabriFirstSeenAt/sabriTapped feed the sampled pin_ignored_within_view
+    // check (see samplePinIgnoredEvents).
     marker.sabriRelevanceTier = resolvedTier;
+    marker.sabriFirstSeenAt = Date.now();
     if (mapMarkerClusterer) {
       mapMarkerClusterer.addMarker(marker);
     } else {
@@ -1523,6 +1882,7 @@ async function fetchAndPlacePins(latitude, longitude, logLabel) {
   try {
     const params = new URLSearchParams({ lat: String(latitude), lng: String(longitude) });
     if (userProfile?.interests?.length) params.set("interests", userProfile.interests.join("|"));
+    if (userProfile?.inferredInterests?.length) params.set("inferredInterests", userProfile.inferredInterests.join("|"));
 
     console.log(`[map] fetching /api/map-pins for ${logLabel}`, { latitude, longitude });
     const response = await fetch(`/api/map-pins?${params.toString()}`);
@@ -1618,6 +1978,31 @@ function refreshAllPlaceMarkers() {
   }
 }
 
+// Sampled (not exhaustive) — periodically checks which high-relevance pins
+// have sat on screen for a while without being tapped or narrated, and logs
+// ONE event covering all of them at once rather than one event per pin.
+// Each qualifying pin is only ever counted once (sabriTapped gets set here
+// too, reusing the same flag pin-tap logging uses to mean "already
+// accounted for").
+const PIN_IGNORED_SAMPLE_MS = 3 * 60 * 1000;
+let pinIgnoredSampleInterval = null;
+
+function samplePinIgnoredEvents() {
+  const now = Date.now();
+  const ignored = [];
+  for (const [placeId, marker] of placeMarkersByPlaceId) {
+    if (marker.sabriTapped) continue;
+    if (marker.sabriRelevanceTier !== "high") continue;
+    if (narratedPlaceIds.has(placeId) || visitedPlaceIds.has(placeId)) continue;
+    if (!marker.sabriFirstSeenAt || now - marker.sabriFirstSeenAt < PIN_IGNORED_SAMPLE_MS) continue;
+    ignored.push(placeId);
+    marker.sabriTapped = true; // treat as accounted-for so it isn't sampled again
+  }
+  if (ignored.length > 0) {
+    logEvent("pin_ignored_within_view", { placeIds: ignored.slice(0, 10), count: ignored.length });
+  }
+}
+
 // User tapped a pin's "Tell me about this →" button — narrate that place
 // immediately, bypassing the normal cooldown/discovery flow (this is an
 // explicit user request, not the passive walking-discovery pipeline).
@@ -1668,6 +2053,11 @@ if (tourModeClose) tourModeClose.addEventListener("click", closeTourModeModal);
 if (tourModeWanderBtn) {
   tourModeWanderBtn.addEventListener("click", () => {
     closeTourModeModal();
+    // Wander mode always starts fresh at the default mood — the planner's
+    // mood step (Guided Tour) sets sessionMood right before its own
+    // startTour() call, so this reset must NOT live inside startTour()
+    // itself or it would clobber that choice.
+    setSessionMood("curious");
     startTour();
   });
 }
@@ -2008,8 +2398,16 @@ if (plannedTourStartBtn) {
 // orientation/specific-zoom-in flow) whenever a guided tour is active —
 // narrates the current target stop once the user is within
 // GUIDED_TOUR_ARRIVAL_METERS of it, then advances to the next stop.
+let lastKnownDistanceToStop = null;
+let lastRouteDeviationLogTime = 0;
+const ROUTE_DEVIATION_THRESHOLD_METERS = 150;
+const ROUTE_DEVIATION_LOG_COOLDOWN_MS = 5 * 60 * 1000;
+
 async function checkGuidedTourProgress(latitude, longitude, heading) {
   if (!plannedTour || plannedTourStopIndex >= plannedTour.stops.length) {
+    if (plannedTourActive) {
+      logEvent("tour_completed", { totalStops: plannedTour?.stops.length || 0, stopsReached: plannedTourStopIndex });
+    }
     plannedTourActive = false;
     statusText.textContent = "Tour complete! Keep exploring or start a new one.";
     return;
@@ -2025,6 +2423,7 @@ async function checkGuidedTourProgress(latitude, longitude, heading) {
   const distance = distanceInMeters({ latitude, longitude }, { latitude: place.latitude, longitude: place.longitude });
 
   if (distance <= GUIDED_TOUR_ARRIVAL_METERS) {
+    lastKnownDistanceToStop = null;
     if (narratedPlaceIds.has(place.placeId)) {
       plannedTourStopIndex += 1;
       return;
@@ -2033,6 +2432,23 @@ async function checkGuidedTourProgress(latitude, longitude, heading) {
     plannedTourStopIndex += 1;
     return;
   }
+
+  // Sampled/throttled — only logs when the user is sustainedly moving
+  // AWAY from the target stop (not just GPS jitter or walking around a
+  // building), and at most once every 5 minutes.
+  if (
+    lastKnownDistanceToStop !== null &&
+    distance - lastKnownDistanceToStop > ROUTE_DEVIATION_THRESHOLD_METERS &&
+    Date.now() - lastRouteDeviationLogTime > ROUTE_DEVIATION_LOG_COOLDOWN_MS
+  ) {
+    logEvent("route_deviation", {
+      stopNumber: stop.stopNumber,
+      distanceMeters: Math.round(distance),
+      increasedByMeters: Math.round(distance - lastKnownDistanceToStop),
+    });
+    lastRouteDeviationLogTime = Date.now();
+  }
+  lastKnownDistanceToStop = distance;
 
   const bearing = travelBearingDegrees(latitude, longitude, place.latitude, place.longitude);
   const direction = bearingToCompassWord(bearing);
@@ -2244,6 +2660,7 @@ if (cameraIdentifyBtn) {
       startPrompt.classList.add("hidden");
       tourControls.classList.remove("hidden");
 
+      logEvent("camera_identify_used", { resultSnippet: data.narration.slice(0, 80) });
       await speakNarration(data.narration);
     } catch (error) {
       closeCameraOverlay();
@@ -2271,11 +2688,12 @@ function showToast(message) {
 // Stages only ever move forward — advanceTourLoadingStage ignores calls for
 // a stage at or before the current one (e.g. a second GPS fix arriving
 // after we've already moved on to "discovering").
-const TOUR_LOADING_STAGES = ["locating", "locking", "discovering", "preparing"];
+const TOUR_LOADING_STAGES = ["locating", "locking", "discovering", "meeting_guide", "preparing"];
 const TOUR_LOADING_MESSAGES = {
   locating: "Finding your location...",
   locking: "Locking GPS...",
   discovering: "Discovering nearby places...",
+  meeting_guide: "Meeting your guide...",
   preparing: "Preparing your guide...",
 };
 let tourLoadingStageIndex = -1;
@@ -2361,6 +2779,38 @@ speedButtons.forEach((button) => {
     button.classList.add("is-active");
   });
 });
+
+// Session mood — UX decision: made this an always-visible, always-editable
+// toggle in the control bar (Wander mode) rather than a blocking overlay
+// after "Start Wandering", so tour start stays exactly as fast as it is
+// today (zero extra taps). The tradeoff: it's a little less discoverable
+// than an upfront prompt would be, since a first-time user might not
+// notice the small icon row right away. For Guided Tour mode, the planner
+// already has a natural moment for it (step 3, alongside interests), so
+// that one IS an upfront choice — see plannerMoodCardsContainer below.
+function setSessionMood(mood) {
+  sessionMood = mood;
+  moodButtons.forEach((btn) => btn.classList.toggle("is-active", btn.dataset.mood === mood));
+  if (plannerMoodCardsContainer) {
+    plannerMoodCardsContainer.querySelectorAll(".planner-card").forEach((card) => {
+      card.classList.toggle("is-selected", card.dataset.mood === mood);
+    });
+  }
+  logEvent("mood_selected", { mood });
+}
+
+moodButtons.forEach((button) => {
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setSessionMood(button.dataset.mood);
+  });
+});
+
+if (plannerMoodCardsContainer) {
+  plannerMoodCardsContainer.querySelectorAll(".planner-card").forEach((card) => {
+    card.addEventListener("click", () => setSessionMood(card.dataset.mood));
+  });
+}
 
 // Keep UI, status text, and the lock-screen playback indicator in sync
 // regardless of what triggered the play/pause — our own buttons, the
@@ -2489,6 +2939,10 @@ function startTour() {
   isFirstNarrationOfSession = true;
   totalNarrationsThisSession = 0;
   totalQuestionsThisSession = 0;
+  totalDistanceWalkedMeters = 0;
+  currentSessionId = generateSessionId();
+  clearInterval(pinIgnoredSampleInterval);
+  pinIgnoredSampleInterval = setInterval(samplePinIgnoredEvents, 60000);
   pulseEl.classList.remove("is-locked");
   micBtn.classList.add("is-available");
 
@@ -2550,6 +3004,9 @@ function onLocation(position) {
 
   if (lastPosition && distanceInMeters(lastPosition, current) < SIGNIFICANT_MOVE_METERS) {
     return;
+  }
+  if (lastPosition) {
+    totalDistanceWalkedMeters += distanceInMeters(lastPosition, current);
   }
   lastPosition = current;
 
@@ -2633,6 +3090,70 @@ function bearingToCompassWord(bearing) {
 
 // Fires once, on the very first GPS fix, so the user sees proof the app is
 // working well before the tiered orientation/narration pipeline kicks in.
+// --- Guide personas ---
+// Resolved once per distinct city (see ensurePersonaForCity, called from
+// narrateAndSpeak right before the /api/narrate request is built) and
+// cached for the rest of the session — never re-fetched mid-session unless
+// the user actually walks into a new city or changes their preferred guide
+// type in Edit Preferences (which clears the cache, see preferencesSaveBtn).
+let currentPersona = null;
+let currentPersonaCity = null;
+let personaFetchPromise = null;
+let personaCityChangedForNextNarration = false;
+
+function updatePersonaChip() {
+  if (!personaChipEl || !personaChipNameEl) return;
+  if (currentPersona?.generated_name) {
+    personaChipNameEl.textContent = `with ${currentPersona.generated_name}`;
+    personaChipEl.classList.remove("hidden");
+  } else {
+    personaChipEl.classList.add("hidden");
+  }
+}
+
+// Folds into the existing tour-loading overlay (advanceTourLoadingStage is
+// a no-op once that overlay is already hidden, so this only visibly shows
+// "Meeting your guide..." during the very first narration of a tour — a
+// cache-miss city+archetype combination on any later narration would
+// otherwise be an unexplained pause).
+async function ensurePersonaForCity(city, country) {
+  if (!city || city === currentPersonaCity) return;
+  if (personaFetchPromise) return personaFetchPromise;
+
+  advanceTourLoadingStage("meeting_guide");
+
+  personaFetchPromise = (async () => {
+    try {
+      const archetype = userProfile?.preferredArchetype || "local_friend";
+      const response = await fetch("/api/get-persona", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ city, country, archetype }),
+      });
+      const data = await response.json();
+      if (response.ok && data.persona) {
+        if (currentPersonaCity && currentPersonaCity !== city) {
+          // Walked into a new city mid-session — the next narration should
+          // narratively introduce the handoff rather than silently swapping
+          // the name (see buildPersonaGuidance's isCityChange branch).
+          personaCityChangedForNextNarration = true;
+        }
+        currentPersona = data.persona;
+        currentPersonaCity = city;
+        updatePersonaChip();
+        logEvent("persona_selected", { archetype, city, cached: data.cached === true });
+      }
+    } catch (error) {
+      // Non-fatal — narration just proceeds as generic Sabri, no persona
+      // identity, rather than blocking the tour.
+    } finally {
+      personaFetchPromise = null;
+    }
+  })();
+
+  return personaFetchPromise;
+}
+
 async function showFastWelcome(latitude, longitude) {
   try {
     const response = await fetch(`/api/geocode?lat=${latitude}&lng=${longitude}`);
@@ -2851,6 +3372,13 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
   lastNarrationPosition = triggerPosition;
   statusText.textContent = "Sabri is preparing your story...";
 
+  // Must resolve (or at least attempt) BEFORE advancing to "preparing" —
+  // advanceTourLoadingStage only ever moves forward, so meeting_guide has
+  // to run first or its message never gets a chance to show.
+  await ensurePersonaForCity(currentCity, currentCountry);
+  const isCityChange = personaCityChangedForNextNarration;
+  personaCityChangedForNextNarration = false;
+
   advanceTourLoadingStage("preparing");
   const bestGuessName = tier === "neighborhood" ? place?.name : choosePrimaryPlace(places)?.name;
   showNarrationLoadingState(bestGuessName);
@@ -2887,6 +3415,9 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
         timeOfDay: computeTimeOfDay(),
         userStatedDirection,
         userStatedDestination,
+        persona: currentPersona,
+        isCityChange,
+        sessionMood,
       }),
     });
     const data = await response.json();
@@ -2910,6 +3441,7 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
     narratedPlaceIds.add(focusedPlace.placeId);
     hasActivePlace = true;
     currentPlaceName = focusedPlace.name;
+    currentPlaceId = focusedPlace.placeId;
     if (tier === "neighborhood") {
       currentNeighborhoodName = focusedPlace.name;
     }
@@ -2940,7 +3472,17 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
 
     startStory(focusedPlace.name, data.narration);
     updateMediaSessionMetadata(focusedPlace.name, currentNeighborhoodName, photoUrl);
+    const narrationStartedAt = Date.now();
+    logEvent("narration_started", { placeId: focusedPlace.placeId, placeType: focusedPlace.primaryType, tier });
     await speakNarration(data.narration);
+    // audioPlayer.ended is only true after a natural finish — interruptPlayback()
+    // (tap-to-talk cutting in, or a new narration overtaking this one) pauses
+    // rather than lets it end, so this reliably tells completed from skipped.
+    logEvent(audioPlayer.ended ? "narration_completed" : "narration_skipped", {
+      placeId: focusedPlace.placeId,
+      listenedMs: Date.now() - narrationStartedAt,
+      textLength: data.narration.length,
+    });
   } catch (error) {
     statusText.textContent = "Couldn't generate your story.";
     hideTourLoadingOverlay();
@@ -3358,6 +3900,8 @@ async function askSabri(question) {
         weather: currentWeather,
         userStatedDirection,
         userStatedDestination,
+        persona: currentPersona,
+        sessionMood,
       }),
     });
     const data = await response.json();
@@ -3385,6 +3929,8 @@ async function askSabri(question) {
 
     recordQuestionLog(question, data.answer, lastHeading);
     totalQuestionsThisSession += 1;
+    saveQuestionToSupabase(question, data.answer);
+    logEvent("voice_question_asked", { placeId: currentPlaceId, questionLength: question.length });
 
     askSubtitle.classList.add("hidden");
     placeName.textContent = "Sabri";

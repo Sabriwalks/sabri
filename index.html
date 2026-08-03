@@ -67,8 +67,27 @@
           <p class="onboarding-splash-tagline">Your personal guide. Everywhere.</p>
         </div>
 
-        <!-- SCREEN 1 - welcome / name -->
+        <!-- SCREEN 1 - choose onboarding path -->
         <div class="onboarding-step" data-step="1">
+          <p class="onboarding-wordmark">Sabri</p>
+          <h2 class="onboarding-heading">How would you like to get started?</h2>
+          <p class="onboarding-subtext onboarding-subtext--gold">Either way takes about a minute.</p>
+          <div class="onboarding-cards">
+            <button id="onboarding-path-chat" class="onboarding-card">
+              <span class="onboarding-card-icon">💬</span>
+              <span class="onboarding-card-label">Talk to Sabri</span>
+              <span class="onboarding-card-desc">A quick, natural conversation — just like meeting your guide for the first time</span>
+            </button>
+            <button id="onboarding-path-quick" class="onboarding-card">
+              <span class="onboarding-card-icon">📋</span>
+              <span class="onboarding-card-label">Quick Setup</span>
+              <span class="onboarding-card-desc">A few simple screens, straight to the point</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- SCREEN 2 - welcome / name (Quick Setup path) -->
+        <div class="onboarding-step" data-step="2">
           <p class="onboarding-wordmark">Sabri</p>
           <h2 class="onboarding-heading">Before we begin&hellip;</h2>
           <p class="onboarding-subtext onboarding-subtext--gold">
@@ -85,7 +104,7 @@
         </div>
 
         <!-- SCREEN 2 - the reason -->
-        <div class="onboarding-step" data-step="2">
+        <div class="onboarding-step" data-step="3">
           <h2 class="onboarding-greeting">Welcome, <span data-name-slot>friend</span>.</h2>
           <p class="onboarding-question">What brings you here today?</p>
           <p class="onboarding-subtext">
@@ -112,7 +131,7 @@
         </div>
 
         <!-- SCREEN 3 - the soul -->
-        <div class="onboarding-step" data-step="3">
+        <div class="onboarding-step" data-step="4">
           <p class="onboarding-question">What do you carry with you?</p>
           <p class="onboarding-subtext">
             Every person I guide carries something. A story, a faith, a curiosity, a wonder. What moves you?
@@ -133,7 +152,7 @@
         </div>
 
         <!-- SCREEN 4 - the company -->
-        <div class="onboarding-step" data-step="4">
+        <div class="onboarding-step" data-step="5">
           <p class="onboarding-question">Who's walking with you?</p>
           <p class="onboarding-subtext">I guide everyone a little differently.</p>
           <div class="onboarding-cards onboarding-cards--grid" data-single-select data-field="companions">
@@ -157,7 +176,7 @@
         </div>
 
         <!-- SCREEN 5 - the language -->
-        <div class="onboarding-step" data-step="5">
+        <div class="onboarding-step" data-step="6">
           <p class="onboarding-question">What language should I speak?</p>
           <p class="onboarding-subtext">Sabri speaks your language — whichever feels most natural to you.</p>
           <div class="onboarding-language-grid" data-single-select data-field="language">
@@ -189,7 +208,7 @@
         </div>
 
         <!-- SCREEN 6 - the pace -->
-        <div class="onboarding-step" data-step="6">
+        <div class="onboarding-step" data-step="7">
           <p class="onboarding-question">How do you like to travel?</p>
           <p class="onboarding-subtext">There's no wrong answer — only your answer.</p>
           <div class="onboarding-pace" data-single-select data-field="depth">
@@ -209,8 +228,35 @@
           </div>
         </div>
 
+        <!-- SCREEN 6.5 - the guide (persona archetype). Inserted between pace
+             and save — every offset-based goToOnboardingStep() call in
+             app.js (onboardingSteps.length - 1 / - 2) still resolves
+             correctly since save/ready stay the last two screens. -->
+        <div class="onboarding-step" data-step="8">
+          <p class="onboarding-question">Who should walk with you?</p>
+          <p class="onboarding-subtext">Every guide sees this world a little differently. Pick the one that feels like you.</p>
+          <div class="onboarding-pace" data-single-select data-field="preferredArchetype">
+            <button class="onboarding-pace-option" data-value="historian">
+              <span class="onboarding-pace-title">🏛️ The Historian</span>
+              <span class="onboarding-pace-desc">Architecture and history — why this place looks the way it does</span>
+            </button>
+            <button class="onboarding-pace-option is-selected" data-value="local_friend">
+              <span class="onboarding-pace-title">🤝 The Local Friend</span>
+              <span class="onboarding-pace-desc">Food, street life, and where locals actually go</span>
+            </button>
+            <button class="onboarding-pace-option" data-value="storyteller">
+              <span class="onboarding-pace-title">📖 The Storyteller</span>
+              <span class="onboarding-pace-desc">Folklore, legends, and the human drama behind places</span>
+            </button>
+            <button class="onboarding-pace-option" data-value="wanderer">
+              <span class="onboarding-pace-title">🥾 The Wanderer</span>
+              <span class="onboarding-pace-desc">Nature, hidden routes, off the beaten path</span>
+            </button>
+          </div>
+        </div>
+
         <!-- SCREEN 7 - the save -->
-        <div class="onboarding-step" data-step="7">
+        <div class="onboarding-step" data-step="9">
           <p class="onboarding-save-logo" aria-hidden="true">Sabri</p>
           <h2 class="onboarding-heading"><span data-name-slot>Friend</span>, I've been waiting for someone like you.</h2>
           <p class="onboarding-subtext">
@@ -225,12 +271,36 @@
         </div>
 
         <!-- SCREEN 8 - ready -->
-        <div class="onboarding-step" data-step="8">
+        <div class="onboarding-step" data-step="10">
           <h2 class="onboarding-heading"><span data-name-slot>Friend</span>, your guide is ready.</h2>
           <p class="onboarding-subtext">Wherever you go, I'll be there.</p>
           <button id="onboarding-finish" class="onboarding-next">Start Exploring →</button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Conversational onboarding — the "Talk to Sabri" path from Screen 1.
+       A separate overlay from #onboarding (not one of its numbered steps)
+       since it replaces the whole step sequence rather than being part of
+       it. See the onboarding-chat-* functions in app.js. -->
+  <div id="onboarding-chat" class="onboarding-chat hidden">
+    <div class="onboarding-chat-header">
+      <p id="onboarding-chat-progress" class="onboarding-chat-progress">Getting to know you...</p>
+      <button id="onboarding-chat-skip" class="onboarding-chat-skip">Switch to Quick Setup</button>
+    </div>
+    <div id="onboarding-chat-messages" class="onboarding-chat-messages"></div>
+    <div id="onboarding-chat-loading" class="onboarding-chat-loading hidden">
+      <span class="narration-wave" aria-hidden="true"><span></span><span></span><span></span></span>
+      <span>Sabri is thinking...</span>
+    </div>
+    <div class="onboarding-chat-input-row">
+      <button id="onboarding-chat-mic-btn" class="mic-btn" aria-label="Speak your answer">
+        🎤
+        <span class="mic-waveform" aria-hidden="true"><span></span><span></span><span></span></span>
+      </button>
+      <input id="onboarding-chat-input" type="text" class="onboarding-input" placeholder="Type your answer..." />
+      <button id="onboarding-chat-send-btn" class="onboarding-chat-send-btn" aria-label="Send">→</button>
     </div>
   </div>
 
@@ -244,6 +314,16 @@
     <!-- Full-screen map — see app.js initMap()/updateUserLocationOnMap() for
          the user location dot, place pins, and pin-tap-to-narrate wiring. -->
     <div id="map" class="map-container" aria-hidden="true"></div>
+
+    <!-- Persona chip — a visual anchor for "who's talking to you", shown
+         once /api/get-persona resolves for the current city (see
+         ensurePersonaForCity/updatePersonaChip in app.js). Floats just
+         below the header so it's visible without hunting through settings,
+         but never blocks the map or control bar. -->
+    <div id="persona-chip" class="persona-chip hidden">
+      <span class="persona-chip-icon" aria-hidden="true">👤</span>
+      <span id="persona-chip-name" class="persona-chip-name"></span>
+    </div>
 
     <!-- Recenter button — hidden until the user manually drags the map
          (see setupManualPanDetection/userHasManuallyPanned in app.js), so it
@@ -308,6 +388,17 @@
           <button class="speed-btn" data-speed="0.75">0.75x</button>
           <button class="speed-btn is-active" data-speed="1">1.0x</button>
           <button class="speed-btn" data-speed="1.25">1.25x</button>
+        </div>
+
+        <!-- Session mood — always-visible, changeable any time mid-walk
+             rather than a one-time upfront choice (see UX note in
+             app.js's setSessionMood). Session-only, resets on each new
+             tour start, never saved to the profile. -->
+        <div class="mood-controls" role="group" aria-label="Narration mood">
+          <button class="mood-btn" data-mood="relaxed" aria-label="Relaxed — take it slow">😌</button>
+          <button class="mood-btn is-active" data-mood="curious" aria-label="Curious — I want to know everything">🧐</button>
+          <button class="mood-btn" data-mood="quick" aria-label="Quick — give me the highlights">⚡</button>
+          <button class="mood-btn" data-mood="adventurous" aria-label="Adventurous — surprise me">🧭</button>
         </div>
 
         <div class="main-controls-row">
@@ -435,6 +526,26 @@
         <button class="onboarding-pill" data-value="All of it">All of it</button>
       </div>
       <input type="text" id="planner-specific-focus" class="onboarding-input" placeholder="Anything specific? (e.g. 'Roman aqueducts')" />
+
+      <h2 class="planner-title">How are you feeling today?</h2>
+      <div class="planner-cards" id="planner-mood-cards">
+        <button class="planner-card" data-mood="relaxed">
+          <span class="planner-card-name">😌 Relaxed</span>
+          <span class="planner-card-desc">Take it slow, I'm not in a rush</span>
+        </button>
+        <button class="planner-card is-selected" data-mood="curious">
+          <span class="planner-card-name">🧐 Curious</span>
+          <span class="planner-card-desc">I want to know everything</span>
+        </button>
+        <button class="planner-card" data-mood="quick">
+          <span class="planner-card-name">⚡ Quick</span>
+          <span class="planner-card-desc">Give me the highlights</span>
+        </button>
+        <button class="planner-card" data-mood="adventurous">
+          <span class="planner-card-name">🧭 Adventurous</span>
+          <span class="planner-card-desc">Surprise me, take me off the path</span>
+        </button>
+      </div>
 
       <button class="onboarding-next" id="planner-generate-btn">Plan My Tour →</button>
     </div>
@@ -609,6 +720,28 @@
           <button class="onboarding-pill" data-value="Art &amp; creativity">Art &amp; creativity</button>
           <button class="onboarding-pill" data-value="Nature &amp; landscape">Nature &amp; landscape</button>
           <button class="onboarding-pill" data-value="All of it">All of it</button>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3 class="settings-section-title">Your Guide</h3>
+        <div id="preferences-archetype" class="onboarding-pace">
+          <button class="onboarding-pace-option" data-archetype="historian">
+            <span class="onboarding-pace-title">🏛️ The Historian</span>
+            <span class="onboarding-pace-desc">Architecture and history — why this place looks the way it does</span>
+          </button>
+          <button class="onboarding-pace-option" data-archetype="local_friend">
+            <span class="onboarding-pace-title">🤝 The Local Friend</span>
+            <span class="onboarding-pace-desc">Food, street life, and where locals actually go</span>
+          </button>
+          <button class="onboarding-pace-option" data-archetype="storyteller">
+            <span class="onboarding-pace-title">📖 The Storyteller</span>
+            <span class="onboarding-pace-desc">Folklore, legends, and the human drama behind places</span>
+          </button>
+          <button class="onboarding-pace-option" data-archetype="wanderer">
+            <span class="onboarding-pace-title">🥾 The Wanderer</span>
+            <span class="onboarding-pace-desc">Nature, hidden routes, off the beaten path</span>
+          </button>
         </div>
       </section>
 

@@ -32,6 +32,18 @@ alter table profiles add column if not exists language text;
 alter table profiles add column if not exists voice text;
 alter table profiles add column if not exists onboarding_complete boolean not null default false;
 
+-- Which of the 4 fixed guide archetypes (historian/local_friend/storyteller/
+-- wanderer — see GUIDE_ARCHETYPES in server.js) this user wants narrating
+-- to them. The archetype's personality is fixed; only its generated
+-- name/bio/style vary per city (see guide_personas below).
+alter table profiles add column if not exists preferred_archetype text not null default 'local_friend';
+
+-- Behavior-derived interests, distinct from the stated `interests` column
+-- gathered at onboarding — produced by an occasional Claude pass over a
+-- user's interaction_events (see server.js inferInterestsForUser). Used to
+-- subtly weight, never override, stated interests.
+alter table profiles add column if not exists inferred_interests jsonb;
+
 create table if not exists walk_sessions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references profiles (id) on delete cascade,
@@ -64,9 +76,46 @@ create table if not exists user_questions (
   asked_at timestamptz not null default now()
 );
 
+-- Generated guide personas — a shared cache across ALL users, not
+-- per-user data. The first user to ever request a given (city, archetype)
+-- combination triggers one Claude call (see /api/get-persona); everyone
+-- after that for the same city+archetype gets an instant row read. The
+-- archetype's fixed personality/focus lives in server.js's
+-- GUIDE_ARCHETYPES constant, never in this table.
+create table if not exists guide_personas (
+  id uuid primary key default gen_random_uuid(),
+  city text not null,
+  country text,
+  archetype text not null check (archetype in ('historian', 'local_friend', 'storyteller', 'wanderer')),
+  generated_name text not null,
+  generated_bio text not null,
+  style_notes text not null,
+  created_at timestamptz not null default now(),
+  unique (city, archetype)
+);
+
+-- Behavioral event stream — every meaningful interaction signal (narration
+-- listened-to-completion vs skipped, pins tapped vs ignored, route
+-- deviations, camera usage, etc.), logged fire-and-forget via
+-- /api/log-event so it never blocks the actual UX. event_data is a free-form
+-- jsonb payload whose shape depends on event_type (see LOGGED_EVENT_TYPES
+-- in server.js for the full list and app.js call sites for each shape).
+create table if not exists interaction_events (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles (id) on delete cascade,
+  session_id text,
+  event_type text not null,
+  event_data jsonb default '{}',
+  city text,
+  created_at timestamptz not null default now()
+);
+
 create index if not exists visited_places_user_id_idx on visited_places (user_id, visited_at desc);
 create index if not exists walk_sessions_user_id_idx on walk_sessions (user_id, started_at desc);
 create index if not exists user_questions_user_id_idx on user_questions (user_id, asked_at desc);
+create index if not exists interaction_events_user_id_idx on interaction_events (user_id);
+create index if not exists interaction_events_event_type_idx on interaction_events (event_type);
+create index if not exists interaction_events_created_at_idx on interaction_events (created_at desc);
 
 -- The backend always talks to Supabase with the service_role key (which
 -- bypasses RLS entirely), so these policies exist purely as defense in
@@ -76,6 +125,8 @@ alter table profiles enable row level security;
 alter table walk_sessions enable row level security;
 alter table visited_places enable row level security;
 alter table user_questions enable row level security;
+alter table guide_personas enable row level security;
+alter table interaction_events enable row level security;
 
 create policy "Users manage their own profile" on profiles
   for all using (auth.uid() = id) with check (auth.uid() = id);
@@ -87,4 +138,15 @@ create policy "Users manage their own visited places" on visited_places
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 create policy "Users manage their own questions" on user_questions
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- guide_personas is shared, non-sensitive cached content (a generated
+-- name/bio/style per city+archetype, nothing user-specific) — readable by
+-- anyone, but only ever written by the server's service-role client
+-- (/api/get-persona), which bypasses RLS entirely, so no insert/update
+-- policy is needed here.
+create policy "Anyone can read guide personas" on guide_personas
+  for select using (true);
+
+create policy "Users manage their own interaction events" on interaction_events
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);

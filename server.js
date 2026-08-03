@@ -636,16 +636,27 @@ app.get("/privacy", (req, res) => {
   <h2>What we collect</h2>
   <ul>
     <li>Your GPS location, only while the app is actively open and in use</li>
-    <li>Your name and preferences from onboarding (interests, companions, language, tour depth)</li>
+    <li>Your name and preferences from onboarding (interests, companions, language, tour depth, and your preferred guide style)</li>
     <li>Places you have visited during tours, so Sabri doesn't repeat itself</li>
     <li>Questions you ask Sabri during a tour</li>
+    <li>
+      Behavioral interaction data — what you tap, listen to, skip, and how you move during a tour. This includes
+      things like which map pins you tap versus ignore, whether you listen to a narration in full or skip it,
+      how far you walk, whether you stray from a planned route, and how you use features like the camera
+      identification tool. We use this to understand, in aggregate, what actually engages you — not just what
+      you told us at signup.
+    </li>
   </ul>
 
   <h2>How we use it</h2>
   <ul>
     <li>To personalize your tour experience to your interests and preferences</li>
     <li>To remember places you've already visited so we never repeat a narration</li>
-    <li>To improve Sabri over time</li>
+    <li>
+      To infer additional interests from your behavior (separate from what you explicitly stated), which we use
+      to subtly adjust — never to override — the places and stories Sabri prioritizes for you
+    </li>
+    <li>To improve Sabri over time and understand how the product is actually used</li>
   </ul>
 
   <h2>What we do not do</h2>
@@ -679,7 +690,14 @@ app.get("/privacy", (req, res) => {
 app.use(express.static(__dirname, { index: false }));
 
 // The 4 tables this app depends on (see supabase/schema.sql).
-const REQUIRED_TABLES = ["profiles", "walk_sessions", "visited_places", "user_questions"];
+const REQUIRED_TABLES = [
+  "profiles",
+  "walk_sessions",
+  "visited_places",
+  "user_questions",
+  "guide_personas",
+  "interaction_events",
+];
 
 // supabase-js has no API for running arbitrary DDL, so this can't actually
 // create missing tables — only verify whether supabase/schema.sql has
@@ -907,6 +925,141 @@ app.get("/api/interest-places", async (req, res) => {
   }
 });
 
+// --- Guide personas ---
+// 4 fixed archetypes whose personality/focus never change (worldwide) —
+// only their generated_name/generated_bio/style_notes vary, per city, via
+// Claude + a guide_personas cache row (see /api/get-persona below). This is
+// deliberately NOT hardcoded per-city: the first user ever to request a
+// given (city, archetype) pair triggers one Claude call; every user after
+// that for the same city+archetype gets an instant Supabase read.
+const GUIDE_ARCHETYPES = {
+  historian: {
+    label: "The Historian",
+    description: "Architecture and history buff — loves explaining why a place looks the way it does.",
+    focus: "architecture, history, why does this place look the way it does",
+    tone: "precise, warm-scholarly, approachable rather than dry",
+  },
+  local_friend: {
+    label: "The Local Friend",
+    description: "Food and street life expert — shows you where locals actually go.",
+    focus: "food, street life, hidden neighborhood gems",
+    tone: 'casual, conspiratorial, "let me show you where locals actually go"',
+  },
+  storyteller: {
+    label: "The Storyteller",
+    description: "Folklore and legend teller — the human drama behind every place.",
+    focus: "folklore, legends, human drama behind places",
+    tone: "narrative pacing, builds anticipation and suspense",
+  },
+  wanderer: {
+    label: "The Wanderer",
+    description: "Nature and off-the-beaten-path explorer — always finding a new route.",
+    focus: "nature, off-the-beaten-path routes, physical exploration",
+    tone: "energetic, adventurous, encouraging",
+  },
+};
+const VALID_ARCHETYPES = Object.keys(GUIDE_ARCHETYPES);
+
+app.get("/api/guide-archetypes", (req, res) => {
+  res.json({
+    archetypes: Object.entries(GUIDE_ARCHETYPES).map(([id, def]) => ({
+      id,
+      label: def.label,
+      description: def.description,
+    })),
+  });
+});
+
+app.post("/api/get-persona", async (req, res) => {
+  const { city, country, archetype } = req.body || {};
+  if (!city || !archetype || !VALID_ARCHETYPES.includes(archetype)) {
+    return res.status(400).json({ error: "A valid city and archetype are required." });
+  }
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: "Supabase is not configured on the server." });
+  }
+
+  try {
+    const { data: existing } = await supabaseAdmin
+      .from("guide_personas")
+      .select("*")
+      .eq("city", city)
+      .eq("archetype", archetype)
+      .maybeSingle();
+
+    if (existing) {
+      return res.json({ persona: existing, cached: true });
+    }
+
+    if (!ANTHROPIC_API_KEY) {
+      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
+    }
+
+    const archetypeDef = GUIDE_ARCHETYPES[archetype];
+    const userMessage =
+      `You are creating a local tour guide persona for ${city}${country ? `, ${country}` : ""}. ` +
+      `This guide's core personality and focus area is: ${archetypeDef.focus}. Their tone is ${archetypeDef.tone}.\n\n` +
+      `Generate:\n` +
+      `1) A first name that feels authentically local/fitting to this specific city and culture — not ` +
+      `necessarily a literal local name if that would feel like a stereotype, use good judgment (e.g. an ` +
+      `English-speaking expat-friendly name might be more natural in some contexts)\n` +
+      `2) A 2-3 sentence bio establishing who they are and why they know this city\n` +
+      `3) 2-3 sentences of style notes on how they specifically speak, phrases they might use, their vibe\n\n` +
+      `Return as JSON: { name, bio, styleNotes }`;
+
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 512,
+      system: "You are creating a fictional local tour guide persona. Return only what's asked for.",
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              bio: { type: "string" },
+              styleNotes: { type: "string" },
+            },
+            required: ["name", "bio", "styleNotes"],
+            additionalProperties: false,
+          },
+        },
+      },
+      messages: [{ role: "user", content: userMessage }],
+    });
+
+    const textBlock = message.content.find((block) => block.type === "text");
+    const generated = textBlock ? JSON.parse(textBlock.text) : null;
+    if (!generated) return res.status(502).json({ error: "Failed to generate a persona." });
+
+    const row = {
+      city,
+      country: country || null,
+      archetype,
+      generated_name: generated.name,
+      generated_bio: generated.bio,
+      style_notes: generated.styleNotes,
+    };
+
+    // onConflict handles the (rare but real) race of two users requesting
+    // the same brand-new city+archetype at almost the same moment — the
+    // unique constraint on (city, archetype) means the second insert
+    // becomes a no-op update instead of an error, and both requests end up
+    // returning the same persona rather than two different generated names.
+    const { data: inserted, error } = await supabaseAdmin
+      .from("guide_personas")
+      .upsert(row, { onConflict: "city,archetype" })
+      .select()
+      .single();
+
+    if (error) return res.status(502).json({ error: "Failed to save the generated persona." });
+    res.json({ persona: inserted, cached: false });
+  } catch (error) {
+    res.status(502).json({ error: "Failed to get a guide persona." });
+  }
+});
+
 // --- Map pins: relevance-filtered nearby places ---
 // Separate from /api/context (which stays tight-radius/heading-based on
 // purpose — that's what runSpecificZoomIn uses to reason about "what's
@@ -1006,7 +1159,7 @@ function mapPinsCacheKey(lat, lng, interests, specificFocus) {
 // local guide would actually point out to THIS user, tagged by tier. If
 // nothing here is genuinely relevant, this can and should come back empty —
 // no filler pins just to have something to show.
-async function scorePlaceRelevance(results, interests, specificFocus) {
+async function scorePlaceRelevance(results, interests, specificFocus, inferredInterests) {
   if (!ANTHROPIC_API_KEY || results.length === 0) return [];
 
   const candidateLines = results
@@ -1022,12 +1175,20 @@ async function scorePlaceRelevance(results, interests, specificFocus) {
 
   const interestList = interests.length > 0 ? interests.join(", ") : "general sightseeing";
   const focusLine = specificFocus ? `Specific focus right now: ${specificFocus}.` : "";
+  // Behavior-derived, secondary — a soft tie-breaker, never as strong a
+  // signal as what the user actually stated.
+  const inferredLine =
+    Array.isArray(inferredInterests) && inferredInterests.length > 0
+      ? `Their actual behavior also mildly suggests interest in: ${inferredInterests.join(
+          ", "
+        )} — let this nudge borderline calls, not override stated interests.`
+      : "";
 
   const userMessage =
     `Given this user's interests (${interestList}), filter this list of nearby places to only ` +
     `those a knowledgeable local guide would actually point out to this specific user. Exclude ` +
     `generic businesses (repair shops, offices, agencies, banks, clinics, etc.) unless they have ` +
-    `unusual historical/cultural significance. ${focusLine}\n\nPlaces:\n${candidateLines}\n\n` +
+    `unusual historical/cultural significance. ${focusLine} ${inferredLine}\n\nPlaces:\n${candidateLines}\n\n` +
     `Return only placeIds worth showing as a map pin, each tagged with a relevance tier: high, ` +
     `medium, or low. If nothing here is genuinely worth showing, return an empty list — do not ` +
     `include filler places just to have something to show.`;
@@ -1087,6 +1248,7 @@ app.get("/api/map-pins", async (req, res) => {
   const lat = parseFloat(req.query.lat);
   const lng = parseFloat(req.query.lng);
   const interests = req.query.interests ? req.query.interests.split("|").filter(Boolean) : [];
+  const inferredInterests = req.query.inferredInterests ? req.query.inferredInterests.split("|").filter(Boolean) : [];
   const specificFocus = req.query.specificFocus || "";
 
   if (Number.isNaN(lat) || Number.isNaN(lng)) {
@@ -1130,7 +1292,7 @@ app.get("/api/map-pins", async (req, res) => {
       return res.json({ places: [] });
     }
 
-    const scoredPlaces = await scorePlaceRelevance(filtered, interests, specificFocus);
+    const scoredPlaces = await scorePlaceRelevance(filtered, interests, specificFocus, inferredInterests);
     mapPinsCache.set(cacheKey, { places: scoredPlaces, timestamp: Date.now() });
     res.json({ places: scoredPlaces });
   } catch (error) {
@@ -1323,6 +1485,53 @@ function buildUserStatedIntentGuidance(userStatedDirection, userStatedDestinatio
     `to where they said they're going, strongly prefer that one even if it isn't ` +
     `the closest. Orient the narration toward where they're headed, not where ` +
     `they're walking away from.`
+  );
+}
+
+// Persona is resolved client-side once per session (see app.js's
+// ensurePersonaForCity) and passed on every /api/narrate call rather than
+// looked up here — keeps this endpoint from needing its own Supabase round
+// trip on every single narration.
+function buildPersonaGuidance(persona, isFirstNarrationOfSession, isCityChange) {
+  if (!persona || !persona.generated_name) return null;
+  const parts = [
+    `You are narrating as ${persona.generated_name}, a local guide. ${persona.generated_bio} ` +
+      `Speaking style: ${persona.style_notes}. Stay in character as this specific guide throughout ` +
+      `the narration while still following all other narration rules.`,
+  ];
+  if (isFirstNarrationOfSession) {
+    parts.push(
+      `Since this is the first narration of the session, introduce yourself by name naturally as ` +
+        `part of the warm greeting — not as a separate announcement, just weave "I'm ` +
+        `${persona.generated_name}" into how you say hello.`
+    );
+  } else if (isCityChange) {
+    parts.push(
+      `IMPORTANT: The user has just arrived in a new city, so you (${persona.generated_name}) are a ` +
+        `different guide than whoever was narrating before in the previous city — introduce yourself ` +
+        `naturally as part of this narration with a brief, warm handoff acknowledging the change. ` +
+        `Never silently swap names with no acknowledgment — that would feel broken, not intentional.`
+    );
+  }
+  return parts.join(" ");
+}
+
+const MOOD_DESCRIPTIONS = {
+  relaxed:
+    "Relaxed — take it slow, not in a rush. Give longer, more leisurely narration with more atmospheric detail.",
+  curious:
+    "Curious — wants to know everything. Give deeper historical/factual detail, more willing to go on tangents.",
+  quick: "Quick — give the highlights. Shorter, punchier narration, fewer but higher-impact facts.",
+  adventurous:
+    "Adventurous — wants to be surprised, taken off the path. More willing to suggest unusual detours and lesser-known spots.",
+};
+
+function buildMoodGuidance(sessionMood) {
+  const description = MOOD_DESCRIPTIONS[sessionMood];
+  if (!description) return null;
+  return (
+    `The user's mood for this session is: ${description} Adjust your narration length, pacing, and ` +
+    `level of detail to match this mood throughout the session.`
   );
 }
 
@@ -1525,6 +1734,9 @@ app.post("/api/narrate", async (req, res) => {
     timeOfDay,
     userStatedDirection,
     userStatedDestination,
+    persona,
+    isCityChange,
+    sessionMood,
   } = req.body || {};
   const resolvedTier = tier === "neighborhood" ? "neighborhood" : "specific";
 
@@ -1567,6 +1779,8 @@ app.post("/api/narrate", async (req, res) => {
     buildUserStatedIntentGuidance(userStatedDirection, userStatedDestination),
     currentEventsGuidance,
     buildNearbyInterestGuidance(nearbyInterestPlace),
+    buildPersonaGuidance(persona, isFirstNarrationOfSession, isCityChange),
+    buildMoodGuidance(sessionMood),
     CONNECTIVE_NARRATION_GUIDANCE,
     TRANSITION_GUIDANCE,
     buildPronunciationGuidance(languageName),
@@ -1682,6 +1896,8 @@ app.post("/api/ask", async (req, res) => {
     weather,
     userStatedDirection,
     userStatedDestination,
+    persona,
+    sessionMood,
   } = req.body || {};
 
   if (!question) {
@@ -1709,6 +1925,8 @@ app.post("/api/ask", async (req, res) => {
     buildCrossSessionVisitedGuidance(crossSessionVisitedPlaces),
     buildWeatherGuidance(weather),
     buildUserStatedIntentGuidance(userStatedDirection, userStatedDestination),
+    buildPersonaGuidance(persona, false, false),
+    buildMoodGuidance(sessionMood),
   ].filter(Boolean);
 
   const compassWord = headingToCompassWord(heading);
@@ -1801,7 +2019,7 @@ app.post("/api/ask", async (req, res) => {
 // feels made for this specific person.
 function buildUserProfileGuidance(profile) {
   if (!profile || typeof profile !== "object") return null;
-  const { name, reason, interests, companions, depth } = profile;
+  const { name, reason, interests, companions, depth, inferredInterests } = profile;
   const hasAnything = name || reason || (Array.isArray(interests) && interests.length) || companions;
   if (!hasAnything) return null;
 
@@ -1811,6 +2029,15 @@ function buildUserProfileGuidance(profile) {
   if (Array.isArray(interests) && interests.length) lines.push(`- Interested in: ${interests.join(", ")}`);
   if (companions) lines.push(`- Exploring with: ${companions}`);
   if (depth) lines.push(`- Depth preference: ${depth}`);
+  // Behavior-derived, not stated — a soft secondary signal, never treated as
+  // equal to what they actually told us at onboarding.
+  if (Array.isArray(inferredInterests) && inferredInterests.length) {
+    lines.push(
+      `- Their actual behavior (what they linger on, tap, and ask about) also suggests interest in: ` +
+        `${inferredInterests.join(", ")} — weave this in occasionally when genuinely relevant, but don't ` +
+        `treat it as a stated preference the way the interests above are.`
+    );
+  }
 
   const addressee = name || "them";
   lines.push("");
@@ -2009,6 +2236,88 @@ app.post("/api/identify", async (req, res) => {
   }
 });
 
+// --- Conversational onboarding ("Talk to Sabri") ---
+// Stateless: the client sends the full conversation history each turn (see
+// app.js's onboardingChatHistory) rather than the server tracking a session,
+// keeping this consistent with every other endpoint in this file.
+const ONBOARDING_CHAT_SYSTEM_PROMPT =
+  "You are Sabri, conducting a warm, natural onboarding conversation with a new user before their " +
+  "first tour — not filling out a form. Your goal is to naturally gather these profile fields through " +
+  "conversation:\n" +
+  "- name (what to call them)\n" +
+  "- language (which language they want tours narrated in — map to exactly one of: en, he, ar, es, fr, ru)\n" +
+  "- interests (what they love learning about when they travel — map loosely to one or more of: 'Deep " +
+  "history', 'Faith & spirituality', 'Hidden stories', 'Architecture & beauty', 'Food & living culture', " +
+  "'People & community', 'Politics & society', 'Art & creativity', 'Nature & landscape', 'All of it')\n" +
+  "- depth (how much detail they want — map to exactly one of: surface, standard, deep)\n" +
+  "- voice (a guide voice preference — map to exactly one of: onyx (deep & warm), nova (clear & bright), " +
+  "shimmer (soft & gentle), echo (rich & rounded); if they have no strong preference, don't press hard on " +
+  "this, a sensible default is fine)\n\n" +
+  "Keep this SHORT — aim to gather everything in 3-5 user turns, not a long interview. Ask about multiple " +
+  "things at once when it feels natural (e.g. name + interests together) rather than one field per " +
+  "question. If the user seems stuck or unsure how to answer, offer gentle examples in your reply rather " +
+  "than just repeating the question. Once you have enough to proceed — name and at least one interest are " +
+  "the real minimum; use sensible defaults (language: en, depth: standard, voice: onyx) for anything the " +
+  "user didn't state an opinion on — set isComplete to true.\n\n" +
+  "Always respond in character as Sabri, warm and conversational, as if speaking aloud to someone you're " +
+  "excited to guide.";
+
+app.post("/api/onboarding-chat", async (req, res) => {
+  const { messages } = req.body || {};
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: "A non-empty messages array is required." });
+  }
+  if (!ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
+  }
+
+  try {
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1024,
+      system: ONBOARDING_CHAT_SYSTEM_PROMPT,
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              reply: { type: "string" },
+              isComplete: { type: "boolean" },
+              extractedProfile: {
+                type: "object",
+                properties: {
+                  name: { anyOf: [{ type: "string" }, { type: "null" }] },
+                  language: { anyOf: [{ type: "string" }, { type: "null" }] },
+                  interests: { type: "array", items: { type: "string" } },
+                  depth: { anyOf: [{ type: "string" }, { type: "null" }] },
+                  voice: { anyOf: [{ type: "string" }, { type: "null" }] },
+                },
+                required: ["name", "language", "interests", "depth", "voice"],
+                additionalProperties: false,
+              },
+            },
+            required: ["reply", "isComplete", "extractedProfile"],
+            additionalProperties: false,
+          },
+        },
+      },
+      messages: messages.map((entry) => ({
+        role: entry.role === "assistant" ? "assistant" : "user",
+        content: String(entry.content || ""),
+      })),
+    });
+
+    const textBlock = message.content.find((block) => block.type === "text");
+    const parsed = textBlock
+      ? JSON.parse(textBlock.text)
+      : { reply: "Sorry, could you say that again?", isComplete: false, extractedProfile: {} };
+    res.json(parsed);
+  } catch (error) {
+    res.status(502).json({ error: "Failed to continue the onboarding conversation." });
+  }
+});
+
 // --- Auth / Supabase-backed history endpoints ---
 // All of these use supabaseAdmin (the service-role client), which bypasses
 // RLS — that's fine here because these routes are the trusted server side
@@ -2033,6 +2342,7 @@ app.post("/api/auth/save-profile", async (req, res) => {
     home_city: profile.homeCity || null,
     language: profile.language || null,
     voice: profile.voice || null,
+    preferred_archetype: profile.preferredArchetype || "local_friend",
     updated_at: new Date().toISOString(),
   };
   // Only set onboarding_complete when explicitly told to — a mid-session
@@ -2067,6 +2377,28 @@ app.post("/api/auth/save-visit", async (req, res) => {
   });
 
   if (error) return res.status(502).json({ error: "Failed to save visit." });
+  res.json({ success: true });
+});
+
+// Every voice question asked via tap-to-talk (see askSabri in app.js) —
+// previously nothing wrote to this table despite it existing in the schema.
+app.post("/api/auth/save-question", async (req, res) => {
+  const { userId, placeId, question, answerSummary } = req.body || {};
+  if (!userId || !question) {
+    return res.status(400).json({ error: "userId and question are required." });
+  }
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: "Supabase is not configured on the server." });
+  }
+
+  const { error } = await supabaseAdmin.from("user_questions").insert({
+    user_id: userId,
+    place_id: placeId || null,
+    question: String(question).slice(0, 500),
+    answer_summary: answerSummary ? String(answerSummary).slice(0, 200) : null,
+  });
+
+  if (error) return res.status(502).json({ error: "Failed to save question." });
   res.json({ success: true });
 });
 
@@ -2132,6 +2464,135 @@ app.get("/api/auth/visited-place-ids", async (req, res) => {
   res.json({ placeIds: [...new Set((data || []).map((row) => row.place_id))] });
 });
 
+// The full list of event types app.js logs (see interaction_events schema
+// and each call site) — kept here as documentation/a single source of
+// truth, not enforced strictly server-side (an unrecognized type is still
+// logged, just flagged, so a client-side typo never silently drops data).
+const LOGGED_EVENT_TYPES = [
+  "narration_started",
+  "narration_completed",
+  "narration_skipped",
+  "pin_tapped",
+  "pin_ignored_within_view",
+  "route_deviation",
+  "voice_question_asked",
+  "persona_selected",
+  "mood_selected",
+  "tour_completed",
+  "tour_abandoned",
+  "camera_identify_used",
+  "session_duration",
+  "onboarding_path_chosen",
+];
+
+// Fire-and-forget from the client (app.js's logEvent) — never something the
+// UX waits on, so this fails soft: always 200s back quickly, logs server
+// errors instead of surfacing them, and doesn't validate event_data shape
+// strictly (each event_type has its own informal shape, see app.js).
+app.post("/api/log-event", async (req, res) => {
+  const { userId, sessionId, eventType, eventData, city } = req.body || {};
+  if (!userId || !eventType) {
+    return res.status(400).json({ error: "userId and eventType are required." });
+  }
+  if (!supabaseAdmin) {
+    return res.json({ success: false });
+  }
+  if (!LOGGED_EVENT_TYPES.includes(eventType)) {
+    console.log(`[debug] /api/log-event: unrecognized event_type "${eventType}" — logging anyway`);
+  }
+
+  try {
+    await supabaseAdmin.from("interaction_events").insert({
+      user_id: userId,
+      session_id: sessionId || null,
+      event_type: eventType,
+      event_data: eventData && typeof eventData === "object" ? eventData : {},
+      city: city || null,
+    });
+    res.json({ success: true });
+  } catch (error) {
+    res.json({ success: false });
+  }
+});
+
+// Implicit interest inference — reviews a user's actual behavior
+// (interaction_events) against their stated onboarding interests and
+// produces a separate inferred_interests field, used to subtly WEIGHT (not
+// override) pin relevance and narration focus alongside stated interests.
+// Triggered client-side after every few sessions (see app.js's
+// maybeTriggerInterestInference) rather than a real cron job, since this
+// app has no background worker infrastructure — functionally equivalent
+// either way, just client-triggered instead of time-triggered.
+app.post("/api/infer-interests", async (req, res) => {
+  const { userId } = req.body || {};
+  if (!userId) return res.status(400).json({ error: "userId is required." });
+  if (!supabaseAdmin) return res.status(500).json({ error: "Supabase is not configured on the server." });
+  if (!ANTHROPIC_API_KEY) return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
+
+  try {
+    const [profileResult, eventsResult] = await Promise.all([
+      supabaseAdmin.from("profiles").select("interests").eq("id", userId).maybeSingle(),
+      supabaseAdmin
+        .from("interaction_events")
+        .select("event_type, event_data, city, created_at")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(200),
+    ]);
+
+    const statedInterests = profileResult.data?.interests || [];
+    const events = eventsResult.data || [];
+    if (events.length < 10) {
+      // Not enough signal yet to infer anything meaningful.
+      return res.json({ inferredInterests: [], skipped: true });
+    }
+
+    const eventSummary = events
+      .map((e) => `${e.event_type}: ${JSON.stringify(e.event_data).slice(0, 150)}`)
+      .join("\n");
+
+    const userMessage =
+      `Given this user's stated interests (${statedInterests.join(", ") || "none stated"}) and their ` +
+      `actual behavior over their recent sessions below, what additional or different interests does ` +
+      `their behavior suggest? Look at what they actually tap, listen to fully vs skip, and ask about — ` +
+      `not just what they said at onboarding.\n\nRecent behavior:\n${eventSummary}\n\n` +
+      `Return a short list (3-6 items) of interest labels, ideally from this set when they fit: Deep ` +
+      `history, Faith & spirituality, Hidden stories, Architecture & beauty, Food & living culture, People ` +
+      `& community, Politics & society, Art & creativity, Nature & landscape — but feel free to use a more ` +
+      `specific label if the behavior clearly suggests something not on that list.`;
+
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 512,
+      system: "You are analyzing user behavior to infer travel interests. Return only what's asked for.",
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: { inferredInterests: { type: "array", items: { type: "string" } } },
+            required: ["inferredInterests"],
+            additionalProperties: false,
+          },
+        },
+      },
+      messages: [{ role: "user", content: userMessage }],
+    });
+
+    const textBlock = message.content.find((block) => block.type === "text");
+    const parsed = textBlock ? JSON.parse(textBlock.text) : { inferredInterests: [] };
+
+    await supabaseAdmin
+      .from("profiles")
+      .update({ inferred_interests: parsed.inferredInterests || [] })
+      .eq("id", userId);
+
+    res.json({ inferredInterests: parsed.inferredInterests || [] });
+  } catch (error) {
+    res.status(502).json({ error: "Failed to infer interests." });
+  }
+});
+
 // Permanently deletes a user's profile, walk history, and auth account.
 // Irreversible — the frontend requires an explicit confirmation tap before
 // ever calling this (see settings' "Delete my account").
@@ -2145,6 +2606,7 @@ app.delete("/api/auth/delete-account", async (req, res) => {
       supabaseAdmin.from("visited_places").delete().eq("user_id", userId),
       supabaseAdmin.from("walk_sessions").delete().eq("user_id", userId),
       supabaseAdmin.from("user_questions").delete().eq("user_id", userId),
+      supabaseAdmin.from("interaction_events").delete().eq("user_id", userId),
       supabaseAdmin.from("profiles").delete().eq("id", userId),
     ]);
     await supabaseAdmin.auth.admin.deleteUser(userId);

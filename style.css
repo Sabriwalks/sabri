@@ -125,6 +125,32 @@ body {
   background: var(--bg-elevated);
 }
 
+/* Persona chip — small visual anchor for "who's talking to you". Floats
+   below the header, hidden until a persona resolves for the current city
+   (see ensurePersonaForCity/updatePersonaChip in app.js). */
+.persona-chip {
+  position: absolute;
+  top: calc(env(safe-area-inset-top) + 68px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(15, 27, 45, 0.75);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: var(--white);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.persona-chip-icon {
+  font-size: 13px;
+}
+
 /* Recenter button — bottom-right, floats above the control bar. Hidden by
    default; only fades in once the user has manually panned away from their
    own location (see userHasManuallyPanned in app.js), so it never clutters
@@ -441,6 +467,36 @@ body {
   background: var(--gold);
   border-color: var(--gold);
   color: var(--bg);
+}
+
+/* Session mood — compact icon row, always visible and changeable any time
+   mid-walk (see setSessionMood in app.js). Small/quiet deliberately, so it
+   doesn't compete with the main play/mic/camera row for attention, but
+   is right there when a user wants to adjust pacing. */
+.mood-controls {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.mood-btn {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: transparent;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.55;
+}
+
+.mood-btn.is-active {
+  border-color: var(--gold);
+  background: var(--gold-soft);
+  opacity: 1;
 }
 
 .control-btn {
@@ -1277,8 +1333,31 @@ body {
   gap: 8px;
 }
 
+/* Single-column list cards (e.g. the onboarding path choice) — icon,
+   label, and description stacked left-aligned, distinct from the
+   centered 2-column grid variant above. */
+.onboarding-cards:not(.onboarding-cards--grid) .onboarding-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
 .onboarding-card-icon {
   font-size: 26px;
+}
+
+.onboarding-cards:not(.onboarding-cards--grid) .onboarding-card-label {
+  display: block;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.onboarding-card-desc {
+  display: block;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-secondary);
 }
 
 .onboarding-card.is-selected {
@@ -1867,4 +1946,112 @@ body {
   color: var(--text-secondary);
   font-size: 12px;
   padding: 8px;
+}
+
+/* --- Conversational onboarding ("Talk to Sabri") --- */
+
+.onboarding-chat {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  padding: calc(env(safe-area-inset-top) + 16px) 20px calc(env(safe-area-inset-bottom) + 16px);
+}
+
+.onboarding-chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.onboarding-chat-progress {
+  font-size: 12px;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+
+.onboarding-chat-skip {
+  border: none;
+  background: transparent;
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  padding: 4px;
+}
+
+.onboarding-chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 0;
+}
+
+.onboarding-chat-message {
+  max-width: 85%;
+  padding: 12px 16px;
+  border-radius: 16px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.onboarding-chat-message.is-sabri {
+  align-self: flex-start;
+  background: var(--bg-elevated);
+  color: var(--white);
+  border-bottom-left-radius: 4px;
+}
+
+.onboarding-chat-message.is-user {
+  align-self: flex-end;
+  background: var(--gold-soft);
+  color: var(--gold);
+  border-bottom-right-radius: 4px;
+}
+
+.onboarding-chat-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.onboarding-chat-loading .narration-wave {
+  display: inline-flex;
+  position: static;
+}
+
+.onboarding-chat-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 12px;
+}
+
+.onboarding-chat-input-row .onboarding-input {
+  flex: 1;
+  padding: 12px 16px;
+  font-size: 14px;
+  text-align: left;
+}
+
+.onboarding-chat-send-btn {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border: none;
+  border-radius: 50%;
+  background: var(--gold);
+  color: var(--bg);
+  font-size: 18px;
+  font-weight: 700;
 }
