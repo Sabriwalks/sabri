@@ -236,6 +236,17 @@ const TRANSITION_GUIDANCE =
   "Never make the ending feel like a conclusion. The walk never ends — it " +
   "only continues.";
 
+// Distinct from TRANSITION_GUIDANCE above (which shapes how a narration
+// ENDS) — this is about not opening cold into pure content every single
+// time, the way a real guide walking alongside someone naturally
+// acknowledges the walk itself between stops.
+const CONNECTIVE_NARRATION_GUIDANCE =
+  "You are a warm, present tour guide walking alongside a real person, not " +
+  "a narrator reading facts into a void. Use natural transitional language " +
+  "when appropriate - acknowledge movement, anticipation, and the shared " +
+  "experience of walking together. Vary this so it doesn't become a " +
+  "repetitive verbal tic.";
+
 const TIER_GUIDANCE = {
   neighborhood:
     "For this narration, you are giving a warm welcome to a neighborhood or " +
@@ -1416,9 +1427,15 @@ app.post("/api/plan-tour", async (req, res) => {
     `placeType: string, searchQuery: string (a search query precise enough for a ` +
     `Google Places lookup — include the place name and city), whyThisStop: string ` +
     `(1 sentence - why this fits their interests), estimatedTimeHere: string } ], ` +
-    `openingNote: string (what Sabri will say to start the tour) }. Plan between ` +
-    `3 and 8 stops depending on the available time, in a sensible walking order ` +
-    `from the start point to the end point. Return ONLY valid JSON, no other text.`;
+    `openingNote: string }. Plan between 3 and 8 stops depending on the available ` +
+    `time, in a sensible walking order from the start point to the end point.\n\n` +
+    `Write the openingNote as if a warm, knowledgeable local tour guide is speaking ` +
+    `directly to the group before they start walking. Include: where they're ` +
+    `currently standing (starting street/landmark), which direction/street they'll ` +
+    `head first, where the tour will end, a one-sentence overview of the tour's ` +
+    `theme, and 2-3 specific highlights to build anticipation for. This should feel ` +
+    `like a real person talking, not a written itinerary being read aloud.\n\n` +
+    `Return ONLY valid JSON, no other text.`;
 
   try {
     const message = await anthropic.messages.create({
@@ -1550,6 +1567,7 @@ app.post("/api/narrate", async (req, res) => {
     buildUserStatedIntentGuidance(userStatedDirection, userStatedDestination),
     currentEventsGuidance,
     buildNearbyInterestGuidance(nearbyInterestPlace),
+    CONNECTIVE_NARRATION_GUIDANCE,
     TRANSITION_GUIDANCE,
     buildPronunciationGuidance(languageName),
     buildLanguageGuidance(languageName),

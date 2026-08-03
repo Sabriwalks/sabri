@@ -348,9 +348,18 @@ body {
   pointer-events: auto;
 }
 
+/* Shared close-button component, used across the narration drawer, tour
+   mode modal, tour planner, settings drawer, and preferences drawer. Was
+   previously a flat "top: 8px" everywhere, which ignored safe-area-inset-top
+   entirely — on notched/Dynamic Island devices that put it uncomfortably
+   close to (or under) the notch on any full-screen overlay, and inside
+   .settings-drawer-header specifically it broke out of the header's own
+   layout via position:absolute and floated above the title instead of
+   sitting inline with it. Fixed with one base rule plus two targeted
+   overrides below, rather than a one-off pixel value per component. */
 .drawer-close {
   position: absolute;
-  top: 8px;
+  top: 12px;
   right: 16px;
   width: 32px;
   height: 32px;
@@ -359,6 +368,27 @@ body {
   background: rgba(250, 247, 242, 0.08);
   color: var(--text-secondary);
   font-size: 14px;
+  z-index: 5;
+}
+
+/* Full-screen top-anchored overlays (tour mode modal, tour planner) — the
+   close button sits at the true top of the viewport here, so it needs to
+   clear the safe area on notched devices. Matches .camera-close-btn's
+   existing (already-correct) offset for full consistency. */
+.tour-mode-modal .drawer-close,
+.tour-planner .drawer-close {
+  top: calc(env(safe-area-inset-top) + 16px);
+}
+
+/* Settings/Preferences drawer header — the header already applies its own
+   safe-area-aware padding-top and lays out its title + close button as a
+   flex row (justify-content: space-between). Taking the close button out of
+   that flow with position:absolute was what caused it to float above the
+   title instead of sitting next to it — this makes it a normal flex child
+   instead, vertically centered with the heading. */
+.settings-drawer-header .drawer-close {
+  position: static;
+  flex-shrink: 0;
 }
 
 .now-playing {
