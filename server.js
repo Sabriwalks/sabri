@@ -879,51 +879,17 @@ app.get("/api/photo", async (req, res) => {
   }
 });
 
-// Maps onboarding interest labels to Google Places types, used to
-// proactively search for places matching what this specific person cares
-// about (rather than only reacting to whatever's nearest).
-const INTEREST_TYPE_MAP = {
-  "Deep history": ["museum", "tourist_attraction", "church", "synagogue", "mosque", "cemetery"],
-  "Faith & spirituality": ["church", "synagogue", "mosque", "hindu_temple", "place_of_worship"],
-  "Hidden stories": ["local_government_office", "point_of_interest", "neighborhood"],
-  "Architecture & beauty": ["museum", "art_gallery", "city_hall", "library", "university"],
-  "Food & living culture": ["restaurant", "cafe", "bakery", "market", "bar"],
-  "People & community": ["park", "community_center", "market"],
-  "Art & creativity": ["art_gallery", "museum", "movie_theater", "performing_arts_theater"],
-  "Nature & landscape": ["park", "natural_feature", "campground", "beach"],
-};
-const INTEREST_PLACES_RADIUS_METERS = 800;
-const INTEREST_PLACES_LIMIT = 12;
-
-// Proactive pin loading: on tour start, search for places matching the
-// user's onboarding interests within a wide radius, so Sabri can highlight
-// and route toward things this specific person cares about instead of only
-// ever reacting to whatever's closest.
-app.get("/api/interest-places", async (req, res) => {
-  const lat = parseFloat(req.query.lat);
-  const lng = parseFloat(req.query.lng);
-  const interests = req.query.interests ? req.query.interests.split("|").filter(Boolean) : [];
-
-  if (Number.isNaN(lat) || Number.isNaN(lng)) {
-    return res.status(400).json({ error: "lat and lng query params are required." });
-  }
-  if (!GOOGLE_MAPS_API_KEY) {
-    return res.status(500).json({ error: "GOOGLE_MAPS_API_KEY is not configured on the server." });
-  }
-
-  const types = [...new Set(interests.flatMap((interest) => INTEREST_TYPE_MAP[interest] || []))];
-  if (types.length === 0) {
-    return res.json({ places: [] });
-  }
-
-  try {
-    const results = await fetchNearbySearch(lat, lng, INTEREST_PLACES_RADIUS_METERS);
-    const places = pickNearestPlaces(results, types, lat, lng, null, INTEREST_PLACES_LIMIT);
-    res.json({ places });
-  } catch (error) {
-    res.status(502).json({ error: "Failed to reach Google Places API." });
-  }
-});
+// NOTE: there used to be a separate /api/interest-places endpoint here,
+// with its own crude interest-label -> Google-Places-type mapping (e.g.
+// "Hidden stories" -> point_of_interest) and no relevance filtering at all.
+// That's exactly what let hotels and other noise through — point_of_interest
+// is an extremely broad type Google attaches to nearly every commercial
+// establishment, including hotels, with nothing downstream to filter it
+// back out. Removed and consolidated into /api/map-pins below, whose Claude
+// relevance pass already weighs the user's stated + inferred interests
+// directly — a strictly better signal than a hardcoded type list. See
+// loadInterestPlaces() in app.js, which now calls /api/map-pins and treats
+// relevanceTier === "high" results as the interest-matched set.
 
 // --- Guide personas ---
 // 4 fixed archetypes whose personality/focus never change (worldwide) —
@@ -1106,6 +1072,14 @@ const EXCLUDED_PLACE_TYPES = [
   "beauty_salon",
   "car_parts_store",
   "pest_control",
+  // Hotels/hostels were the specific noise reported in real testing —
+  // "lodging" is Google's actual Places type for these (there's no
+  // separate "hotel" type in the classic Places API this app uses). A
+  // genuinely notable historic hotel would need some OTHER qualifying
+  // type (e.g. tourist_attraction) to survive this filter and reach
+  // Claude's relevance pass — that's the intended behavior, same as every
+  // other category on this list.
+  "lodging",
 ];
 
 // Grid/radial search pattern: a center point plus a ring of points around

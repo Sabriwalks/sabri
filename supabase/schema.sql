@@ -128,15 +128,19 @@ alter table user_questions enable row level security;
 alter table guide_personas enable row level security;
 alter table interaction_events enable row level security;
 
+drop policy if exists "Users manage their own profile" on profiles;
 create policy "Users manage their own profile" on profiles
   for all using (auth.uid() = id) with check (auth.uid() = id);
 
+drop policy if exists "Users manage their own walk sessions" on walk_sessions;
 create policy "Users manage their own walk sessions" on walk_sessions
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
+drop policy if exists "Users manage their own visited places" on visited_places;
 create policy "Users manage their own visited places" on visited_places
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
+drop policy if exists "Users manage their own questions" on user_questions;
 create policy "Users manage their own questions" on user_questions
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
@@ -145,8 +149,10 @@ create policy "Users manage their own questions" on user_questions
 -- anyone, but only ever written by the server's service-role client
 -- (/api/get-persona), which bypasses RLS entirely, so no insert/update
 -- policy is needed here.
+drop policy if exists "Anyone can read guide personas" on guide_personas;
 create policy "Anyone can read guide personas" on guide_personas
   for select using (true);
 
+drop policy if exists "Users manage their own interaction events" on interaction_events;
 create policy "Users manage their own interaction events" on interaction_events
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);

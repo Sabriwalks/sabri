@@ -200,9 +200,10 @@ let currentWeather = null;
 const WEATHER_REFRESH_MS = 30 * 60 * 1000;
 let weatherRefreshInterval = null;
 
-// Interest-matched places (see INTEREST_TYPE_MAP server-side) — loaded once
-// per orientation area and used for both priority map pins and the
-// proactive "something fascinating up ahead" guidance.
+// Interest-matched places — the relevanceTier === "high" subset of
+// /api/map-pins results (see loadInterestPlaces) — loaded once per
+// orientation area and used for both priority map pins and the proactive
+// "something fascinating up ahead" guidance.
 let interestPlaces = [];
 const INTEREST_PROACTIVE_MIN_METERS = 100;
 const INTEREST_PROACTIVE_MAX_METERS = 300;
@@ -2476,10 +2477,20 @@ function startWeatherRefresh(latitude, longitude) {
 }
 
 // --- Interest-based map pins + proactive guidance ---
-// See INTEREST_TYPE_MAP in server.js for the interest → Google Places type
-// mapping (server does the mapping; the client just passes the user's raw
-// onboarding interest labels).
+// Backed by /api/map-pins's Claude relevance scoring (server does the
+// interest-matching; the client just passes the user's raw stated +
+// inferred interest labels).
 
+// Was its own /api/interest-places endpoint with a crude interest-label ->
+// Google-Places-type map (e.g. "Hidden stories" -> point_of_interest) and
+// zero relevance filtering — that's exactly what let hotels and other noise
+// through, since point_of_interest is attached to nearly every commercial
+// establishment. Now consolidated onto /api/map-pins: same relevance-tiered
+// pipeline (Places-type exclusion list + Claude scoring against stated AND
+// inferred interests) that general map pins already use, just treating
+// relevanceTier === "high" as "genuinely interest-matched" for this
+// specific purpose — large priority pins, proactive guidance, and the
+// immediate-narrate-within-30m bypass (see findNearbyInterestPlace).
 async function loadInterestPlaces(latitude, longitude) {
   if (!userProfile || !Array.isArray(userProfile.interests) || userProfile.interests.length === 0) {
     console.log("[map] loadInterestPlaces skipped — no saved interests on profile");
@@ -2487,15 +2498,18 @@ async function loadInterestPlaces(latitude, longitude) {
     return;
   }
   try {
-    const params = new URLSearchParams({
-      lat: String(latitude),
-      lng: String(longitude),
-      interests: userProfile.interests.join("|"),
-    });
-    const response = await fetch(`/api/interest-places?${params.toString()}`);
+    const params = new URLSearchParams({ lat: String(latitude), lng: String(longitude) });
+    params.set("interests", userProfile.interests.join("|"));
+    if (userProfile.inferredInterests?.length) {
+      params.set("inferredInterests", userProfile.inferredInterests.join("|"));
+    }
+    const response = await fetch(`/api/map-pins?${params.toString()}`);
     const data = await response.json();
-    interestPlaces = response.ok && Array.isArray(data.places) ? data.places : [];
-    console.log(`[map] /api/interest-places returned ${interestPlaces.length} place(s)`);
+    const allPlaces = response.ok && Array.isArray(data.places) ? data.places : [];
+    interestPlaces = allPlaces.filter((place) => place.relevanceTier === "high");
+    console.log(
+      `[map] /api/map-pins (for interests) returned ${allPlaces.length} place(s), ${interestPlaces.length} high-relevance`
+    );
     if (interestPlaces.length > 0) {
       pinsEverLoaded = true;
       clearTimeout(noPinsToastTimeout);
