@@ -394,6 +394,12 @@ const PLACE_TYPE_LABELS = {
 const ONBOARDED_KEY = "sabri_onboarded";
 const USER_PROFILE_KEY = "sabri_user_profile";
 const ONBOARDING_DRAFT_KEY = "sabri_onboarding_draft";
+// Which Supabase user id the LOCAL onboarded/profile cache above actually
+// belongs to (null/absent for pure guest data that was never tied to any
+// account). See getTrustworthyLocalProfile() — this is what lets the app
+// tell "my own cached profile" apart from "a different person's leftover
+// data on this shared device."
+const LOCAL_PROFILE_OWNER_KEY = "sabri_profile_owner_id";
 
 const onboarding = document.getElementById("onboarding");
 const onboardingSteps = document.querySelectorAll(".onboarding-step");
@@ -441,6 +447,153 @@ function loadUserProfile() {
   } catch (error) {
     return null;
   }
+}
+
+// Wipes every locally-cached identity/profile key — called on sign-out and
+// whenever getTrustworthyLocalProfile() detects the cache belongs to
+// someone else. Deliberately does NOT touch ONBOARDING_DRAFT_KEY (a
+// short-lived, pre-redirect draft that's cleaned up separately by whatever
+// consumes it) or settings-only keys unrelated to identity.
+function clearLocalIdentityState() {
+  try {
+    localStorage.removeItem(ONBOARDED_KEY);
+    localStorage.removeItem(USER_PROFILE_KEY);
+    localStorage.removeItem(LOCAL_PROFILE_OWNER_KEY);
+  } catch (error) {
+    // Non-fatal.
+  }
+}
+
+// The local onboarded/profile cache is only ever safe to ADOPT (i.e. use
+// its answers as if they were freshly confirmed) when it's pure guest data
+// that was never tied to any signed-in account — that's the one case where
+// there's no Supabase record to conflict with yet, so there's nothing to
+// override. It is deliberately NOT treated as adoptable just because it
+// happens to be tagged to the CURRENT account: if Supabase and a
+// same-account local cache ever disagree, Supabase must always win (a
+// stale local cache is not "confirmation" of anything) — so that case
+// returns onboarded: false here too, same as a stranger's leftover data
+// from a shared device would. The only thing this function protects
+// against showing is guest data that turns out to belong to someone else
+// entirely, which is worse than showing nothing.
+function getTrustworthyLocalProfile(currentUserId) {
+  let ownerId = null;
+  try {
+    ownerId = localStorage.getItem(LOCAL_PROFILE_OWNER_KEY);
+  } catch (error) {
+    ownerId = null;
+  }
+
+  if (ownerId && ownerId !== currentUserId) {
+    // Belongs to someone else — never surface it, and clean it up so it
+    // doesn't linger and cause the same confusion again later.
+    clearLocalIdentityState();
+    return { onboarded: false, profile: null };
+  }
+
+  if (ownerId) {
+    // Tagged to this exact account already, but the caller only reaches
+    // this function when Supabase itself says that account has no
+    // completed profile — so this local copy is stale, not adoptable.
+    // Clear it rather than leaving it to linger untrusted: once onboarding
+    // is redone, completeOnboarding()/applyProfileFromSupabase() will
+    // write a fresh copy anyway.
+    clearLocalIdentityState();
+    return { onboarded: false, profile: null };
+  }
+
+  return { onboarded: isOnboarded(), profile: loadUserProfile() };
+}
+
+// Records which account the local onboarded/profile cache belongs to,
+// alongside the existing ONBOARDED_KEY/USER_PROFILE_KEY writes — call this
+// any time those are written for a signed-in user (never for guest-only
+// onboarding, which intentionally leaves no owner so it stays "adoptable"
+// by whichever account it later gets attached to via sign-in).
+function markLocalProfileOwner(userId) {
+  try {
+    localStorage.setItem(LOCAL_PROFILE_OWNER_KEY, userId);
+  } catch (error) {
+    // Non-fatal.
+  }
+}
+
+// THE single correct way to determine what a signed-in user's real
+// profile/onboarding state is. Local state (userProfile, ONBOARDED_KEY,
+// settings) must NEVER be trusted on its own for anything identity-related
+// — every caller here gets it only as something already verified against
+// Supabase, not a shortcut around checking it.
+//
+// This exists because of two real production bugs, both the same root
+// cause: code that made an onboarding/routing decision from local state
+// without first confirming it against Supabase.
+//   1. handleOAuthSignIn used to trust a local "onboarded" flag instead of
+//      the account's actual onboarding_complete status in Supabase —
+//      silently re-onboarded (and overwrote the real saved profile of) a
+//      returning user signing in on a new device/browser.
+//   2. Signing out never cleared local identity keys, so a shared device
+//      could show one person's cached profile to the next person who opened
+//      the app, even after the first person explicitly signed out.
+// Both happened because the local-vs-Supabase check was implemented
+// independently in more than one place. Every place that needs to know "is
+// this user onboarded, and with what profile" MUST call this function
+// rather than writing its own version of that check — if you're tempted to
+// read ONBOARDED_KEY or userProfile directly to make a routing decision,
+// that's the same mistake happening again.
+//
+// Retries the profile fetch a couple of times before giving up, so a
+// single flaky request doesn't immediately fall back to guessing — but it
+// still never falls back to trusting a signed-in user's LOCAL cache as
+// truth; if Supabase genuinely can't be reached, callers get status
+// "error" and must show that honestly (a retry/offline state), not paper
+// over it with local data that might be stale or belong to someone else.
+//
+// Returns one of:
+//   { status: "signed-in-complete", session, profile }     — real, confirmed Supabase profile with onboarding done
+//   { status: "signed-in-incomplete", session, profile }   — signed in, but no completed onboarding for this account yet (profile may be null)
+//   { status: "guest", localProfile: { onboarded, profile } } — no session; localProfile is already vetted to belong to no one else
+//   { status: "error", session }                            — could not confirm the profile (network failure) even after retrying
+const AUTHORITATIVE_PROFILE_FETCH_RETRIES = 2;
+const AUTHORITATIVE_PROFILE_RETRY_DELAY_MS = 1200;
+
+async function getAuthoritativeProfile(knownSession) {
+  if (!supabaseClient) {
+    return { status: "guest", localProfile: getTrustworthyLocalProfile(null) };
+  }
+
+  let session = knownSession || null;
+  if (!session) {
+    try {
+      const { data } = await supabaseClient.auth.getSession();
+      session = data?.session || null;
+    } catch (error) {
+      return { status: "error", session: null };
+    }
+  }
+
+  if (!session) {
+    return { status: "guest", localProfile: getTrustworthyLocalProfile(null) };
+  }
+
+  for (let attempt = 0; attempt <= AUTHORITATIVE_PROFILE_FETCH_RETRIES; attempt++) {
+    try {
+      const response = await fetch(`/api/auth/user-history?userId=${encodeURIComponent(session.user.id)}`);
+      if (!response.ok) throw new Error(`user-history responded ${response.status}`);
+      const data = await response.json();
+      const profile = data?.profile || null;
+
+      if (profile && profile.onboarding_complete) {
+        return { status: "signed-in-complete", session, profile };
+      }
+      return { status: "signed-in-incomplete", session, profile };
+    } catch (error) {
+      if (attempt < AUTHORITATIVE_PROFILE_FETCH_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, AUTHORITATIVE_PROFILE_RETRY_DELAY_MS));
+      }
+    }
+  }
+
+  return { status: "error", session };
 }
 
 let userProfile = loadUserProfile();
@@ -527,6 +680,11 @@ function completeOnboarding() {
   } catch (error) {
     // localStorage unavailable — onboarding just won't persist.
   }
+  // Tags the local cache with whose it is when signed in — guest-only
+  // onboarding intentionally leaves it untagged (see markLocalProfileOwner/
+  // getTrustworthyLocalProfile), so it stays adoptable if this guest later
+  // signs in with no pre-existing Supabase profile.
+  if (currentUser) markLocalProfileOwner(currentUser.id);
   // Keep the settings panel's depth/language selections in sync with the
   // onboarding choices, so they don't silently diverge from each other.
   settings.depth = userProfile.depth || settings.depth;
@@ -1074,36 +1232,34 @@ async function handleOAuthSignIn(session) {
 
   currentUser = session.user;
 
-  // isOnboarded() is a LOCAL/device flag — it only says whether THIS
-  // browser ever finished onboarding, not whether this Supabase ACCOUNT
-  // already has a completed profile. Signing in fresh on a new device (or
-  // via the onboarding screen's "already have an account" link) always has
-  // isOnboarded() === false even for a fully-onboarded returning user —
-  // trusting it alone was the actual bug: it silently re-ran onboarding
-  // from an empty draft and overwrote their real saved profile. Always
-  // check the real profile first, the same way bootstrapApp's normal
-  // cold-load path already does.
-  let existingProfile = null;
-  try {
-    const response = await fetch(`/api/auth/user-history?userId=${encodeURIComponent(session.user.id)}`);
-    if (response.ok) {
-      const data = await response.json();
-      existingProfile = data?.profile || null;
-    }
-  } catch (error) {
-    // Falls through to the local-flag-driven path below, same as before
-    // this fix.
-  }
+  // getAuthoritativeProfile is the ONLY correct way to know this account's
+  // real state — see its doc comment for why local state (isOnboarded(),
+  // userProfile) must never be trusted here on its own.
+  const result = await getAuthoritativeProfile(session);
 
-  if (existingProfile && existingProfile.onboarding_complete) {
-    applyProfileFromSupabase(existingProfile);
+  if (result.status === "signed-in-complete") {
+    applyProfileFromSupabase(result.profile);
     onboarding.classList.add("hidden");
     try {
       localStorage.removeItem(ONBOARDING_DRAFT_KEY);
     } catch (error) {
       // Non-fatal.
     }
+  } else if (result.status === "error") {
+    // Couldn't confirm this account's real profile (network failure even
+    // after retrying) — never guess using local state that might be stale
+    // or belong to a different account on a shared device. Surface this
+    // honestly: land on onboarding (safe default) with a toast explaining
+    // why, rather than silently trusting a cache that hasn't been verified.
+    onboarding.classList.remove("hidden");
+    showToast("Couldn't confirm your profile — check your connection and try again.");
   } else {
+    // "signed-in-incomplete" — Supabase itself confirms this ACCOUNT
+    // genuinely has no completed onboarding yet, so it's now safe to look
+    // at local state — but only the local state getTrustworthyLocalProfile
+    // has verified belongs to THIS account (or was never tied to any
+    // account at all, i.e. genuine guest data), never a stranger's
+    // leftover profile from a shared device.
     let draftAnswers = null;
     try {
       const raw = localStorage.getItem(ONBOARDING_DRAFT_KEY);
@@ -1126,18 +1282,19 @@ async function handleOAuthSignIn(session) {
 
     // A draft with real answers (a stated reason or interests) means this
     // came from the normal end-of-onboarding "save" screen — the whole
-    // form is already filled in, sign-in was just the last step. An
-    // empty/missing draft means this came from the screen-1 "already have
-    // an account" link on an account that, it turns out, was never
-    // actually onboarded (e.g. a typo'd/wrong Google account, or someone
-    // who mistakenly thought they'd used Sabri before) — route them into
-    // the real onboarding questions instead of silently completing with
-    // blank data and no interests.
+    // form is already filled in, sign-in was just the last step. Otherwise,
+    // a verified-trustworthy local profile means this device has genuine
+    // guest onboarding data ready to attach to this (apparently new)
+    // account. Neither present means this came from the screen-1 "already
+    // have an account" link on an account that, it turns out, was never
+    // actually onboarded — route them into the real onboarding questions
+    // instead of silently completing with blank/foreign data.
     const hasRealDraftAnswers =
       draftAnswers && (draftAnswers.reason || (Array.isArray(draftAnswers.interests) && draftAnswers.interests.length > 0));
+    const trustworthyLocal = getTrustworthyLocalProfile(session.user.id);
 
-    if (hasRealDraftAnswers || isOnboarded()) {
-      Object.assign(onboardingAnswers, draftAnswers || { name: fallbackName });
+    if (hasRealDraftAnswers || trustworthyLocal.onboarded) {
+      Object.assign(onboardingAnswers, draftAnswers || trustworthyLocal.profile || { name: fallbackName });
       // Saves the profile locally AND to Supabase (currentUser is already
       // set above, so completeOnboarding()'s own save-when-signed-in step
       // covers it), sets sabri_onboarded, hides the onboarding overlay, and
@@ -1157,9 +1314,8 @@ async function handleOAuthSignIn(session) {
 
 if (resetOnboardingBtn) {
   resetOnboardingBtn.addEventListener("click", () => {
+    clearLocalIdentityState();
     try {
-      localStorage.removeItem(ONBOARDED_KEY);
-      localStorage.removeItem(USER_PROFILE_KEY);
       localStorage.removeItem(ONBOARDING_DRAFT_KEY);
     } catch (error) {
       // ignore
@@ -1170,10 +1326,15 @@ if (resetOnboardingBtn) {
 
 // Skip the splash's 2s auto-advance entirely when we're resuming a
 // just-completed Google sign-in redirect — otherwise the timer and the
-// async session check race, and the timer usually wins.
+// async session check race, and the timer usually wins. Purely a routing
+// hint (which check bootstrapApp runs first), never a trust decision about
+// profile content — both branches it leads to ultimately go through
+// getAuthoritativeProfile() before showing anything, so a stale/wrong
+// value here can't cause the wrong profile to be shown, only a slightly
+// less direct route to the same correct outcome.
 const hasPendingAuthResume = (() => {
   try {
-    return !isOnboarded() && !!localStorage.getItem(ONBOARDING_DRAFT_KEY);
+    return !!localStorage.getItem(ONBOARDING_DRAFT_KEY);
   } catch (error) {
     return false;
   }
@@ -1205,6 +1366,9 @@ function applyProfileFromSupabase(profile) {
   } catch (error) {
     // Non-fatal — restored profile just won't persist locally this run.
   }
+  // Tags the local cache with whose it is (currentUser must already be set
+  // by the caller before this runs) — see getTrustworthyLocalProfile().
+  if (currentUser) markLocalProfileOwner(currentUser.id);
   settings.depth = userProfile.depth;
   settings.language = userProfile.language;
   if (profile.voice) settings.voice = profile.voice;
@@ -1233,32 +1397,63 @@ async function bootstrapApp() {
     return;
   }
 
-  if (supabaseClient) {
-    try {
-      const { data } = await supabaseClient.auth.getSession();
-      const session = data?.session || null;
-      if (session) {
-        currentUser = session.user;
-        const response = await fetch(`/api/auth/user-history?userId=${encodeURIComponent(session.user.id)}`);
-        const historyData = response.ok ? await response.json() : null;
-        const profile = historyData?.profile || null;
+  // getAuthoritativeProfile is the ONLY correct way to know what to show
+  // here — see its doc comment. Never re-add an independent local-state
+  // check in this function; that's exactly how the bugs this audit found
+  // happened in the first place.
+  const result = await getAuthoritativeProfile();
 
-        if (profile && profile.onboarding_complete) {
-          applyProfileFromSupabase(profile);
-          onboarding.classList.add("hidden");
-          hideAppBootLoading();
-          await initializeAuthState();
-          return;
-        }
-      }
-    } catch (error) {
-      // Session/profile check failed — fall through to the normal
-      // localStorage-driven onboarding gate below rather than getting stuck.
-    }
+  if (result.status === "signed-in-complete") {
+    currentUser = result.session.user;
+    applyProfileFromSupabase(result.profile);
+    onboarding.classList.add("hidden");
+    hideAppBootLoading();
+    await initializeAuthState();
+    return;
   }
 
+  if (result.status === "signed-in-incomplete") {
+    currentUser = result.session.user;
+    // Confirmed via Supabase that this ACCOUNT has no completed profile —
+    // only local state getTrustworthyLocalProfile has verified belongs to
+    // THIS account (or is untagged guest data) is safe to use here.
+    const trustworthyLocal = getTrustworthyLocalProfile(result.session.user.id);
+    hideAppBootLoading();
+    if (trustworthyLocal.onboarded && trustworthyLocal.profile) {
+      // Genuine guest-onboarding data on this device, now attaching to
+      // this (apparently new-to-Sabri) signed-in account — same migration
+      // handleOAuthSignIn performs for the redirect-return case.
+      userProfile = trustworthyLocal.profile;
+      onboarding.classList.add("hidden");
+      saveProfileToSupabase(true);
+    } else {
+      onboarding.classList.remove("hidden");
+      if (onboardingStepIndex === 0) advanceOnboarding();
+    }
+    initializeAuthState();
+    return;
+  }
+
+  if (result.status === "error") {
+    // Couldn't confirm this account's real profile even after retrying —
+    // never fall back to guessing from local state here, it might belong
+    // to a different account (see getAuthoritativeProfile's doc comment).
+    hideAppBootLoading();
+    if (result.session) {
+      currentUser = result.session.user;
+      showToast("Couldn't load your profile — check your connection and reopen Sabri.");
+    }
+    onboarding.classList.remove("hidden");
+    if (onboardingStepIndex === 0) advanceOnboarding();
+    initializeAuthState();
+    return;
+  }
+
+  // "guest" — no Supabase session at all. localProfile is already vetted
+  // by getAuthoritativeProfile/getTrustworthyLocalProfile to not belong to
+  // anyone else, so it's safe to trust directly here.
   hideAppBootLoading();
-  if (isOnboarded()) {
+  if (result.localProfile.onboarded) {
     onboarding.classList.add("hidden");
   } else {
     onboarding.classList.remove("hidden");
@@ -1534,6 +1729,21 @@ if (signOutBtn) {
     if (supabaseClient) await supabaseClient.auth.signOut();
     currentUser = null;
     visitedPlaceIds = new Set();
+    // Sign-out used to only clear the Supabase session, leaving this
+    // account's onboarded flag/profile/voice-language preferences sitting
+    // in localStorage indefinitely — on a shared device, whoever opened
+    // Sabri next would silently inherit them (see
+    // clearLocalIdentityState/getTrustworthyLocalProfile). Reset both the
+    // storage AND the in-memory state so "Signed out" is actually true
+    // immediately, not just on the next cold load.
+    clearLocalIdentityState();
+    userProfile = null;
+    settings.voice = DEFAULT_SETTINGS.voice;
+    settings.depth = DEFAULT_SETTINGS.depth;
+    settings.language = DEFAULT_SETTINGS.language;
+    saveSettings();
+    applySettingsToUI();
+    updateNameSlots();
     updateAccountSettingsUI();
     showToast("Signed out");
   });
