@@ -1,4 +1,4 @@
-const CACHE_NAME = "sabri-cache-v20";
+const CACHE_NAME = "sabri-cache-v21";
 const ASSETS_TO_CACHE = ["/", "/index.html", "/style.css", "/app.js", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
@@ -15,6 +15,17 @@ self.addEventListener("activate", (event) => {
       .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
   );
   self.clients.claim();
+});
+
+// Defensive counterpart to the unconditional self.skipWaiting() above — that
+// alone already activates a new worker immediately in every browser tested,
+// but if a browser ever ends up leaving it in the "waiting" state anyway,
+// the update banner's tap handler (see app.js) can still force it forward
+// by posting this message.
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
 });
 
 self.addEventListener("fetch", (event) => {

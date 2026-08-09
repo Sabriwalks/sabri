@@ -934,6 +934,56 @@ body {
   transform: translate(-50%, 0);
 }
 
+/* Update-available banner — small and unobtrusive by design, top-anchored
+   so it never collides with the bottom toast or control bar. Sits above
+   everything (including the boot-loading overlay and onboarding) since a
+   service worker update can in principle land at any point in the session. */
+.update-banner {
+  position: fixed;
+  left: 50%;
+  top: calc(env(safe-area-inset-top) + 16px);
+  transform: translate(-50%, -12px);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 10px 10px 18px;
+  border-radius: 999px;
+  background: rgba(15, 27, 45, 0.95);
+  border: 1px solid var(--border);
+  color: var(--white);
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 8px 24px var(--warm-shadow);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  max-width: calc(100% - 32px);
+}
+
+.update-banner.is-visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  pointer-events: auto;
+}
+
+.update-banner-cta {
+  flex-shrink: 0;
+  border: none;
+  background: var(--gold);
+  color: #0f1b2d;
+  font-weight: 700;
+  font-size: 12px;
+  padding: 7px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.update-banner-cta:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* Settings drawer — slides in from the right. */
 
 .settings-overlay {

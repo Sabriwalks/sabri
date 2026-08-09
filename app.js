@@ -37,6 +37,8 @@ const installBanner = document.getElementById("install-banner");
 const installBannerClose = document.getElementById("install-banner-close");
 const installBannerCta = document.getElementById("install-banner-cta");
 const installBannerIosOnly = document.querySelectorAll("[data-ios-only]");
+const updateBanner = document.getElementById("update-banner");
+const updateBannerCta = document.getElementById("update-banner-cta");
 const micBtn = document.getElementById("mic-btn");
 const cameraBtn = document.getElementById("camera-btn");
 const askSubtitle = document.getElementById("ask-subtitle");
@@ -532,6 +534,15 @@ function completeOnboarding() {
   saveSettings();
   applySettingsToUI();
   onboarding.classList.add("hidden");
+  // Covers every path that reaches completeOnboarding() while already
+  // signed in — including a brand-new account that signed in from
+  // onboarding screen 1, got routed into the real questions (see
+  // handleOAuthSignIn), and just finished them normally via the "Start
+  // Exploring" button. Without this, that profile would only ever persist
+  // to localStorage, never to their actual Supabase account.
+  if (currentUser) {
+    saveProfileToSupabase(true);
+  }
   initializeAuthState();
 }
 
@@ -913,11 +924,23 @@ if (onboardingGoogleBtn) {
 // Screen 1's "already have an account" link — for a returning user who
 // isn't in a persisted session, lets them sign back in immediately instead
 // of being forced through onboarding again. Same signInWithGoogle() redirect
-// flow as the end-of-onboarding button; the post-redirect resume logic in
-// handleOAuthSignIn already generically checks onboarding_complete and skips
-// straight to the map, regardless of which screen triggered the sign-in.
+// flow as the end-of-onboarding button, and — critically — this ALSO needs
+// to set ONBOARDING_DRAFT_KEY before redirecting even though there's no
+// real draft to save: hasPendingAuthResume (below) keys off this exact
+// localStorage entry to know a page load is a redirect return rather than
+// a fresh cold load. Without it, bootstrapApp raced Supabase's async
+// URL-hash session parsing on the plain cold-load path instead of taking
+// the deliberate, awaited resumeOnboardingAfterAuth() path — that race is
+// what caused the flicker/bounce-back-to-onboarding bug.
 if (onboardingSigninExistingBtn) {
   onboardingSigninExistingBtn.addEventListener("click", () => {
+    try {
+      localStorage.setItem(ONBOARDING_DRAFT_KEY, JSON.stringify(onboardingAnswers));
+    } catch (error) {
+      // Non-fatal — worst case this falls through to the ordinary cold-load
+      // session check instead, which still works once Supabase's client
+      // finishes parsing the redirect.
+    }
     signInWithGoogle();
   });
 }
@@ -1001,9 +1024,22 @@ async function resumeOnboardingAfterAuth() {
   const session = supabaseClient ? (await supabaseClient.auth.getSession()).data?.session : null;
 
   if (session) {
+    // handleOAuthSignIn owns onboarding's visibility for every success
+    // outcome (straight to map, complete-and-go, or route into real
+    // questions) — deliberately NOT shown here first. bootstrapApp keeps
+    // the boot-loading overlay up for the whole duration of this await, so
+    // whichever screen handleOAuthSignIn lands on is already in its final
+    // state by the time the overlay lifts, instead of onboarding flashing
+    // visible for a moment before being hidden again.
     await handleOAuthSignIn(session);
     return;
   }
+
+  // No session — sign-in was cancelled, failed, or is somehow still
+  // pending. This path only needs to show onboarding itself (the success
+  // path above never does), landing back on the "save" screen so the user
+  // can retry or continue as a guest instead of losing their answers.
+  onboarding.classList.remove("hidden");
 
   let draftAnswers = null;
   try {
@@ -1038,7 +1074,36 @@ async function handleOAuthSignIn(session) {
 
   currentUser = session.user;
 
-  if (!isOnboarded()) {
+  // isOnboarded() is a LOCAL/device flag — it only says whether THIS
+  // browser ever finished onboarding, not whether this Supabase ACCOUNT
+  // already has a completed profile. Signing in fresh on a new device (or
+  // via the onboarding screen's "already have an account" link) always has
+  // isOnboarded() === false even for a fully-onboarded returning user —
+  // trusting it alone was the actual bug: it silently re-ran onboarding
+  // from an empty draft and overwrote their real saved profile. Always
+  // check the real profile first, the same way bootstrapApp's normal
+  // cold-load path already does.
+  let existingProfile = null;
+  try {
+    const response = await fetch(`/api/auth/user-history?userId=${encodeURIComponent(session.user.id)}`);
+    if (response.ok) {
+      const data = await response.json();
+      existingProfile = data?.profile || null;
+    }
+  } catch (error) {
+    // Falls through to the local-flag-driven path below, same as before
+    // this fix.
+  }
+
+  if (existingProfile && existingProfile.onboarding_complete) {
+    applyProfileFromSupabase(existingProfile);
+    onboarding.classList.add("hidden");
+    try {
+      localStorage.removeItem(ONBOARDING_DRAFT_KEY);
+    } catch (error) {
+      // Non-fatal.
+    }
+  } else {
     let draftAnswers = null;
     try {
       const raw = localStorage.getItem(ONBOARDING_DRAFT_KEY);
@@ -1047,30 +1112,45 @@ async function handleOAuthSignIn(session) {
       draftAnswers = null;
     }
 
-    const fallbackName =
-      session.user.user_metadata?.full_name?.split(" ")[0] ||
-      session.user.user_metadata?.name?.split(" ")[0] ||
-      session.user.email?.split("@")[0] ||
-      "friend";
-
-    Object.assign(onboardingAnswers, draftAnswers || { name: fallbackName });
-
     try {
       localStorage.removeItem(ONBOARDING_DRAFT_KEY);
     } catch (error) {
       // Non-fatal.
     }
 
-    // Saves the profile locally, sets sabri_onboarded, hides the onboarding
-    // overlay, and syncs settings — the user lands straight on the main
-    // app's home screen, ready to tour.
-    completeOnboarding();
+    const fallbackName =
+      session.user.user_metadata?.full_name?.split(" ")[0] ||
+      session.user.user_metadata?.name?.split(" ")[0] ||
+      session.user.email?.split("@")[0] ||
+      "friend";
+
+    // A draft with real answers (a stated reason or interests) means this
+    // came from the normal end-of-onboarding "save" screen — the whole
+    // form is already filled in, sign-in was just the last step. An
+    // empty/missing draft means this came from the screen-1 "already have
+    // an account" link on an account that, it turns out, was never
+    // actually onboarded (e.g. a typo'd/wrong Google account, or someone
+    // who mistakenly thought they'd used Sabri before) — route them into
+    // the real onboarding questions instead of silently completing with
+    // blank data and no interests.
+    const hasRealDraftAnswers =
+      draftAnswers && (draftAnswers.reason || (Array.isArray(draftAnswers.interests) && draftAnswers.interests.length > 0));
+
+    if (hasRealDraftAnswers || isOnboarded()) {
+      Object.assign(onboardingAnswers, draftAnswers || { name: fallbackName });
+      // Saves the profile locally AND to Supabase (currentUser is already
+      // set above, so completeOnboarding()'s own save-when-signed-in step
+      // covers it), sets sabri_onboarded, hides the onboarding overlay, and
+      // syncs settings — the user lands straight on the main app's home
+      // screen, ready to tour.
+      completeOnboarding();
+    } else {
+      onboardingAnswers.name = fallbackName;
+      onboarding.classList.remove("hidden");
+      goToOnboardingStep(2); // first real onboarding question, past the path-choice screen
+    }
   }
 
-  // By this point onboarding is definitely complete — either it just ran
-  // (the branch above) or it already was (a guest signing in later from
-  // Settings mid-session, isOnboarded() already true).
-  saveProfileToSupabase(true);
   await loadVisitedPlaceIds();
   updateAccountSettingsUI();
 }
@@ -1140,9 +1220,15 @@ function applyProfileFromSupabase(profile) {
 // (network round trip) is in flight.
 async function bootstrapApp() {
   if (hasPendingAuthResume) {
-    onboarding.classList.remove("hidden");
-    hideAppBootLoading();
+    // Stay behind the boot-loading overlay for the whole resume check —
+    // showing onboarding first and then immediately hiding it again (the
+    // old behavior here) was the visible flicker/bounce-back a returning
+    // user saw when signing in from onboarding screen 1. resumeOnboardingAfterAuth
+    // (via handleOAuthSignIn) now owns onboarding's visibility itself for
+    // every outcome, so whichever screen it lands on is already final by
+    // the time hideAppBootLoading() runs.
     await resumeOnboardingAfterAuth();
+    hideAppBootLoading();
     initializeAuthState();
     return;
   }
@@ -1739,12 +1825,79 @@ if (preferencesSaveBtn) {
   });
 }
 
-// --- PWA: service worker ---
-
+// --- PWA: service worker + update lifecycle ---
+//
+// The service worker itself already calls skipWaiting() on install and
+// clients.claim() on activate (see service-worker.js), so a new worker
+// activates and starts controlling fetches immediately rather than sitting
+// idle until every open tab/instance closes — that part of the old
+// "testers have to delete and reinstall" problem is already solved
+// server-side.
+//
+// What's still missing is telling the ALREADY-OPEN page that new code is
+// available: activating a new worker doesn't retroactively update the
+// JavaScript already running in memory. Silently reloading the page the
+// moment an update lands would be jarring (someone could be mid-narration
+// on a real walk), so instead: show a small banner, and only reload if the
+// user actually taps it. If they never tap it, the next NATURAL cold open
+// of the app already gets the new worker (since it activated immediately),
+// so nothing is ever permanently stuck on the old version.
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/service-worker.js").catch(() => {});
+    navigator.serviceWorker
+      .register("/service-worker.js")
+      .then((registration) => {
+        // A worker found here mid-install (rather than via the
+        // "updatefound" event below) covers the case where an update was
+        // already installing before this page finished loading.
+        if (registration.waiting && navigator.serviceWorker.controller) {
+          showUpdateBanner(registration);
+        }
+
+        registration.addEventListener("updatefound", () => {
+          const installingWorker = registration.installing;
+          if (!installingWorker) return;
+          installingWorker.addEventListener("statechange", () => {
+            // "installed" while a controller ALREADY exists means this is a
+            // genuine update over a previously-active version — not the
+            // very first install on a fresh device, which also passes
+            // through "installed" but has no existing controller yet and
+            // needs no banner (there's nothing to update FROM).
+            if (installingWorker.state === "installed" && navigator.serviceWorker.controller) {
+              showUpdateBanner(registration);
+            }
+          });
+        });
+      })
+      .catch(() => {});
   });
+
+  // Reloads exactly once when the new worker actually takes control —
+  // guarded so rapid/duplicate taps on the update button (which could each
+  // independently trigger a controllerchange) can never cause a reload
+  // loop.
+  let hasReloadedForUpdate = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (hasReloadedForUpdate) return;
+    hasReloadedForUpdate = true;
+    window.location.reload();
+  });
+}
+
+function showUpdateBanner(registration) {
+  if (!updateBanner || updateBanner.classList.contains("is-visible")) return;
+  updateBanner.classList.add("is-visible");
+  updateBannerCta.onclick = () => {
+    updateBannerCta.disabled = true;
+    const waitingWorker = registration.waiting;
+    if (waitingWorker) {
+      waitingWorker.postMessage({ type: "SKIP_WAITING" });
+    }
+    // If there's genuinely nothing waiting (e.g. it already activated on
+    // its own between the banner showing and the tap), the controllerchange
+    // listener above simply never fires and the tap is a harmless no-op —
+    // the update will still apply on the next cold open.
+  };
 }
 
 // --- PWA install banner ---

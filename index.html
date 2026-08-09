@@ -848,6 +848,17 @@
        (lock-screen title/artwork + AirPods play/pause) to attach to it. -->
   <audio id="audio-player" playsinline webkit-playsinline style="display:none"></audio>
 
+  <!-- Update-available banner — shown when a new service worker has
+       installed over one already controlling this page (see
+       showUpdateBanner in app.js). Deliberately not an automatic reload:
+       someone could be mid-narration on a real walk, so this just offers
+       the update rather than forcing it. Skipping it is fine — the update
+       applies naturally on the next cold open regardless. -->
+  <div id="update-banner" class="update-banner" role="status" aria-live="polite">
+    <span class="update-banner-text">A new version of Sabri is ready</span>
+    <button id="update-banner-cta" class="update-banner-cta">Update</button>
+  </div>
+
   <!-- PWA install banner. iOS Safari has no beforeinstallprompt event, so it
        gets manual step-by-step instructions instead; on Android/Chrome the
        same shell shows a real "Install" button wired to the native prompt. -->
