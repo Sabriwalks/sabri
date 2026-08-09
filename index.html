@@ -84,6 +84,7 @@
               <span class="onboarding-card-desc">A few simple screens, straight to the point</span>
             </button>
           </div>
+          <button id="onboarding-signin-existing-btn" class="onboarding-guest-link">Already have an account? Sign in →</button>
         </div>
 
         <!-- SCREEN 2 - welcome / name (Quick Setup path) -->
@@ -146,6 +147,7 @@
             <button class="onboarding-pill" data-value="Politics &amp; society">Politics &amp; society</button>
             <button class="onboarding-pill" data-value="Art &amp; creativity">Art &amp; creativity</button>
             <button class="onboarding-pill" data-value="Nature &amp; landscape">Nature &amp; landscape</button>
+            <button class="onboarding-pill" data-value="Markets &amp; nightlife">Markets &amp; nightlife</button>
             <button class="onboarding-pill" data-value="All of it">All of it</button>
           </div>
           <button id="onboarding-soul-next" class="onboarding-next" data-next disabled>These are my compass →</button>
@@ -301,6 +303,31 @@
       </button>
       <input id="onboarding-chat-input" type="text" class="onboarding-input" placeholder="Type your answer..." />
       <button id="onboarding-chat-send-btn" class="onboarding-chat-send-btn" aria-label="Send">→</button>
+    </div>
+  </div>
+
+  <!-- Conversational tour creation — "Just tell Sabri what you want" from the
+       tour planner's step 0, as an alternative to the step-by-step
+       duration/distance/start-end/interests flow (which stays unchanged for
+       users who prefer it). Reuses the exact same chat UI pattern as
+       #onboarding-chat above. See the plannerChat-* functions in app.js. -->
+  <div id="planner-chat" class="onboarding-chat hidden">
+    <div class="onboarding-chat-header">
+      <p id="planner-chat-progress" class="onboarding-chat-progress">Tell me about the tour you want...</p>
+      <button id="planner-chat-skip" class="onboarding-chat-skip">Switch to step-by-step</button>
+    </div>
+    <div id="planner-chat-messages" class="onboarding-chat-messages"></div>
+    <div id="planner-chat-loading" class="onboarding-chat-loading hidden">
+      <span class="narration-wave" aria-hidden="true"><span></span><span></span><span></span></span>
+      <span>Sabri is thinking...</span>
+    </div>
+    <div class="onboarding-chat-input-row">
+      <button id="planner-chat-mic-btn" class="mic-btn" aria-label="Speak your answer">
+        🎤
+        <span class="mic-waveform" aria-hidden="true"><span></span><span></span><span></span></span>
+      </button>
+      <input id="planner-chat-input" type="text" class="onboarding-input" placeholder="Type your answer..." />
+      <button id="planner-chat-send-btn" class="onboarding-chat-send-btn" aria-label="Send">→</button>
     </div>
   </div>
 
@@ -463,6 +490,7 @@
     <button id="planner-close" class="drawer-close" aria-label="Close planner">✕</button>
 
     <div class="planner-step is-active" data-planner-step="0">
+      <button type="button" class="planner-link-btn" id="planner-chat-open-btn">💬 Or just tell Sabri what you want</button>
       <h2 class="planner-title">How long do you have?</h2>
       <div class="planner-cards" id="planner-duration-cards">
         <button class="planner-card" data-value="30-60 minutes">
@@ -481,6 +509,18 @@
           <span class="planner-card-name">Full immersion</span>
           <span class="planner-card-desc">Half day</span>
         </button>
+      </div>
+
+      <button type="button" class="planner-link-btn" id="planner-specific-times-toggle">Or set specific times</button>
+      <div id="planner-specific-times-field" class="planner-specific-times hidden">
+        <label class="planner-time-label">
+          Start time
+          <input type="time" id="planner-start-time" class="onboarding-input" />
+        </label>
+        <label class="planner-time-label">
+          End time
+          <input type="time" id="planner-end-time" class="onboarding-input" />
+        </label>
       </div>
 
       <h2 class="planner-title">How far are you happy to walk?</h2>
@@ -523,6 +563,7 @@
         <button class="onboarding-pill" data-value="Politics &amp; society">Politics &amp; society</button>
         <button class="onboarding-pill" data-value="Art &amp; creativity">Art &amp; creativity</button>
         <button class="onboarding-pill" data-value="Nature &amp; landscape">Nature &amp; landscape</button>
+        <button class="onboarding-pill" data-value="Markets &amp; nightlife">Markets &amp; nightlife</button>
         <button class="onboarding-pill" data-value="All of it">All of it</button>
       </div>
       <input type="text" id="planner-specific-focus" class="onboarding-input" placeholder="Anything specific? (e.g. 'Roman aqueducts')" />
@@ -719,6 +760,7 @@
           <button class="onboarding-pill" data-value="Politics &amp; society">Politics &amp; society</button>
           <button class="onboarding-pill" data-value="Art &amp; creativity">Art &amp; creativity</button>
           <button class="onboarding-pill" data-value="Nature &amp; landscape">Nature &amp; landscape</button>
+          <button class="onboarding-pill" data-value="Markets &amp; nightlife">Markets &amp; nightlife</button>
           <button class="onboarding-pill" data-value="All of it">All of it</button>
         </div>
       </section>

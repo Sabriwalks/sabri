@@ -139,9 +139,13 @@ const SABRI_SYSTEM_PROMPT =
   "every visitor like they deserve the insider experience that no tourist ever " +
   "gets.\n\n" +
   "You do not give lectures. You tell stories. You do not recite facts. You " +
-  "bring people to life — the rabbi who built that synagogue, the family who " +
-  "lived in that courtyard for six generations, the event that changed this " +
-  "street forever. You make the past feel present and the present feel " +
+  "bring people to life — the architect who broke every rule designing that " +
+  "facade, the family who ran that same bakery for six generations, the " +
+  "artist who painted that mural after a night she never talks about, the " +
+  "event that changed this street forever. Your stories span everything a " +
+  "place actually is — food, art, architecture, politics, daily life, " +
+  "faith, nature — never defaulting to any one lens just because it's " +
+  "familiar to you. You make the past feel present and the present feel " +
   "historic.\n\n" +
   "You are deeply curious about the people you are guiding. You speak to them " +
   "like an intelligent adult who has their own history, their own context, " +
@@ -203,12 +207,21 @@ const TOURIST_ORIENTATION_GUIDANCE =
 const GREETING_AND_CONTEXT_RULES =
   "GREETING AND CONTEXT RULES:\n" +
   "- For the very first narration of every session, begin with a warm " +
-  "personal greeting. Use the user's name. Comment on the weather and time " +
-  "of day naturally. If this is their first visit to this city or country " +
-  "(indicated by firstVisitToCity: true in the context), give 2-3 sentences " +
-  "of big picture orientation before diving into place-specific content. If " +
-  "they are a returning visitor, acknowledge it warmly and reference what " +
-  "they saw before.\n" +
+  "personal greeting. Use the user's name. If this is their first visit to " +
+  "this city or country (indicated by firstVisitToCity: true in the " +
+  "context), give 2-3 sentences of big picture orientation before diving " +
+  "into place-specific content. If they are a returning visitor, " +
+  "acknowledge it warmly and reference what they saw before.\n" +
+  "- Weather and time of day are things to weave in naturally when they " +
+  "genuinely add something, not a fixed beat you hit every single session. " +
+  "Vary how you handle it: sometimes a quick, casual, half-sentence " +
+  "mention in passing ('nice and sunny out, good day for this'); sometimes " +
+  "a bit more color if the weather is actually notable or relevant to the " +
+  "story; and sometimes skip it almost entirely and just say hello. A real " +
+  "person doesn't give a little weather report every time they greet a " +
+  "friend - don't make it feel like a template being filled in. Repeat " +
+  "users especially should never feel like they're hearing the same " +
+  "structural beat every session.\n" +
   "- Never start a narration by immediately describing a place. Always " +
   "ground the user first - in the moment, in the place, in the experience. " +
   "A great tour guide says hello before they start teaching.\n" +
@@ -247,6 +260,40 @@ const CONNECTIVE_NARRATION_GUIDANCE =
   "experience of walking together. Vary this so it doesn't become a " +
   "repetitive verbal tic.";
 
+// Explicit, opinionated rewrite target: real product use found narration
+// reading like written prose (essay/article phrasing) rather than something
+// a person would actually say. Applied to every endpoint whose output gets
+// spoken aloud via TTS — /api/narrate, /api/ask, /api/onboarding-chat,
+// /api/plan-tour's openingNote, /api/plan-tour-chat.
+const SPOKEN_LANGUAGE_RULES =
+  "SPOKEN LANGUAGE RULES - THIS IS BEING SPOKEN ALOUD, NOT READ:\n" +
+  "- Write the way a real person actually talks, not the way an article is " +
+  "written. Read every sentence out loud in your head before finalizing it " +
+  "- if it sounds like something from a guidebook or Wikipedia, rewrite it.\n" +
+  "- Use contractions always (it's, you're, that's, there's) - written " +
+  "prose avoids these, speech doesn't.\n" +
+  "- Keep sentences short. Break up any sentence with more than one " +
+  "comma-clause into two or three shorter sentences. Real speech doesn't " +
+  "nest subordinate clauses.\n" +
+  "- Avoid semicolons, em-dashes used as literary devices, and any " +
+  "punctuation-driven complex sentence structure - these are " +
+  "written-language tells.\n" +
+  "- Avoid formal transition words like 'however', 'furthermore', " +
+  "'additionally', 'moreover' - use how people actually bridge thoughts " +
+  "out loud: 'but', 'so', 'and here's the thing', 'now'.\n" +
+  "- Avoid overly polished, adjective-stacked descriptions ('the " +
+  "resplendent, centuries-old facade') - use plainer, punchier language a " +
+  "friend would use ('this facade is centuries old and it still looks " +
+  "incredible').\n" +
+  "- It's okay to start a sentence with 'And' or 'But' - that's how people " +
+  "actually talk.\n" +
+  "- Include small verbal texture real guides use: a passing 'you know', " +
+  "an aside, a rhetorical question to the listener, mild humor - this " +
+  "should feel like a knowledgeable friend talking, not a script being " +
+  "read.\n" +
+  "- Vary sentence length and rhythm - a mix of short punchy sentences and " +
+  "slightly longer ones, never a uniform paragraph-like cadence.";
+
 const TIER_GUIDANCE = {
   neighborhood:
     "For this narration, you are giving a warm welcome to a neighborhood or " +
@@ -280,24 +327,32 @@ const LANGUAGE_NAMES = {
 };
 
 const PLACE_TYPE_LABELS = {
-  synagogue: "synagogue",
-  church: "church",
-  mosque: "mosque",
   tourist_attraction: "tourist attraction",
-  place_of_worship: "place of worship",
   museum: "museum",
+  art_gallery: "art gallery",
   park: "park",
   natural_feature: "natural feature",
-  cemetery: "cemetery",
-  stadium: "stadium",
   neighborhood: "neighborhood",
   locality: "neighborhood",
   sublocality: "neighborhood",
+  place_of_worship: "place of worship",
+  synagogue: "synagogue",
+  church: "church",
+  mosque: "mosque",
+  hindu_temple: "temple",
+  city_hall: "city hall",
+  university: "university",
   library: "library",
-  school: "school",
+  performing_arts_theater: "theater",
+  movie_theater: "cinema",
+  cemetery: "cemetery",
+  stadium: "stadium",
   bakery: "bakery",
   cafe: "cafe",
   restaurant: "restaurant",
+  bar: "bar",
+  night_club: "nightclub",
+  school: "school",
   supermarket: "supermarket",
   hospital: "hospital",
   premise: "premise",
@@ -305,26 +360,41 @@ const PLACE_TYPE_LABELS = {
 };
 
 // Ordered by how "interesting" a place type is; lower index wins when a
-// nearby result matches more than one of these. Places of worship are
-// ranked near the top since they're consistently rich narration material
-// in almost any city Sabri gets used in, not specific to any one place.
+// nearby result matches more than one of these. Deliberately led with
+// broad, universally tourist-relevant categories (attractions, museums,
+// art, nature) rather than any one specific category — real-world testing
+// in Nachlaot, Jerusalem found narration/pins skewing heavily toward
+// synagogues specifically, traced back to this list previously ranking
+// synagogue/church/mosque ABOVE tourist_attraction and museum. Religious
+// sites are still here (place_of_worship and its specific
+// synagogue/church/mosque/hindu_temple variants), just grouped together at
+// a middling priority alongside other specific culturally-significant
+// categories, not leading the whole list.
 const ALLOWED_PLACE_TYPES = [
+  "tourist_attraction",
+  "museum",
+  "art_gallery",
+  "park",
+  "natural_feature",
+  "neighborhood",
+  "place_of_worship",
   "synagogue",
   "church",
   "mosque",
-  "tourist_attraction",
-  "place_of_worship",
-  "museum",
-  "park",
-  "natural_feature",
+  "hindu_temple",
+  "city_hall",
+  "university",
+  "library",
+  "performing_arts_theater",
+  "movie_theater",
   "cemetery",
   "stadium",
-  "neighborhood",
-  "library",
-  "school",
   "bakery",
   "cafe",
   "restaurant",
+  "bar",
+  "night_club",
+  "school",
   "supermarket",
   "hospital",
   "premise",
@@ -1162,7 +1232,14 @@ async function scorePlaceRelevance(results, interests, specificFocus, inferredIn
     `Given this user's interests (${interestList}), filter this list of nearby places to only ` +
     `those a knowledgeable local guide would actually point out to this specific user. Exclude ` +
     `generic businesses (repair shops, offices, agencies, banks, clinics, etc.) unless they have ` +
-    `unusual historical/cultural significance. ${focusLine} ${inferredLine}\n\nPlaces:\n${candidateLines}\n\n` +
+    `unusual historical/cultural significance. Also exclude short-term vacation rentals, private ` +
+    `apartment listings (Airbnb-style), guesthouses, and B&Bs even if their Places type doesn't ` +
+    `clearly mark them as lodging — these are accommodations, not points of interest, no matter ` +
+    `how the name reads. Relevance must be driven entirely by this specific user's stated (and, ` +
+    `more softly, inferred) interests above — do not treat any single category (religious sites, ` +
+    `historical sites, or anything else) as inherently high relevance regardless of what this ` +
+    `user actually cares about; a place is only high relevance here because it matches what THIS ` +
+    `user is into. ${focusLine} ${inferredLine}\n\nPlaces:\n${candidateLines}\n\n` +
     `Return only placeIds worth showing as a map pin, each tagged with a relevance tier: high, ` +
     `medium, or low. If nothing here is genuinely worth showing, return an empty list — do not ` +
     `include filler places just to have something to show.`;
@@ -1509,6 +1586,38 @@ function buildMoodGuidance(sessionMood) {
   );
 }
 
+// /api/ask specifically — a real guide doesn't just answer and stop, they
+// stay present in the conversation.
+const CONVERSATIONAL_PRESENCE_GUIDANCE =
+  "You don't have to just answer and stop. When it's genuinely natural, you can ask " +
+  "a clarifying or follow-up question back - for example 'Are you asking about the " +
+  "building itself, or more the history behind it?' or 'Want me to go deeper on " +
+  "that, or should we keep moving?' Use this when the question is ambiguous, or " +
+  "when there's a natural next thread worth offering - not on every single answer. " +
+  "This should read as genuine conversational presence, someone actually listening " +
+  "and engaged, not a scripted habit.";
+
+// Wander mode only — a guided tour already has its own directed rhythm
+// (arrive at a planned stop, get narrated, walk to the next one), so
+// inserting "want to keep wandering?" style check-ins there would just be
+// noise. In Wander mode, the narration cooldown (10s + 10m between
+// narrations, enforced client-side) already naturally spaces these out, so
+// "occasionally" here really can mean occasionally rather than needing its
+// own separate throttle.
+function buildProactiveCheckInGuidance(isGuidedTour) {
+  if (isGuidedTour) return null;
+  return (
+    "A real tour guide checks in sometimes, not just narrates one-directionally. " +
+    "Very occasionally - genuinely rare, not most narrations, more like once in a " +
+    "while - you can end a narration with a light, casual engagement prompt instead " +
+    "of (or in addition to) the usual transition, something like 'Curious to hear " +
+    "more about that, or ready to keep wandering?' or 'Want me to go deeper, or " +
+    "should we keep moving?' Keep it short and low-key, never mechanical, and never " +
+    "do this two narrations in a row - it should feel like a genuine moment of " +
+    "checking in, not a scripted tic inserted after every stop."
+  );
+}
+
 // Only relevant on the first narration of a session (see
 // GREETING_AND_CONTEXT_RULES) — tells Claude whether this is genuinely the
 // user's first time in this city (from Supabase visited_places history, see
@@ -1617,7 +1726,11 @@ app.post("/api/plan-tour", async (req, res) => {
     `currently standing (starting street/landmark), which direction/street they'll ` +
     `head first, where the tour will end, a one-sentence overview of the tour's ` +
     `theme, and 2-3 specific highlights to build anticipation for. This should feel ` +
-    `like a real person talking, not a written itinerary being read aloud.\n\n` +
+    `like a real person talking, not a written itinerary being read aloud. The ` +
+    `openingNote specifically gets spoken aloud via text-to-speech, so it must ` +
+    `follow these rules:\n\n${SPOKEN_LANGUAGE_RULES}\n\n` +
+    `(tourTitle/tourDescription/whyThisStop are only ever displayed as text, not ` +
+    `spoken, so they can stay a bit more written/polished.)\n\n` +
     `Return ONLY valid JSON, no other text.`;
 
   try {
@@ -1684,6 +1797,144 @@ app.post("/api/plan-tour", async (req, res) => {
   }
 });
 
+// Streams a Claude response as Server-Sent Events, splitting into
+// sentence-sized chunks as they arrive so the client can start
+// synthesizing/playing TTS for the first sentence while the rest of the
+// narration is still being generated — this is what actually cuts
+// perceived AND real latency, not just a better-disguised spinner.
+//
+// Non-narration metadata (focusedPlaceId, location corrections, etc.) is
+// threaded through via a "[[MARKER:...]]" line in the model's own
+// plain-text output rather than structured JSON output — incrementally
+// parsing a streaming JSON string for TTS-able prose is fragile (have to
+// track string-escaping state character by character); a marker is simple
+// and robust to split across arbitrary chunk boundaries, which is exactly
+// what this function's marker-detection logic handles below.
+//
+// markerPosition matters: "leading" (marker is the model's first line,
+// before any narration prose) fires a "marker" SSE event as soon as it's
+// resolved, well before the narration itself finishes streaming — used by
+// /api/narrate's specific tier so the client can set up focusedPlace UI
+// (pin highlight, place name, photo) immediately rather than waiting for
+// the whole response. "trailing" (marker is the model's last line, after
+// the narration) is simpler and used by /api/ask, where the extracted
+// fields (location correction etc.) aren't needed until after the answer
+// has already fully played anyway.
+async function streamSentencesSSE(
+  res,
+  { system, userMessage, maxTokens = 2048, markerPrefix = null, markerPosition = "trailing" }
+) {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  if (typeof res.flushHeaders === "function") res.flushHeaders();
+
+  const sendEvent = (payload) => {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  let fullText = "";
+  let totalFlushedChars = 0;
+  let markerContent = null;
+  let markerResolved = !markerPrefix || markerPosition !== "leading";
+  // Once a leading marker resolves, narration text starts partway through
+  // fullText — everything before this index is marker, not prose.
+  let narrationStartIndex = 0;
+  const MIN_SENTENCE_CHARS = 12;
+  const SENTENCE_END_REGEX = /[.!?](?:\s|$)/;
+
+  // Recomputed from the full accumulated text + a flushed-chars cursor on
+  // every delta, rather than reasoning about individual chunk boundaries —
+  // that's what makes marker detection correct even when the marker text
+  // itself is split arbitrarily across two or more stream chunks (a real
+  // failure mode with naive per-chunk substring checks).
+  const flush = (force) => {
+    if (!markerResolved) {
+      // Still waiting for the leading marker's closing "]]" — don't flush
+      // any narration text yet, we don't know where it actually starts.
+      const closeIndex = fullText.indexOf("]]");
+      if (closeIndex === -1) return;
+      const escapedPrefix = markerPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const match = fullText.match(new RegExp(`${escapedPrefix}:(.*?)\\]\\]`, "s"));
+      markerContent = match ? match[1].trim() : null;
+      narrationStartIndex = closeIndex + 2;
+      markerResolved = true;
+      sendEvent({ type: "marker", markerContent });
+    }
+
+    const trailingMarkerIndex =
+      markerPrefix && markerPosition === "trailing" ? fullText.indexOf(markerPrefix, narrationStartIndex) : -1;
+    const visibleText =
+      trailingMarkerIndex === -1 ? fullText.slice(narrationStartIndex) : fullText.slice(narrationStartIndex, trailingMarkerIndex);
+    // Once a trailing marker has started, no more real narration text is
+    // coming — safe to force-flush whatever's left even if it's short.
+    const effectiveForce = force || trailingMarkerIndex !== -1;
+    let buffer = visibleText.slice(totalFlushedChars);
+
+    while (true) {
+      const match = buffer.match(SENTENCE_END_REGEX);
+      if (!match) break;
+      let endIndex = match.index + 1;
+      let candidate = buffer.slice(0, endIndex).trim();
+
+      // A short leading sentence ("So." "Test!" — common with the spoken-
+      // language style) must merge FORWARD into the next one rather than
+      // block the whole buffer — matching from position 0 every time would
+      // otherwise keep re-finding the same short candidate on every
+      // subsequent delta and never flush anything until the stream ends.
+      while (candidate.length < MIN_SENTENCE_CHARS && !effectiveForce) {
+        const nextMatch = buffer.slice(endIndex).match(SENTENCE_END_REGEX);
+        if (!nextMatch) return; // not enough text yet to know how this merges — wait for more
+        endIndex += nextMatch.index + 1;
+        candidate = buffer.slice(0, endIndex).trim();
+      }
+
+      if (candidate) sendEvent({ type: "sentence", text: candidate });
+      buffer = buffer.slice(endIndex).trimStart();
+      totalFlushedChars = visibleText.length - buffer.length;
+    }
+    if (effectiveForce && buffer.trim()) {
+      sendEvent({ type: "sentence", text: buffer.trim() });
+      totalFlushedChars = visibleText.length;
+    }
+  };
+
+  try {
+    const stream = anthropic.messages.stream({
+      model: "claude-sonnet-4-6",
+      max_tokens: maxTokens,
+      system,
+      messages: [{ role: "user", content: userMessage }],
+    });
+
+    stream.on("text", (delta) => {
+      fullText += delta;
+      flush(false);
+    });
+
+    await stream.finalMessage();
+    flush(true);
+
+    if (markerPrefix && markerPosition === "trailing" && markerContent === null) {
+      const escapedPrefix = markerPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const match = fullText.match(new RegExp(`${escapedPrefix}:(.*?)\\]\\]`, "s"));
+      if (match) markerContent = match[1].trim();
+    }
+    const trailingMarkerIndex =
+      markerPrefix && markerPosition === "trailing" ? fullText.indexOf(markerPrefix, narrationStartIndex) : -1;
+    const visibleFullText = (
+      trailingMarkerIndex === -1 ? fullText.slice(narrationStartIndex) : fullText.slice(narrationStartIndex, trailingMarkerIndex)
+    ).trim();
+
+    sendEvent({ type: "done", markerContent, fullText: visibleFullText });
+    res.end();
+  } catch (error) {
+    console.log("[debug] streamSentencesSSE failed:", error?.message || error);
+    sendEvent({ type: "error" });
+    res.end();
+  }
+}
+
 app.post("/api/narrate", async (req, res) => {
   const {
     tier,
@@ -1711,6 +1962,7 @@ app.post("/api/narrate", async (req, res) => {
     persona,
     isCityChange,
     sessionMood,
+    isGuidedTour,
   } = req.body || {};
   const resolvedTier = tier === "neighborhood" ? "neighborhood" : "specific";
 
@@ -1756,7 +2008,9 @@ app.post("/api/narrate", async (req, res) => {
     buildPersonaGuidance(persona, isFirstNarrationOfSession, isCityChange),
     buildMoodGuidance(sessionMood),
     CONNECTIVE_NARRATION_GUIDANCE,
+    buildProactiveCheckInGuidance(isGuidedTour),
     TRANSITION_GUIDANCE,
+    SPOKEN_LANGUAGE_RULES,
     buildPronunciationGuidance(languageName),
     buildLanguageGuidance(languageName),
     TIER_GUIDANCE[resolvedTier],
@@ -1773,57 +2027,34 @@ app.post("/api/narrate", async (req, res) => {
 
   const systemPrompt = systemPromptParts.join("\n\n");
 
-  try {
-    if (resolvedTier === "neighborhood") {
-      const typeLabel = PLACE_TYPE_LABELS[place.primaryType] || place.primaryType;
-      const vicinity = place.vicinity || "the area";
-
-      const message = await anthropic.messages.create({
-        model: "claude-sonnet-4-6",
-        max_tokens: 2048,
-        system: systemPrompt,
-        messages: [
-          {
-            role: "user",
-            content: `I am standing near ${place.name}, a ${typeLabel} in ${vicinity}. Tell me about this place in your signature style.`,
-          },
-        ],
-      });
-
-      const narration = message.content.find((block) => block.type === "text")?.text || "";
-      return res.json({ narration, focusedPlaceId: place.placeId || null });
-    }
-
-    // Specific tier: multi-place + heading reasoning, with structured output
-    // so we know exactly which place Claude actually centered the story on.
-    const userMessage = buildSpecificUserMessage(places, heading, directionOfTravel);
-    const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 2048,
+  if (resolvedTier === "neighborhood") {
+    const typeLabel = PLACE_TYPE_LABELS[place.primaryType] || place.primaryType;
+    const vicinity = place.vicinity || "the area";
+    // No focus marker needed — the client already knows to use `place`
+    // directly for this tier (see narrateAndSpeak in app.js), it never
+    // reads focusedPlaceId back for the neighborhood case.
+    return streamSentencesSSE(res, {
       system: systemPrompt,
-      output_config: {
-        format: {
-          type: "json_schema",
-          schema: {
-            type: "object",
-            properties: {
-              narration: { type: "string" },
-              focusedPlaceId: { anyOf: [{ type: "string" }, { type: "null" }] },
-            },
-            required: ["narration", "focusedPlaceId"],
-            additionalProperties: false,
-          },
-        },
-      },
-      messages: [{ role: "user", content: userMessage }],
+      userMessage: `I am standing near ${place.name}, a ${typeLabel} in ${vicinity}. Tell me about this place in your signature style.`,
     });
-
-    const textBlock = message.content.find((block) => block.type === "text");
-    const parsed = textBlock ? JSON.parse(textBlock.text) : { narration: "", focusedPlaceId: null };
-    res.json(parsed);
-  } catch (error) {
-    res.status(502).json({ error: "Failed to generate narration." });
   }
+
+  // Specific tier: multi-place + heading reasoning. Used to use structured
+  // JSON output so we'd know exactly which place Claude actually centered
+  // the story on — now streamed as plain text with a LEADING
+  // "[[FOCUS:placeId]]" marker instead (see streamSentencesSSE), since
+  // incrementally parsing streaming JSON for TTS-able prose is fragile. It
+  // has to be leading, not trailing, here specifically: the client needs
+  // focusedPlaceId immediately to set up UI (pin highlight, place name,
+  // photo) rather than waiting for the whole narration to finish streaming.
+  const userMessage =
+    `Before anything else, on the very first line of your reply, write exactly: [[FOCUS:placeId]] where ` +
+    `placeId is the placeId (from the list below) of the place you're about to center your narration on, or ` +
+    `[[FOCUS:NONE]] if none fit. Never mention this marker or its format anywhere else in your reply. Then, ` +
+    `starting on the next line, give your narration.\n\n` +
+    buildSpecificUserMessage(places, heading, directionOfTravel);
+
+  streamSentencesSSE(res, { system: systemPrompt, userMessage, markerPrefix: "[[FOCUS", markerPosition: "leading" });
 });
 
 function buildSpecificUserMessage(places, heading, directionOfTravel) {
@@ -1901,6 +2132,8 @@ app.post("/api/ask", async (req, res) => {
     buildUserStatedIntentGuidance(userStatedDirection, userStatedDestination),
     buildPersonaGuidance(persona, false, false),
     buildMoodGuidance(sessionMood),
+    CONVERSATIONAL_PRESENCE_GUIDANCE,
+    SPOKEN_LANGUAGE_RULES,
   ].filter(Boolean);
 
   const compassWord = headingToCompassWord(heading);
@@ -1953,40 +2186,22 @@ app.post("/api/ask", async (req, res) => {
   const pronunciationGuidance = buildPronunciationGuidance(languageName);
   if (pronunciationGuidance) systemPromptParts.push(pronunciationGuidance);
 
+  // Used to use structured JSON output for the answer + 3 extracted fields
+  // (locationCorrection, userStatedDestination, userStatedDirection) — now
+  // streamed as plain text with a trailing "[[META:{...}]]" JSON marker
+  // instead (see streamSentencesSSE), so the client can start playing TTS
+  // on the first sentence of the answer instead of waiting for the whole
+  // response plus the extraction fields to finish generating.
+  const questionWithMetaInstruction =
+    question +
+    "\n\n(After your spoken answer, on its own final line, write exactly: " +
+    '[[META:{"locationCorrection":...,"userStatedDestination":...,"userStatedDirection":...}]] ' +
+    "— a single-line JSON object with those three fields (each string or null, per the rules above). " +
+    "Never mention this marker anywhere else in your answer.)";
+
   const systemPrompt = systemPromptParts.join("\n\n");
 
-  try {
-    const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1024,
-      system: systemPrompt,
-      output_config: {
-        format: {
-          type: "json_schema",
-          schema: {
-            type: "object",
-            properties: {
-              answer: { type: "string" },
-              locationCorrection: { anyOf: [{ type: "string" }, { type: "null" }] },
-              userStatedDestination: { anyOf: [{ type: "string" }, { type: "null" }] },
-              userStatedDirection: { anyOf: [{ type: "string" }, { type: "null" }] },
-            },
-            required: ["answer", "locationCorrection", "userStatedDestination", "userStatedDirection"],
-            additionalProperties: false,
-          },
-        },
-      },
-      messages: [{ role: "user", content: question }],
-    });
-
-    const textBlock = message.content.find((block) => block.type === "text");
-    const parsed = textBlock
-      ? JSON.parse(textBlock.text)
-      : { answer: "", locationCorrection: null, userStatedDestination: null, userStatedDirection: null };
-    res.json(parsed);
-  } catch (error) {
-    res.status(502).json({ error: "Failed to generate a response." });
-  }
+  streamSentencesSSE(res, { system: systemPrompt, userMessage: questionWithMetaInstruction, maxTokens: 1024, markerPrefix: "[[META" });
 });
 
 // Weaves the onboarding profile into the prompt so every narration/answer
@@ -2222,7 +2437,8 @@ const ONBOARDING_CHAT_SYSTEM_PROMPT =
   "- language (which language they want tours narrated in — map to exactly one of: en, he, ar, es, fr, ru)\n" +
   "- interests (what they love learning about when they travel — map loosely to one or more of: 'Deep " +
   "history', 'Faith & spirituality', 'Hidden stories', 'Architecture & beauty', 'Food & living culture', " +
-  "'People & community', 'Politics & society', 'Art & creativity', 'Nature & landscape', 'All of it')\n" +
+  "'People & community', 'Politics & society', 'Art & creativity', 'Nature & landscape', 'Markets & " +
+  "nightlife', 'All of it')\n" +
   "- depth (how much detail they want — map to exactly one of: surface, standard, deep)\n" +
   "- voice (a guide voice preference — map to exactly one of: onyx (deep & warm), nova (clear & bright), " +
   "shimmer (soft & gentle), echo (rich & rounded); if they have no strong preference, don't press hard on " +
@@ -2234,7 +2450,8 @@ const ONBOARDING_CHAT_SYSTEM_PROMPT =
   "the real minimum; use sensible defaults (language: en, depth: standard, voice: onyx) for anything the " +
   "user didn't state an opinion on — set isComplete to true.\n\n" +
   "Always respond in character as Sabri, warm and conversational, as if speaking aloud to someone you're " +
-  "excited to guide.";
+  "excited to guide.\n\n" +
+  SPOKEN_LANGUAGE_RULES;
 
 app.post("/api/onboarding-chat", async (req, res) => {
   const { messages } = req.body || {};
@@ -2289,6 +2506,140 @@ app.post("/api/onboarding-chat", async (req, res) => {
     res.json(parsed);
   } catch (error) {
     res.status(502).json({ error: "Failed to continue the onboarding conversation." });
+  }
+});
+
+// Conversational alternative to the tour planner's step-by-step form —
+// "Just tell Sabri what you want" from the planner's step 0. Same
+// stateless pattern as /api/onboarding-chat (client resends full history
+// each turn); once isComplete, the client hands extractedTourParams
+// straight to the existing generatePlannedTour()/plan-tour pipeline, so
+// this endpoint's only job is gathering the same fields the step-by-step
+// form gathers, nothing about the actual tour generation itself.
+const PLAN_TOUR_CHAT_SYSTEM_PROMPT =
+  "You are Sabri, helping a user describe the walking tour they want through natural conversation instead of " +
+  "filling out a form. Your goal is to naturally gather:\n" +
+  "- startLocationName (where they want to begin, as plain text — a place name/address/landmark, or the " +
+  "literal string 'current location' if they say 'here'/'my location'/'where I am now'. Never invent " +
+  "coordinates yourself — a real geocoding lookup resolves this text server-side.)\n" +
+  "- endLocationName (optional — where they want to end, as plain text, if different from the start; null if " +
+  "they just want to loop back to the start)\n" +
+  "- duration (map loosely to one of: '30-60 minutes', '1-2 hours', '2-4 hours', 'half day' — or use their " +
+  "own stated time if more specific)\n" +
+  "- maxDistance (map loosely to one of: 'under 1km (easy)', '1-3km (moderate)', '3-5km (active)')\n" +
+  "- interests (what they want the tour to focus on — map loosely to one or more of: 'Deep history', 'Faith " +
+  "& spirituality', 'Hidden stories', 'Architecture & beauty', 'Food & living culture', 'People & community', " +
+  "'Politics & society', 'Art & creativity', 'Nature & landscape', 'Markets & nightlife', 'All of it')\n" +
+  "- specificFocus (any specific must-see requests, e.g. 'Roman ruins' or 'a specific bakery' — null if none)\n\n" +
+  "Keep this SHORT — aim to gather everything in 2-4 user turns. Ask about multiple things at once when " +
+  "natural (e.g. duration + interests together) rather than one field per question. The real minimum to " +
+  "proceed is a startLocationName and SOME sense of duration or distance — use sensible defaults ('1-2 " +
+  "hours', '1-3km (moderate)', interests: ['All of it']) for anything they don't state an opinion on. Once " +
+  "you have enough, set isComplete to true.\n\n" +
+  "Always respond in character as Sabri, warm and conversational, as if speaking aloud to someone you're " +
+  "excited to guide.\n\n" +
+  SPOKEN_LANGUAGE_RULES;
+
+app.post("/api/plan-tour-chat", async (req, res) => {
+  const { messages, currentCity, currentLocation } = req.body || {};
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: "A non-empty messages array is required." });
+  }
+  if (!ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
+  }
+
+  const contextLine =
+    `Context: the user is currently in/near ${currentCity || "an unfamiliar city"}` +
+    (currentLocation && typeof currentLocation.latitude === "number"
+      ? `, at approximately lat ${currentLocation.latitude}, lng ${currentLocation.longitude} if they want to start "here" or "my current location".`
+      : ".");
+
+  try {
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1024,
+      system: PLAN_TOUR_CHAT_SYSTEM_PROMPT + "\n\n" + contextLine,
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              reply: { type: "string" },
+              isComplete: { type: "boolean" },
+              extractedTourParams: {
+                type: "object",
+                properties: {
+                  startLocationName: { anyOf: [{ type: "string" }, { type: "null" }] },
+                  endLocationName: { anyOf: [{ type: "string" }, { type: "null" }] },
+                  duration: { anyOf: [{ type: "string" }, { type: "null" }] },
+                  maxDistance: { anyOf: [{ type: "string" }, { type: "null" }] },
+                  interests: { type: "array", items: { type: "string" } },
+                  specificFocus: { anyOf: [{ type: "string" }, { type: "null" }] },
+                },
+                required: [
+                  "startLocationName",
+                  "endLocationName",
+                  "duration",
+                  "maxDistance",
+                  "interests",
+                  "specificFocus",
+                ],
+                additionalProperties: false,
+              },
+            },
+            required: ["reply", "isComplete", "extractedTourParams"],
+            additionalProperties: false,
+          },
+        },
+      },
+      messages: messages.map((entry) => ({
+        role: entry.role === "assistant" ? "assistant" : "user",
+        content: String(entry.content || ""),
+      })),
+    });
+
+    const textBlock = message.content.find((block) => block.type === "text");
+    const parsed = textBlock
+      ? JSON.parse(textBlock.text)
+      : { reply: "Sorry, could you say that again?", isComplete: false, extractedTourParams: {} };
+
+    // Resolve Claude's plain-text location names into real coordinates via
+    // an actual Places lookup — never trust an LLM to invent lat/lng itself.
+    if (parsed.isComplete && parsed.extractedTourParams) {
+      const biasLat = currentLocation?.latitude;
+      const biasLng = currentLocation?.longitude;
+      const resolveLocation = async (name) => {
+        if (!name) return null;
+        if (/current location|here|where i am/i.test(name) && typeof biasLat === "number") {
+          return { lat: biasLat, lng: biasLng, name: currentCity || "Current location" };
+        }
+        const place = await findPlaceForQuery(name, biasLat, biasLng);
+        if (!place || typeof place.latitude !== "number") return null;
+        return { lat: place.latitude, lng: place.longitude, name: place.name };
+      };
+
+      const [resolvedStart, resolvedEnd] = await Promise.all([
+        resolveLocation(parsed.extractedTourParams.startLocationName),
+        resolveLocation(parsed.extractedTourParams.endLocationName),
+      ]);
+      parsed.extractedTourParams.startLocation = resolvedStart;
+      parsed.extractedTourParams.endLocation = resolvedEnd;
+
+      if (!resolvedStart) {
+        // Couldn't geocode it — don't hand a broken tour off to /api/plan-tour.
+        // Ask again instead of silently failing.
+        parsed.isComplete = false;
+        parsed.reply =
+          "Hmm, I couldn't quite place that starting point — could you name a specific street, landmark, or " +
+          "say 'my current location'?";
+      }
+    }
+
+    res.json(parsed);
+  } catch (error) {
+    res.status(502).json({ error: "Failed to continue the tour planning conversation." });
   }
 });
 
@@ -2532,8 +2883,8 @@ app.post("/api/infer-interests", async (req, res) => {
       `not just what they said at onboarding.\n\nRecent behavior:\n${eventSummary}\n\n` +
       `Return a short list (3-6 items) of interest labels, ideally from this set when they fit: Deep ` +
       `history, Faith & spirituality, Hidden stories, Architecture & beauty, Food & living culture, People ` +
-      `& community, Politics & society, Art & creativity, Nature & landscape — but feel free to use a more ` +
-      `specific label if the behavior clearly suggests something not on that list.`;
+      `& community, Politics & society, Art & creativity, Nature & landscape, Markets & nightlife — but ` +
+      `feel free to use a more specific label if the behavior clearly suggests something not on that list.`;
 
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",

@@ -76,6 +76,10 @@ const plannerClose = document.getElementById("planner-close");
 const plannerDurationCards = document.getElementById("planner-duration-cards");
 const plannerDistancePills = document.getElementById("planner-distance-pills");
 const plannerStep0NextBtn = document.getElementById("planner-step0-next");
+const plannerSpecificTimesToggle = document.getElementById("planner-specific-times-toggle");
+const plannerSpecificTimesField = document.getElementById("planner-specific-times-field");
+const plannerStartTimeInput = document.getElementById("planner-start-time");
+const plannerEndTimeInput = document.getElementById("planner-end-time");
 const plannerStartInput = document.getElementById("planner-start-input");
 const plannerUseCurrentLocationBtn = document.getElementById("planner-use-current-location");
 const plannerEndNoBtn = document.getElementById("planner-end-no");
@@ -145,6 +149,96 @@ let lastHeading = null;
 let placeAbortController = null;
 let geocodeAbortController = null;
 let speakAbortController = null;
+// Aborts the in-flight /api/narrate or /api/ask SSE stream itself — separate
+// from speakAbortController (which only ever covered a single /api/speak
+// call) since a streaming narration fires many /api/speak calls, one per
+// sentence, over its lifetime.
+let streamAbortController = null;
+
+// --- Gapless TTS playback queue ---
+// Each sentence from a streaming narration/answer gets its own /api/speak
+// call fired the moment the sentence arrives — synthesis for sentence 2
+// happens in parallel while sentence 1 is still playing, so by the time
+// playback reaches it, the audio is usually already sitting in the queue
+// ready to go. Reuses the single existing audioPlayer element (rather than
+// a second alternating one) to avoid duplicating its play/pause/ended
+// listeners elsewhere in this file — the gap between clips is just an src
+// swap on an already-fully-downloaded blob, not a fresh network fetch.
+let ttsQueue = [];
+let ttsQueueGeneration = 0;
+let ttsQueueActive = false;
+let firstAudioPlaybackAt = null; // timestamp, for time-to-first-audio measurement
+
+async function fetchSpeechBlobUrl(text) {
+  const response = await fetch("/api/speak", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, speed: selectedSpeed, voice: settings.voice, language: settings.language }),
+  });
+  if (!response.ok) throw new Error("TTS request failed");
+  const arrayBuffer = await response.arrayBuffer();
+  return URL.createObjectURL(new Blob([arrayBuffer], { type: "audio/mpeg" }));
+}
+
+function enqueueTtsSentence(text) {
+  const generation = ttsQueueGeneration;
+  const blobUrlPromise = fetchSpeechBlobUrl(text).catch((error) => {
+    console.log("[tts] sentence synthesis failed, skipping:", error?.message || error);
+    return null;
+  });
+  ttsQueue.push({ text, blobUrlPromise, generation });
+  if (!ttsQueueActive) driveTtsQueue();
+}
+
+async function driveTtsQueue() {
+  if (ttsQueueActive) return;
+  ttsQueueActive = true;
+  try {
+    while (ttsQueue.length > 0) {
+      const item = ttsQueue.shift();
+      if (item.generation !== ttsQueueGeneration) continue; // interrupted — skip
+      const blobUrl = await item.blobUrlPromise;
+      if (item.generation !== ttsQueueGeneration) {
+        if (blobUrl) URL.revokeObjectURL(blobUrl);
+        continue;
+      }
+      if (!blobUrl) continue; // this sentence failed to synthesize — skip it, don't stall the queue
+
+      if (currentAudioObjectUrl) URL.revokeObjectURL(currentAudioObjectUrl);
+      currentAudioObjectUrl = blobUrl;
+      audioPlayer.src = blobUrl;
+
+      if (firstAudioPlaybackAt === null) {
+        firstAudioPlaybackAt = performance.now();
+      }
+
+      await new Promise((resolve) => {
+        currentPlaybackResolve = resolve;
+        audioPlayer.addEventListener("ended", resolve, { once: true });
+        const playPromise = audioPlayer.play();
+        if (playPromise && typeof playPromise.catch === "function") {
+          playPromise.catch(() => resolve());
+        }
+      });
+      currentPlaybackResolve = null;
+      // A stale queue may have been cleared while this clip was playing —
+      // stop advancing rather than play leftover interrupted-narration audio.
+      if (item.generation !== ttsQueueGeneration) break;
+    }
+  } finally {
+    ttsQueueActive = false;
+  }
+}
+
+// Invalidates any in-flight synthesis and empties the queue — called the
+// MOMENT the mic/question flow activates (see startListening/interruptPlayback),
+// not when speech recognition finishes, so an interrupted narration's
+// remaining queued sentences never resume or play after the question
+// exchange ends.
+function clearTtsQueue() {
+  ttsQueueGeneration += 1;
+  ttsQueue = [];
+}
 let hasActivePlace = false;
 let isNarrating = false; // tour-narration pipeline busy
 let isConversing = false; // tap-to-talk pipeline busy (independent flag —
@@ -308,6 +402,7 @@ const onboardingGuestBtn = document.getElementById("onboarding-guest-btn");
 const onboardingFinishBtn = document.getElementById("onboarding-finish");
 const onboardingPathChatBtn = document.getElementById("onboarding-path-chat");
 const onboardingPathQuickBtn = document.getElementById("onboarding-path-quick");
+const onboardingSigninExistingBtn = document.getElementById("onboarding-signin-existing-btn");
 
 const onboardingChatEl = document.getElementById("onboarding-chat");
 const onboardingChatMessagesEl = document.getElementById("onboarding-chat-messages");
@@ -633,6 +728,170 @@ if (onboardingChatMicBtn) {
   });
 }
 
+// --- Conversational tour creation ("Just tell Sabri what you want") ---
+// Same chat-UI pattern as onboarding above, talking to /api/plan-tour-chat
+// instead of /api/onboarding-chat. On completion, populates plannerAnswers
+// from the extracted params and hands off to the exact same
+// generatePlannedTour()/plan-tour pipeline the step-by-step flow uses.
+const plannerChatEl = document.getElementById("planner-chat");
+const plannerChatMessagesEl = document.getElementById("planner-chat-messages");
+const plannerChatLoadingEl = document.getElementById("planner-chat-loading");
+const plannerChatInput = document.getElementById("planner-chat-input");
+const plannerChatSendBtn = document.getElementById("planner-chat-send-btn");
+const plannerChatMicBtn = document.getElementById("planner-chat-mic-btn");
+const plannerChatSkipBtn = document.getElementById("planner-chat-skip");
+const plannerChatOpenBtn = document.getElementById("planner-chat-open-btn");
+
+const PLANNER_CHAT_OPENING =
+  "Tell me about the tour you're picturing — how long you have, where you'd like to start, and what you're " +
+  "into. I'll figure out the rest.";
+
+let plannerChatHistory = [];
+let plannerChatBusy = false;
+
+function addPlannerChatMessage(role, text) {
+  const bubble = document.createElement("div");
+  bubble.className = `onboarding-chat-message ${role === "assistant" ? "is-sabri" : "is-user"}`;
+  bubble.textContent = text;
+  plannerChatMessagesEl.appendChild(bubble);
+  plannerChatMessagesEl.scrollTop = plannerChatMessagesEl.scrollHeight;
+}
+
+async function openPlannerChat() {
+  document.querySelectorAll(".planner-step").forEach((step) => step.classList.remove("is-active"));
+  plannerChatEl.classList.remove("hidden");
+  plannerChatHistory = [{ role: "assistant", content: PLANNER_CHAT_OPENING }];
+  plannerChatMessagesEl.innerHTML = "";
+  addPlannerChatMessage("assistant", PLANNER_CHAT_OPENING);
+  speakNarration(PLANNER_CHAT_OPENING).catch(() => {});
+}
+
+function closePlannerChatToStepByStep() {
+  plannerChatEl.classList.add("hidden");
+  showPlannerStep(0);
+}
+
+async function sendPlannerChatMessage(userText) {
+  if (plannerChatBusy || !userText.trim()) return;
+  plannerChatBusy = true;
+  plannerChatInput.value = "";
+  plannerChatInput.disabled = true;
+  plannerChatSendBtn.disabled = true;
+
+  addPlannerChatMessage("user", userText);
+  plannerChatHistory.push({ role: "user", content: userText });
+  plannerChatLoadingEl.classList.remove("hidden");
+
+  try {
+    const response = await fetch("/api/plan-tour-chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: plannerChatHistory,
+        currentCity,
+        currentLocation: lastPosition,
+        userProfile,
+      }),
+    });
+    const data = await response.json();
+
+    if (!response.ok || !data.reply) {
+      addPlannerChatMessage("assistant", "Sorry, I lost my train of thought — could you say that again?");
+      return;
+    }
+
+    plannerChatHistory.push({ role: "assistant", content: data.reply });
+    addPlannerChatMessage("assistant", data.reply);
+    speakNarration(data.reply).catch(() => {});
+
+    if (data.isComplete && data.extractedTourParams) {
+      await completePlannerChat(data.extractedTourParams);
+    }
+  } catch (error) {
+    addPlannerChatMessage("assistant", "Sorry, I lost my train of thought — could you say that again?");
+  } finally {
+    plannerChatLoadingEl.classList.add("hidden");
+    plannerChatBusy = false;
+    plannerChatInput.disabled = false;
+    plannerChatSendBtn.disabled = false;
+    plannerChatInput.focus();
+  }
+}
+
+async function completePlannerChat(extractedTourParams) {
+  plannerAnswers.startLocation = extractedTourParams.startLocation || { lat: lastPosition?.latitude, lng: lastPosition?.longitude, name: currentCity };
+  plannerAnswers.hasCustomEnd = Boolean(extractedTourParams.endLocation);
+  plannerAnswers.endLocation = extractedTourParams.endLocation || null;
+  plannerAnswers.duration = extractedTourParams.duration || "1-2 hours";
+  plannerAnswers.hasSpecificTimes = false;
+  plannerAnswers.maxDistance = extractedTourParams.maxDistance || "1-3km (moderate)";
+  plannerAnswers.interests = Array.isArray(extractedTourParams.interests) ? extractedTourParams.interests : [];
+  plannerAnswers.specificFocus = extractedTourParams.specificFocus || "";
+
+  plannerChatEl.classList.add("hidden");
+  tourPlanner.classList.remove("hidden");
+  showPlannerStep(3);
+  logEvent("tour_planner_path_chosen", { path: "conversational", turns: plannerChatHistory.length });
+  await generatePlannedTour();
+}
+
+if (plannerChatOpenBtn) plannerChatOpenBtn.addEventListener("click", openPlannerChat);
+if (plannerChatSkipBtn) plannerChatSkipBtn.addEventListener("click", closePlannerChatToStepByStep);
+if (plannerChatSendBtn) {
+  plannerChatSendBtn.addEventListener("click", () => sendPlannerChatMessage(plannerChatInput.value));
+}
+if (plannerChatInput) {
+  plannerChatInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") sendPlannerChatMessage(plannerChatInput.value);
+  });
+}
+
+// Same lightweight, self-contained mic handler pattern as the onboarding
+// chat's mic button — reuses the same recognition instance.
+if (plannerChatMicBtn) {
+  plannerChatMicBtn.addEventListener("click", () => {
+    if (!recognition) {
+      showToast("Voice input isn't supported on this device");
+      return;
+    }
+    if (plannerChatMicBtn.classList.contains("is-listening")) {
+      try {
+        recognition.stop();
+      } catch (error) {
+        // Already stopped — harmless.
+      }
+      return;
+    }
+
+    plannerChatMicBtn.classList.add("is-listening");
+    recognition.lang = SPEECH_RECOGNITION_LANGS[settings.language] || "en-US";
+    let finalTranscript = "";
+
+    recognition.onresult = (event) => {
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = pickBestAlternative(event.results[i]).transcript;
+        if (event.results[i].isFinal) finalTranscript += transcript;
+        else interim += transcript;
+      }
+      plannerChatInput.value = finalTranscript || interim;
+    };
+    recognition.onend = () => {
+      plannerChatMicBtn.classList.remove("is-listening");
+      if (finalTranscript.trim()) sendPlannerChatMessage(finalTranscript.trim());
+    };
+    recognition.onerror = () => {
+      plannerChatMicBtn.classList.remove("is-listening");
+    };
+
+    try {
+      recognition.start();
+    } catch (error) {
+      plannerChatMicBtn.classList.remove("is-listening");
+    }
+  });
+}
+
 if (onboardingGuestBtn) {
   onboardingGuestBtn.addEventListener("click", () => {
     goToOnboardingStep(onboardingSteps.length - 1);
@@ -647,6 +906,18 @@ if (onboardingGoogleBtn) {
       // Draft won't survive the redirect — the post-auth resume falls back
       // to the Supabase user's own name/email instead.
     }
+    signInWithGoogle();
+  });
+}
+
+// Screen 1's "already have an account" link — for a returning user who
+// isn't in a persisted session, lets them sign back in immediately instead
+// of being forced through onboarding again. Same signInWithGoogle() redirect
+// flow as the end-of-onboarding button; the post-redirect resume logic in
+// handleOAuthSignIn already generically checks onboarding_complete and skips
+// straight to the map, regardless of which screen triggered the sign-in.
+if (onboardingSigninExistingBtn) {
+  onboardingSigninExistingBtn.addEventListener("click", () => {
     signInWithGoogle();
   });
 }
@@ -1584,6 +1855,28 @@ const MAP_CITY_ZOOM = 17;
 const MAP_WIDE_ZOOM = 15;
 
 let map = null;
+
+// Mobile viewport-height fix — 100dvh alone isn't enough on some devices/
+// browser versions, and Google Maps specifically needs to be told to
+// re-measure its container after a real resize or it leaves a stale
+// gray/white gap where its internal canvas didn't grow to fill the
+// corrected height. --app-vh (used by .app in style.css) is the most
+// robust of the three height fallbacks since it reacts in real time to the
+// dynamic toolbar showing/hiding, rather than relying on the browser's own
+// dvh implementation.
+function setAppViewportHeight() {
+  const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  document.documentElement.style.setProperty("--app-vh", `${viewportHeight * 0.01}px`);
+  if (map) {
+    google.maps.event.trigger(map, "resize");
+  }
+}
+setAppViewportHeight();
+window.addEventListener("resize", setAppViewportHeight);
+window.addEventListener("orientationchange", setAppViewportHeight);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", setAppViewportHeight);
+}
 let userLocationMarker = null;
 const placeMarkersByPlaceId = new Map();
 let activeInfoWindow = null;
@@ -2030,6 +2323,10 @@ const plannerAnswers = {
   endLocation: null, // {lat, lng, name} or null
   interests: [],
   specificFocus: "",
+  hasSpecificTimes: false,
+  startTime: null,
+  endTime: null,
+  computedDuration: null,
 };
 
 let plannedTour = null; // {tourTitle, tourDescription, estimatedDuration, estimatedDistance, stops:[{...,place}], openingNote}
@@ -2038,6 +2335,11 @@ let plannedTourStopIndex = 0;
 let plannedTourMarkers = [];
 let plannedTourRouteLine = null;
 const GUIDED_TOUR_ARRIVAL_METERS = 30;
+// Set when the user tapped "Start This Tour" while still meaningfully far
+// from stop 0 — defers the openingNote until checkGuidedTourProgress
+// detects real arrival there, instead of narrating as if they were already
+// standing at the start point.
+let plannedTourOpeningNotePending = false;
 
 let startAutocomplete = null;
 let endAutocomplete = null;
@@ -2149,8 +2451,47 @@ if (plannerDistancePills) {
   });
 }
 
+// Specific start/end times are an alternative to (not a replacement for)
+// the bucketed duration cards — either alone is enough to proceed. When
+// both times are set, the computed duration between them overrides
+// plannerAnswers.duration so it drives pacing/stop count in /api/plan-tour
+// instead of the bucketed value.
+if (plannerSpecificTimesToggle) {
+  plannerSpecificTimesToggle.addEventListener("click", () => {
+    plannerSpecificTimesField.classList.toggle("hidden");
+  });
+}
+
+function updatePlannerComputedTime() {
+  const startVal = plannerStartTimeInput?.value;
+  const endVal = plannerEndTimeInput?.value;
+  if (!startVal || !endVal) {
+    plannerAnswers.hasSpecificTimes = false;
+    updatePlannerStep0NextState();
+    return;
+  }
+  const [startH, startM] = startVal.split(":").map(Number);
+  const [endH, endM] = endVal.split(":").map(Number);
+  let minutes = endH * 60 + endM - (startH * 60 + startM);
+  if (minutes <= 0) minutes += 24 * 60; // end time is past midnight
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  const durationLabel = [hours > 0 ? `${hours} hour${hours === 1 ? "" : "s"}` : null, mins > 0 ? `${mins} minutes` : null]
+    .filter(Boolean)
+    .join(" ");
+  plannerAnswers.hasSpecificTimes = true;
+  plannerAnswers.startTime = startVal;
+  plannerAnswers.endTime = endVal;
+  plannerAnswers.computedDuration = durationLabel || "a short while";
+  updatePlannerStep0NextState();
+}
+
+if (plannerStartTimeInput) plannerStartTimeInput.addEventListener("change", updatePlannerComputedTime);
+if (plannerEndTimeInput) plannerEndTimeInput.addEventListener("change", updatePlannerComputedTime);
+
 function updatePlannerStep0NextState() {
-  plannerStep0NextBtn.disabled = !(plannerAnswers.duration && plannerAnswers.maxDistance);
+  const hasDuration = Boolean(plannerAnswers.duration) || Boolean(plannerAnswers.hasSpecificTimes);
+  plannerStep0NextBtn.disabled = !(hasDuration && plannerAnswers.maxDistance);
 }
 
 if (plannerStep0NextBtn) {
@@ -2270,7 +2611,7 @@ async function generatePlannedTour() {
       body: JSON.stringify({
         startLocation: plannerAnswers.startLocation,
         endLocation: plannerAnswers.hasCustomEnd ? plannerAnswers.endLocation : null,
-        duration: plannerAnswers.duration,
+        duration: plannerAnswers.hasSpecificTimes ? plannerAnswers.computedDuration : plannerAnswers.duration,
         maxDistance: plannerAnswers.maxDistance,
         interests: plannerAnswers.interests,
         specificFocus: plannerAnswers.specificFocus,
@@ -2384,11 +2725,43 @@ if (plannedTourStartBtn) {
     plannedTourCard.classList.add("hidden");
     plannedTourActive = true;
     plannedTourStopIndex = 0;
+    plannedTourOpeningNotePending = false;
 
     unlockAudio();
+
+    // Check the user's actual distance from stop 0 BEFORE assuming they're
+    // standing there — a fresh one-off fix, since startTour()'s
+    // watchPosition hasn't produced any reading yet at this exact moment.
+    const firstStopPlace = plannedTour.stops[0]?.place;
+    const distanceToStart = await new Promise((resolve) => {
+      if (!firstStopPlace || !("geolocation" in navigator)) {
+        resolve(0);
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (position) =>
+          resolve(
+            distanceInMeters(
+              { latitude: position.coords.latitude, longitude: position.coords.longitude },
+              { latitude: firstStopPlace.latitude, longitude: firstStopPlace.longitude }
+            )
+          ),
+        () => resolve(0),
+        { enableHighAccuracy: true, timeout: 8000 }
+      );
+    });
+
     startTour();
 
-    if (plannedTour.openingNote) {
+    if (distanceToStart > GUIDED_TOUR_ARRIVAL_METERS) {
+      // Not there yet — defer the opening note to checkGuidedTourProgress,
+      // which will speak it the moment real arrival at stop 0 is detected.
+      plannedTourOpeningNotePending = true;
+      showToast(
+        `You're about ${Math.round(distanceToStart)}m from the start — head there and I'll begin once you arrive.`
+      );
+      statusText.textContent = `Head toward ${plannedTour.stops[0].placeName} to begin (${Math.round(distanceToStart)}m)`;
+    } else if (plannedTour.openingNote) {
       startStory(plannedTour.tourTitle || "Your Tour", plannedTour.openingNote);
       await speakNarration(plannedTour.openingNote);
     }
@@ -2403,6 +2776,80 @@ let lastKnownDistanceToStop = null;
 let lastRouteDeviationLogTime = 0;
 const ROUTE_DEVIATION_THRESHOLD_METERS = 150;
 const ROUTE_DEVIATION_LOG_COOLDOWN_MS = 5 * 60 * 1000;
+
+// Guided-tour-only prefetch: the next stop's location is already known in
+// advance (unlike Wander mode, where the next place isn't predictable), so
+// narration generation can start in the background once the user is
+// getting close — well before they're within GUIDED_TOUR_ARRIVAL_METERS —
+// so it's ready or nearly ready by the time arrival actually triggers
+// playback. This only prefetches the Claude generation step (usually the
+// slower, more variable part); TTS synthesis still happens at arrival time
+// via the normal gapless queue in narrateAndSpeak.
+const GUIDED_TOUR_PREFETCH_METERS = 50;
+let guidedTourPrefetch = null; // { stopIndex, focusedPlace, narrationText, done, failed }
+
+function prefetchGuidedTourStop(stopIndex, place, heading, triggerPosition) {
+  if (guidedTourPrefetch && guidedTourPrefetch.stopIndex === stopIndex) return; // already in flight or done
+
+  const entry = { stopIndex, focusedPlace: null, narrationText: "", done: false, failed: false };
+  guidedTourPrefetch = entry;
+  console.log(`[prefetch] starting background narration generation for guided tour stop ${stopIndex}`);
+
+  const directionOfTravel = computeDirectionOfTravel();
+  const { proactive: nearbyInterestPlace } = triggerPosition
+    ? findNearbyInterestPlace(triggerPosition.latitude, triggerPosition.longitude, heading)
+    : { proactive: null };
+
+  streamSSE(
+    "/api/narrate",
+    {
+      tier: "specific",
+      places: [place],
+      heading,
+      directionOfTravel,
+      depth: settings.depth,
+      language: settings.language,
+      userProfile,
+      sessionLog,
+      correctionContext,
+      crossSessionVisitedPlaces: crossSessionVisitedPlaceNames,
+      returningUserContext,
+      isFirstNarrationOfSession,
+      neighborhood: currentNeighborhoodName,
+      city: currentCity,
+      country: currentCountry,
+      weather: currentWeather,
+      nearbyInterestPlace,
+      firstVisitToCity: computeFirstVisitToCity(),
+      timeOfDay: computeTimeOfDay(),
+      userStatedDirection,
+      userStatedDestination,
+      persona: currentPersona,
+      isCityChange: false,
+      sessionMood,
+      isGuidedTour: true,
+    },
+    {
+      onMarker: () => {
+        // Only one candidate place for a guided tour stop (unlike Wander
+        // mode's multi-place specific tier) — the marker exists for API
+        // consistency but there's nothing to disambiguate here.
+        entry.focusedPlace = place;
+      },
+      onSentence: (text) => {
+        entry.narrationText = entry.narrationText ? `${entry.narrationText} ${text}` : text;
+      },
+      onDone: (payload) => {
+        if (payload.fullText) entry.narrationText = payload.fullText;
+        entry.done = true;
+        console.log(`[prefetch] guided tour stop ${stopIndex} narration ready ahead of arrival`);
+      },
+    }
+  ).catch((error) => {
+    entry.failed = true;
+    console.log(`[prefetch] guided tour stop ${stopIndex} prefetch failed:`, error?.message || error);
+  });
+}
 
 async function checkGuidedTourProgress(latitude, longitude, heading) {
   if (!plannedTour || plannedTourStopIndex >= plannedTour.stops.length) {
@@ -2429,9 +2876,43 @@ async function checkGuidedTourProgress(latitude, longitude, heading) {
       plannedTourStopIndex += 1;
       return;
     }
-    await narrateAndSpeak({ tier: "specific", places: [place], heading, triggerPosition: { latitude, longitude } });
+    if (plannedTourOpeningNotePending && plannedTourStopIndex === 0) {
+      plannedTourOpeningNotePending = false;
+      if (plannedTour.openingNote) {
+        startStory(plannedTour.tourTitle || "Your Tour", plannedTour.openingNote);
+        await speakNarration(plannedTour.openingNote);
+      }
+      narratedPlaceIds.add(place.placeId);
+      plannedTourStopIndex += 1;
+      return;
+    }
+    const prefetched =
+      guidedTourPrefetch &&
+      guidedTourPrefetch.stopIndex === plannedTourStopIndex &&
+      guidedTourPrefetch.done &&
+      !guidedTourPrefetch.failed &&
+      guidedTourPrefetch.narrationText
+        ? guidedTourPrefetch
+        : null;
+    await narrateAndSpeak({
+      tier: "specific",
+      places: [place],
+      heading,
+      triggerPosition: { latitude, longitude },
+      prefetchedNarrationText: prefetched?.narrationText || null,
+      prefetchedFocusedPlace: prefetched?.focusedPlace || null,
+    });
+    guidedTourPrefetch = null;
     plannedTourStopIndex += 1;
     return;
+  }
+
+  // Guided tour only — the next stop is already known, so start generating
+  // its narration in the background once close enough that arrival is
+  // imminent, rather than only starting at the exact trigger moment. Not
+  // applied to Wander mode, where the next place isn't predictable.
+  if (distance <= GUIDED_TOUR_PREFETCH_METERS) {
+    prefetchGuidedTourStop(plannedTourStopIndex, place, heading, { latitude, longitude });
   }
 
   // Sampled/throttled — only logs when the user is sustainedly moving
@@ -3381,7 +3862,15 @@ function choosePrimaryPlace(places) {
   return pool.reduce((best, place) => (!best || place.distanceMeters < best.distanceMeters ? place : best), null);
 }
 
-async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }) {
+async function narrateAndSpeak({
+  tier,
+  place,
+  places,
+  heading,
+  triggerPosition,
+  prefetchedNarrationText = null,
+  prefetchedFocusedPlace = null,
+}) {
   isNarrating = true;
   lastNarrationPosition = triggerPosition;
   statusText.textContent = "Sabri is preparing your story...";
@@ -3402,56 +3891,25 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
     ? findNearbyInterestPlace(triggerPosition.latitude, triggerPosition.longitude, heading)
     : { proactive: null };
 
-  try {
-    const response = await fetch("/api/narrate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tier,
-        place,
-        places,
-        heading,
-        directionOfTravel,
-        depth: settings.depth,
-        language: settings.language,
-        userProfile,
-        sessionLog,
-        correctionContext,
-        crossSessionVisitedPlaces: crossSessionVisitedPlaceNames,
-        returningUserContext,
-        isFirstNarrationOfSession,
-        neighborhood: currentNeighborhoodName,
-        city: currentCity,
-        country: currentCountry,
-        weather: currentWeather,
-        nearbyInterestPlace,
-        firstVisitToCity: computeFirstVisitToCity(),
-        timeOfDay: computeTimeOfDay(),
-        userStatedDirection,
-        userStatedDestination,
-        persona: currentPersona,
-        isCityChange,
-        sessionMood,
-      }),
-    });
-    const data = await response.json();
-    hideTourLoadingOverlay();
+  const triggerTime = performance.now();
+  firstAudioPlaybackAt = null;
+  clearTtsQueue();
+  if (streamAbortController) streamAbortController.abort();
+  streamAbortController = new AbortController();
 
-    if (!response.ok || !data.narration) {
-      statusText.textContent = "Couldn't generate your story.";
-      hideNarrationLoadingState();
-      return;
-    }
+  let focusedPlace = tier === "neighborhood" ? place : null;
+  let narrationText = "";
+  let uiInitialized = false;
+  const narrationStartedAt = Date.now();
 
-    const focusedPlace =
-      tier === "neighborhood" ? place : places.find((p) => p.placeId === data.focusedPlaceId) || choosePrimaryPlace(places);
-
-    if (!focusedPlace) {
-      statusText.textContent = "Couldn't generate your story.";
-      hideNarrationLoadingState();
-      return;
-    }
-
+  // Runs the moment focusedPlace is actually known — immediately for the
+  // neighborhood tier, or as soon as the leading [[FOCUS:...]] marker
+  // arrives for the specific tier — rather than waiting for the whole
+  // narration to finish streaming, since none of this depends on the full
+  // text.
+  const initFocusedPlaceUI = () => {
+    if (!focusedPlace || uiInitialized) return;
+    uiInitialized = true;
     narratedPlaceIds.add(focusedPlace.placeId);
     hasActivePlace = true;
     currentPlaceName = focusedPlace.name;
@@ -3459,54 +3917,187 @@ async function narrateAndSpeak({ tier, place, places, heading, triggerPosition }
     if (tier === "neighborhood") {
       currentNeighborhoodName = focusedPlace.name;
     }
-    recordNarrationLog(focusedPlace, data.narration, heading, focusedPlace.relativePosition === "in front of");
+    locationName.textContent = focusedPlace.name;
+    if (neighborhoodNameEl) neighborhoodNameEl.textContent = currentNeighborhoodName || "";
+    narratingPlaceId = focusedPlace.placeId;
+    upsertPlaceMarker(focusedPlace);
+    refreshAllPlaceMarkers();
+    const photoUrl = focusedPlace.photoReference
+      ? `/api/photo?ref=${encodeURIComponent(focusedPlace.photoReference)}&maxwidth=800`
+      : null;
+    applyHomePhoto(photoUrl);
+    startStory(focusedPlace.name, "");
+    updateMediaSessionMetadata(focusedPlace.name, currentNeighborhoodName, photoUrl);
+    hideTourLoadingOverlay();
+    logEvent("narration_started", { placeId: focusedPlace.placeId, placeType: focusedPlace.primaryType, tier });
+  };
+
+  if (tier === "neighborhood") initFocusedPlaceUI();
+
+  try {
+    if (prefetchedNarrationText && prefetchedFocusedPlace) {
+      // Guided-tour prefetch already did the (usually slower, more
+      // variable-latency) Claude generation step in the background while
+      // the user was still walking toward this stop — skip straight to
+      // UI setup + TTS instead of starting a fresh stream from scratch.
+      console.log("[prefetch] using pre-generated narration for this stop, skipping fresh generation");
+      focusedPlace = prefetchedFocusedPlace;
+      initFocusedPlaceUI();
+      narrationText = prefetchedNarrationText;
+      placeDescription.textContent = narrationText;
+      narrationText
+        .split(/(?<=[.!?])\s+/)
+        .map((sentence) => sentence.trim())
+        .filter(Boolean)
+        .forEach((sentence) => enqueueTtsSentence(sentence));
+    } else {
+      await streamSSE(
+        "/api/narrate",
+        {
+          tier,
+          place,
+          places,
+          heading,
+          directionOfTravel,
+          depth: settings.depth,
+          language: settings.language,
+          userProfile,
+          sessionLog,
+          correctionContext,
+          crossSessionVisitedPlaces: crossSessionVisitedPlaceNames,
+          returningUserContext,
+          isFirstNarrationOfSession,
+          neighborhood: currentNeighborhoodName,
+          city: currentCity,
+          country: currentCountry,
+          weather: currentWeather,
+          nearbyInterestPlace,
+          firstVisitToCity: computeFirstVisitToCity(),
+          timeOfDay: computeTimeOfDay(),
+          userStatedDirection,
+          userStatedDestination,
+          persona: currentPersona,
+          isCityChange,
+          sessionMood,
+          isGuidedTour: plannedTourActive,
+        },
+        {
+          signal: streamAbortController.signal,
+          onMarker: (markerContent) => {
+            if (tier === "neighborhood") return;
+            const focusedPlaceId = !markerContent || markerContent === "NONE" ? null : markerContent;
+            focusedPlace = places.find((p) => p.placeId === focusedPlaceId) || choosePrimaryPlace(places);
+            initFocusedPlaceUI();
+          },
+          onSentence: (sentenceText) => {
+            narrationText = narrationText ? `${narrationText} ${sentenceText}` : sentenceText;
+            if (uiInitialized) placeDescription.textContent = narrationText;
+            enqueueTtsSentence(sentenceText);
+          },
+          onDone: (payload) => {
+            if (payload.fullText) narrationText = payload.fullText;
+            if (uiInitialized) placeDescription.textContent = narrationText;
+          },
+        }
+      );
+    }
+
+    if (!focusedPlace || !narrationText) {
+      statusText.textContent = "Couldn't generate your story.";
+      return;
+    }
+
+    recordNarrationLog(focusedPlace, narrationText, heading, focusedPlace.relativePosition === "in front of");
     totalNarrationsThisSession += 1;
     isFirstNarrationOfSession = false;
 
     if (currentUser) {
       visitedPlaceIds.add(focusedPlace.placeId);
-      saveVisitToSupabase(focusedPlace, data.narration);
+      saveVisitToSupabase(focusedPlace, narrationText);
     }
 
-    locationName.textContent = focusedPlace.name;
-    if (neighborhoodNameEl) neighborhoodNameEl.textContent = currentNeighborhoodName || "";
+    // Most sentences are already playing/played by now, since synthesis for
+    // each one starts the moment it arrives — this just waits for the tail.
+    await waitForTtsQueueDrain();
 
-    // Pin for the focused place gets the pulsing "narrating now" ring —
-    // upsert it first (covers pins we haven't drawn yet, e.g. the
-    // neighborhood-orientation tier's place) then refresh every other pin
-    // so any previous narrating-ring is cleared.
-    narratingPlaceId = focusedPlace.placeId;
-    upsertPlaceMarker(focusedPlace);
-    refreshAllPlaceMarkers();
+    if (firstAudioPlaybackAt !== null) {
+      const latencyMs = Math.round(firstAudioPlaybackAt - triggerTime);
+      console.log(`[latency] time-to-first-audio (streamed narration): ${latencyMs}ms`);
+      logEvent("time_to_first_audio", { ms: latencyMs, tier, flow: "narrate" });
+    }
 
-    const photoUrl = focusedPlace.photoReference
-      ? `/api/photo?ref=${encodeURIComponent(focusedPlace.photoReference)}&maxwidth=800`
-      : null;
-    applyHomePhoto(photoUrl);
-
-    startStory(focusedPlace.name, data.narration);
-    updateMediaSessionMetadata(focusedPlace.name, currentNeighborhoodName, photoUrl);
-    const narrationStartedAt = Date.now();
-    logEvent("narration_started", { placeId: focusedPlace.placeId, placeType: focusedPlace.primaryType, tier });
-    await speakNarration(data.narration);
     // audioPlayer.ended is only true after a natural finish — interruptPlayback()
     // (tap-to-talk cutting in, or a new narration overtaking this one) pauses
     // rather than lets it end, so this reliably tells completed from skipped.
     logEvent(audioPlayer.ended ? "narration_completed" : "narration_skipped", {
       placeId: focusedPlace.placeId,
       listenedMs: Date.now() - narrationStartedAt,
-      textLength: data.narration.length,
+      textLength: narrationText.length,
     });
   } catch (error) {
-    statusText.textContent = "Couldn't generate your story.";
-    hideTourLoadingOverlay();
+    if (error.name !== "AbortError") {
+      statusText.textContent = "Couldn't generate your story.";
+    }
   } finally {
     isNarrating = false;
     lastNarrationEndTime = Date.now();
     narratingPlaceId = null;
     refreshAllPlaceMarkers();
+    hideTourLoadingOverlay();
     hideNarrationLoadingState();
   }
+}
+
+// Generic Server-Sent-Events reader for the streaming /api/narrate and
+// /api/ask endpoints — manual parsing (not EventSource) since EventSource
+// can't send a POST body. Dispatches each event to the matching callback as
+// it arrives, well before the stream/response as a whole is done.
+async function streamSSE(url, body, { signal, onMarker, onSentence, onDone } = {}) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`${url} responded ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() || "";
+    for (const frame of frames) {
+      const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
+      if (!dataLine) continue;
+      let payload;
+      try {
+        payload = JSON.parse(dataLine.slice(6));
+      } catch (error) {
+        continue;
+      }
+      if (payload.type === "marker") onMarker?.(payload.markerContent);
+      else if (payload.type === "sentence") onSentence?.(payload.text);
+      else if (payload.type === "done") onDone?.(payload);
+      else if (payload.type === "error") throw new Error(`${url} stream reported an error`);
+    }
+  }
+}
+
+function waitForTtsQueueDrain() {
+  return new Promise((resolve) => {
+    const check = () => {
+      if (!ttsQueueActive && ttsQueue.length === 0) resolve();
+      else setTimeout(check, 100);
+    };
+    check();
+  });
 }
 
 // Keeps a running record of every narration and question/answer pair, sent
@@ -3641,15 +4232,31 @@ async function speakNarration(text) {
 }
 
 // Cleanly stops whatever's currently playing (if anything) and resolves any
-// pending speakNarration() promise immediately, so the caller's finally
-// block runs right away instead of hanging until a natural 'ended' event
-// that will never come once we overwrite audioPlayer.src.
+// pending speakNarration()/TTS-queue promise immediately, so the caller's
+// finally block runs right away instead of hanging until a natural 'ended'
+// event that will never come once we overwrite audioPlayer.src.
+//
+// Called the MOMENT the mic/question flow activates (see startListening —
+// this runs before speech recognition even starts, not after it finishes),
+// so narration audio genuinely stops immediately rather than finishing its
+// current sentence. Also clears the gapless TTS queue and aborts any
+// in-flight /api/narrate or /api/ask stream — without this, a
+// pre-fetched-but-not-yet-played sentence chunk from the interrupted
+// narration would otherwise resume playing right after the question
+// exchange ends, which was the actual bug: interruptPlayback() alone always
+// stopped the CURRENT clip instantly, but nothing told the queue not to
+// advance to the next one.
 function interruptPlayback() {
   audioPlayer.pause();
   if (currentPlaybackResolve) {
     const resolve = currentPlaybackResolve;
     currentPlaybackResolve = null;
     resolve();
+  }
+  clearTtsQueue();
+  if (streamAbortController) {
+    streamAbortController.abort();
+    streamAbortController = null;
   }
 }
 
@@ -3892,12 +4499,37 @@ function cancelListening() {
 
 async function askSabri(question) {
   const directionOfTravel = computeDirectionOfTravel();
+  const triggerTime = performance.now();
+  firstAudioPlaybackAt = null;
+  clearTtsQueue();
+  if (streamAbortController) streamAbortController.abort();
+  streamAbortController = new AbortController();
+
+  // Give iOS a moment to re-establish the Bluetooth route back to AirPods
+  // after SpeechRecognition released the microphone, before any audio
+  // element activity starts (including the first queued TTS sentence).
+  await sleep(AIRPODS_ROUTE_RECOVERY_MS);
+
+  let answerText = "";
+  let answerShown = false;
+  const showAnswerUI = () => {
+    if (answerShown) return;
+    answerShown = true;
+    askSubtitle.classList.add("hidden");
+    placeName.textContent = "Sabri";
+    placeDescription.textContent = "";
+    placeDescription.classList.remove("story-description--fallback");
+    playerCard.classList.remove("hidden");
+    playerCard.classList.add("is-open");
+    appEl.classList.add("has-player");
+    startPrompt.classList.add("hidden");
+    tourControls.classList.remove("hidden");
+  };
 
   try {
-    const response = await fetch("/api/ask", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    await streamSSE(
+      "/api/ask",
+      {
         question,
         currentPlace: currentPlaceName,
         neighborhood: currentNeighborhoodName,
@@ -3916,51 +4548,67 @@ async function askSabri(question) {
         userStatedDestination,
         persona: currentPersona,
         sessionMood,
-      }),
-    });
-    const data = await response.json();
+      },
+      {
+        signal: streamAbortController.signal,
+        onSentence: (sentenceText) => {
+          showAnswerUI();
+          answerText = answerText ? `${answerText} ${sentenceText}` : sentenceText;
+          placeDescription.textContent = answerText;
+          enqueueTtsSentence(sentenceText);
+        },
+        onDone: (payload) => {
+          if (payload.fullText) answerText = payload.fullText;
+          if (answerShown) placeDescription.textContent = answerText;
 
-    if (!response.ok || !data.answer) {
+          let meta = {};
+          if (payload.markerContent) {
+            try {
+              meta = JSON.parse(payload.markerContent);
+            } catch (error) {
+              // Malformed/truncated marker JSON — a real possible failure
+              // mode with a streamed trailing marker. Non-fatal: the
+              // answer itself already played fine, we just skip the
+              // location-correction/stated-direction extraction this turn.
+              console.log("[ask] failed to parse [[META]] marker, skipping extraction:", error?.message);
+            }
+          }
+
+          if (meta.locationCorrection) {
+            correctionContext = meta.locationCorrection;
+          }
+          // Real-world testing found Sabri kept narrating a street the user
+          // had already said they were leaving — this is the fix: a stated
+          // destination/direction persists (see userStatedDirection/Destination
+          // declarations above) and outweighs raw GPS proximity for the
+          // rest of the session, not just this one reply.
+          if (meta.userStatedDestination || meta.userStatedDirection) {
+            userStatedDestination = meta.userStatedDestination || null;
+            userStatedDirection = meta.userStatedDirection || null;
+            console.log("[intent] user stated new direction/destination:", userStatedDirection, userStatedDestination);
+          }
+        },
+      }
+    );
+
+    if (!answerText) {
       statusText.textContent = "Sabri couldn't answer that.";
       askSubtitle.classList.add("hidden");
       return;
     }
 
-    if (data.locationCorrection) {
-      correctionContext = data.locationCorrection;
-    }
-
-    // Real-world testing found Sabri kept narrating a street the user had
-    // already said they were leaving — this is the fix: a stated
-    // destination/direction persists (see userStatedDirection/Destination
-    // declarations above) and outweighs raw GPS proximity for the rest of
-    // the session, not just this one reply.
-    if (data.userStatedDestination || data.userStatedDirection) {
-      userStatedDestination = data.userStatedDestination || null;
-      userStatedDirection = data.userStatedDirection || null;
-      console.log("[intent] user stated new direction/destination:", userStatedDirection, userStatedDestination);
-    }
-
-    recordQuestionLog(question, data.answer, lastHeading);
+    recordQuestionLog(question, answerText, lastHeading);
     totalQuestionsThisSession += 1;
-    saveQuestionToSupabase(question, data.answer);
+    saveQuestionToSupabase(question, answerText);
     logEvent("voice_question_asked", { placeId: currentPlaceId, questionLength: question.length });
 
-    askSubtitle.classList.add("hidden");
-    placeName.textContent = "Sabri";
-    placeDescription.textContent = data.answer;
-    placeDescription.classList.remove("story-description--fallback");
-    playerCard.classList.remove("hidden");
-    playerCard.classList.add("is-open");
-    appEl.classList.add("has-player");
-    startPrompt.classList.add("hidden");
-    tourControls.classList.remove("hidden");
+    await waitForTtsQueueDrain();
 
-    // Give iOS a moment to re-establish the Bluetooth route back to
-    // AirPods after SpeechRecognition released the microphone, before
-    // asking the audio element to start playing again.
-    await sleep(AIRPODS_ROUTE_RECOVERY_MS);
-    await speakNarration(data.answer);
+    if (firstAudioPlaybackAt !== null) {
+      const latencyMs = Math.round(firstAudioPlaybackAt - triggerTime);
+      console.log(`[latency] time-to-first-audio (streamed answer): ${latencyMs}ms`);
+      logEvent("time_to_first_audio", { ms: latencyMs, flow: "ask" });
+    }
 
     statusText.textContent = "Listening for your next question...";
     setTimeout(() => {
@@ -3969,8 +4617,10 @@ async function askSabri(question) {
       }
     }, 5000);
   } catch (error) {
-    statusText.textContent = "Sabri couldn't answer that.";
-    askSubtitle.classList.add("hidden");
+    if (error.name !== "AbortError") {
+      statusText.textContent = "Sabri couldn't answer that.";
+      askSubtitle.classList.add("hidden");
+    }
   } finally {
     isConversing = false;
   }
