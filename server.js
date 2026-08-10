@@ -757,6 +757,103 @@ app.get("/privacy", (req, res) => {
 </html>`);
 });
 
+// Fixed, not dynamically computed like PRIVACY_EFFECTIVE_DATE above — an
+// "Effective Date" on a Terms of Service should reflect when the terms
+// actually took effect, not whenever the server last happened to restart.
+const TERMS_EFFECTIVE_DATE = "August 10, 2026";
+
+app.get("/terms", (req, res) => {
+  res.type("html").send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sabri — Terms of Service</title>
+<style>
+  body { background: #ffffff; color: #1a1a1a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; max-width: 680px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 { font-size: 26px; margin-bottom: 4px; }
+  h2 { font-size: 17px; margin-top: 32px; color: #0F1B2D; }
+  p, li { font-size: 15px; color: #333; }
+  .meta { color: #777; font-size: 13px; margin-bottom: 32px; }
+  a { color: #C4622D; }
+</style>
+</head>
+<body>
+  <h1>Terms of Service</h1>
+  <p class="meta">Effective Date: ${TERMS_EFFECTIVE_DATE}</p>
+
+  <p>Welcome to Sabri. These Terms of Service ("Terms") govern your access to and use of the Sabri mobile and web application (the "App" or "Service"), operated by [YOUR LEGAL ENTITY NAME — insert once incorporated] ("Sabri," "we," "us," or "our"). By creating an account or using Sabri, you agree to these Terms. If you do not agree, please do not use the Service.</p>
+
+  <h2>1. Description of Service</h2>
+  <p>Sabri is an AI-powered, location-aware audio tour guide application that provides personalized narration, guidance, and information about your surroundings based on your GPS location, stated interests, and interactions with the app. Sabri uses third-party services including Google Maps, Google Places, OpenAI, and Anthropic's Claude to generate and deliver this experience.</p>
+
+  <h2>2. Eligibility</h2>
+  <p>You must be at least 13 years old (or the minimum age of digital consent in your country) to use Sabri. By using the Service, you represent that you meet this requirement.</p>
+
+  <h2>3. Your Account</h2>
+  <ul>
+    <li>You are responsible for maintaining the confidentiality of your account credentials.</li>
+    <li>You are responsible for all activity that occurs under your account.</li>
+    <li>You may sign in using Google Sign-In or other supported authentication methods.</li>
+    <li>You may delete your account at any time via the Settings panel in the app.</li>
+  </ul>
+
+  <h2>4. Location Data and Permissions</h2>
+  <p>Sabri's core functionality depends on access to your device's location services. By enabling location access, you consent to Sabri collecting and using your real-time and historical location data to provide narration, guidance, and personalized recommendations, as described in our <a href="https://getsabri.com/privacy">Privacy Policy</a>.</p>
+  <p>You may disable location access at any time through your device settings, but doing so will prevent Sabri's core features from functioning.</p>
+
+  <h2>5. User Conduct</h2>
+  <p>You agree not to:</p>
+  <ul>
+    <li>Use Sabri for any unlawful purpose or in violation of any applicable law.</li>
+    <li>Attempt to reverse-engineer, decompile, or extract the underlying source code of the App.</li>
+    <li>Interfere with or disrupt the Service, its servers, or networks.</li>
+    <li>Use automated systems (bots, scrapers) to access the Service without our prior written permission.</li>
+    <li>Misrepresent your identity or impersonate any person or entity.</li>
+    <li>Use the Service to harass, harm, or endanger yourself or others, including relying on Sabri's guidance in situations involving personal safety risk.</li>
+  </ul>
+
+  <h2>6. Safety While Using Sabri</h2>
+  <p>Sabri is designed to be used while walking outdoors. You are solely responsible for your own safety, including remaining aware of traffic, terrain, weather conditions, and your surroundings while using the app. Do not rely solely on audio narration or in-app guidance in place of your own judgment, particularly when crossing streets, navigating uneven terrain, or in low-visibility conditions. Sabri is not a substitute for official safety, navigation, or emergency guidance.</p>
+
+  <h2>7. AI-Generated Content</h2>
+  <p>Narration, historical information, recommendations, and other content within Sabri are generated using artificial intelligence (including Anthropic's Claude and OpenAI's text-to-speech models). While we strive for accuracy, AI-generated content may occasionally contain errors, outdated information, or inaccuracies. Sabri's narration is intended for entertainment and general informational purposes only and should not be relied upon as a definitive historical, cultural, safety, or factual authority. Please verify any critical information independently.</p>
+
+  <h2>8. Third-Party Services</h2>
+  <p>Sabri integrates with third-party services, including but not limited to Google Maps, Google Places, Google Sign-In, OpenWeatherMap, and web search providers. Your use of these integrations is also subject to the respective third party's terms of service and privacy policy. We are not responsible for the availability, accuracy, or content of these third-party services.</p>
+
+  <h2>9. Subscriptions and Payments</h2>
+  <p>[TO BE COMPLETED once monetization/Stripe integration is live — insert pricing, billing cycle, refund policy, and cancellation terms here before launch of any paid tier.]</p>
+
+  <h2>10. Intellectual Property</h2>
+  <p>The Sabri name, logo, app design, and underlying software are the property of [YOUR LEGAL ENTITY NAME] and are protected by applicable intellectual property laws. You may not copy, modify, distribute, or create derivative works based on the Service without our express written permission.</p>
+
+  <h2>11. User Content</h2>
+  <p>If you submit questions, feedback, or other input to Sabri (including via voice), you grant us a non-exclusive, worldwide, royalty-free license to use that input to operate, improve, and personalize the Service for you and, in aggregated or anonymized form, to improve Sabri generally.</p>
+
+  <h2>12. Disclaimer of Warranties</h2>
+  <p>Sabri is provided "as is" and "as available" without warranties of any kind, whether express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, and non-infringement. We do not warrant that the Service will be uninterrupted, error-free, or completely secure.</p>
+
+  <h2>13. Limitation of Liability</h2>
+  <p>To the maximum extent permitted by law, [YOUR LEGAL ENTITY NAME] shall not be liable for any indirect, incidental, special, consequential, or punitive damages, or any loss of data, use, or goodwill, arising out of or related to your use of Sabri, including any injury or harm sustained while using the app outdoors.</p>
+
+  <h2>14. Termination</h2>
+  <p>We reserve the right to suspend or terminate your access to Sabri at any time, with or without notice, for conduct that we believe violates these Terms or is otherwise harmful to other users, us, or third parties.</p>
+
+  <h2>15. Changes to These Terms</h2>
+  <p>We may update these Terms from time to time. If we make material changes, we will notify you through the app or via email. Continued use of Sabri after changes take effect constitutes acceptance of the revised Terms.</p>
+
+  <h2>16. Governing Law</h2>
+  <p>[TO BE COMPLETED once incorporated — typically the state/country of incorporation, e.g. "These Terms are governed by the laws of the State of Delaware, without regard to its conflict of law provisions."]</p>
+
+  <h2>17. Contact Us</h2>
+  <p>If you have questions about these Terms, please contact us at [YOUR SUPPORT EMAIL].</p>
+
+  <p>This document is a starting template and has not been reviewed by an attorney. Before launch — particularly before accepting payments or scaling to production users — have these Terms reviewed by a qualified lawyer, especially sections 9 (Subscriptions), 13 (Limitation of Liability), and 16 (Governing Law).</p>
+</body>
+</html>`);
+});
+
 app.use(express.static(__dirname, { index: false }));
 
 // The 4 tables this app depends on (see supabase/schema.sql).

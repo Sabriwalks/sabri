@@ -496,6 +496,28 @@
     </div>
   </div>
 
+  <!-- Native-only: shown when @capacitor-community/speech-recognition's
+       requestPermissions() comes back denied — the Web Speech API path
+       (regular browser/PWA) has no equivalent explicit permission step, so
+       this overlay is never shown there. See SabriSpeechRecognition in
+       app.js and CAPACITOR_NOTES.md. -->
+  <div id="mic-permission-denied" class="camera-overlay camera-permission-denied hidden">
+    <button id="mic-permission-close-btn" class="camera-close-btn" aria-label="Close">✕</button>
+    <div class="camera-permission-content">
+      <p class="camera-permission-icon" aria-hidden="true">🎤</p>
+      <h3 class="camera-permission-title">Sabri needs speech recognition</h3>
+      <p class="camera-permission-message">
+        Talk to Sabri uses speech recognition so you can ask questions out loud while you walk. Nothing is
+        recorded or stored beyond what's needed to answer your question.
+      </p>
+      <p id="mic-permission-hint" class="camera-permission-hint hidden">
+        Looks like this was blocked earlier. Enable Speech Recognition and Microphone access for Sabri in your
+        device's Settings app, then try again.
+      </p>
+      <button id="mic-permission-retry-btn" class="camera-identify-btn camera-permission-retry-btn">Try Again</button>
+    </div>
+  </div>
+
   <!-- Tour mode selector — shown instead of immediately starting GPS when
        "Start Tour" is tapped. Wander = existing flow unchanged; Plan My
        Tour opens the multi-step planner below. See app.js startBtn handler. -->

@@ -25,6 +25,10 @@ const cameraPermissionMessage = document.getElementById("camera-permission-messa
 const cameraPermissionHint = document.getElementById("camera-permission-hint");
 const cameraPermissionCloseBtn = document.getElementById("camera-permission-close-btn");
 const cameraPermissionRetryBtn = document.getElementById("camera-permission-retry-btn");
+const micPermissionDenied = document.getElementById("mic-permission-denied");
+const micPermissionHint = document.getElementById("mic-permission-hint");
+const micPermissionCloseBtn = document.getElementById("mic-permission-close-btn");
+const micPermissionRetryBtn = document.getElementById("mic-permission-retry-btn");
 const deleteAccountBtn = document.getElementById("delete-account-btn");
 const deleteAccountConfirm = document.getElementById("delete-account-confirm");
 const deleteAccountConfirmBtn = document.getElementById("delete-account-confirm-btn");
@@ -4922,14 +4926,22 @@ if (recognition) {
   // single-best guess is often the least likely of the alternatives it
   // actually considered.
   recognition.maxAlternatives = 3;
-} else {
-  micBtn.classList.add("hidden");
 }
 
 // Picks the highest-confidence alternative out of a SpeechRecognitionResult.
 // iOS Safari doesn't always populate `confidence` (it's sometimes 0 for
 // every alternative, especially on interim results) — falls back to the
 // first alternative in that case, same as requesting just one.
+//
+// Still used directly by the onboarding-chat and planner-chat mic buttons
+// (see their handlers elsewhere in this file), which talk to `recognition`
+// directly and were NOT converted to SabriSpeechRecognition below — only
+// the core "Talk to Sabri" tour Q&A flow was, since that's the walking/
+// AirPods use case this pass is about. Those two other mic entry points
+// will need the same conversion later if/when they need to work natively
+// too; until then they'll simply have no mic button functionality inside
+// the native app (recognition stays null there), same as if the browser
+// never supported Web Speech at all.
 function pickBestAlternative(result) {
   let best = result[0];
   for (let i = 1; i < result.length; i++) {
@@ -4938,6 +4950,202 @@ function pickBestAlternative(result) {
     }
   }
   return best;
+}
+
+// --- SabriSpeechRecognition: runtime-detected speech-to-text abstraction ---
+// Same interface regardless of platform: the Web Speech API in a regular
+// browser/PWA (completely unchanged behavior from before this module
+// existed), or @capacitor-community/speech-recognition's native iOS Speech
+// framework bridge once running inside Capacitor — checked via
+// isCapacitorNative(), the same runtime-detection pattern already used for
+// geolocation (see geoGetCurrentPosition et al). startListening() below is
+// the only caller; it owns silence-detection timing, the confirm-display
+// delay, and handing the final question to askSabri() — this module only
+// ever reports interim/final transcript text and errors, so none of that
+// app-level logic needs to know or care which engine produced the text.
+//
+// NOT verified against a real device/native build — no Mac/simulator
+// available in this environment. See CAPACITOR_NOTES.md for what to test
+// first once this can run in Xcode, and the rollback note if the native
+// plugin turns out to need fixing: only this module's native branch would
+// need to change, not startListening()/askSabri()/anything else.
+const SabriSpeechRecognition = (() => {
+  let nativeAvailableChecked = false;
+  let nativeAvailable = false;
+  let nativeListenersAttached = false;
+  let activeSession = null; // { onInterimResult, onFinalResult, transcriptSoFar }
+
+  function getNativePlugin() {
+    return window.Capacitor?.Plugins?.SpeechRecognition || null;
+  }
+
+  async function checkNativeAvailability() {
+    if (nativeAvailableChecked) return nativeAvailable;
+    nativeAvailableChecked = true;
+    const plugin = getNativePlugin();
+    if (!plugin) {
+      nativeAvailable = false;
+      return false;
+    }
+    try {
+      const result = await plugin.available();
+      nativeAvailable = !!(result && result.available);
+    } catch (error) {
+      nativeAvailable = false;
+    }
+    return nativeAvailable;
+  }
+
+  // The native plugin has no per-result "final vs interim" flag the way
+  // Web Speech API does — partialResults just keeps firing with an updated
+  // best-guess transcript as recognition progresses, and whatever the most
+  // recent one said is treated as "final" once listeningState reports
+  // stopped. matches[0] (the plugin's own top-ranked guess) stands in for
+  // pickBestAlternative()'s confidence-scoring, which is a workaround
+  // specifically for Web Speech API's weaknesses on iOS Safari that don't
+  // apply here — this goes straight through the real native Speech
+  // framework, not a browser bridge to it.
+  function attachNativeListenersOnce() {
+    if (nativeListenersAttached) return;
+    const plugin = getNativePlugin();
+    if (!plugin) return;
+    nativeListenersAttached = true;
+
+    plugin.addListener("partialResults", (data) => {
+      if (!activeSession) return;
+      const text = Array.isArray(data?.matches) && data.matches.length > 0 ? data.matches[0] : "";
+      if (!text) return;
+      activeSession.transcriptSoFar = text;
+      activeSession.onInterimResult?.(text);
+    });
+
+    plugin.addListener("listeningState", (data) => {
+      if (!activeSession) return;
+      if (data?.status === "stopped") {
+        const session = activeSession;
+        activeSession = null;
+        session.onFinalResult?.(session.transcriptSoFar.trim());
+      }
+    });
+  }
+
+  return {
+    // Resolves once we know for sure whether SOME implementation is usable
+    // — call this once at startup to decide whether to hide the mic
+    // button (mirrors the old synchronous `if (recognition) {...} else {
+    // hide }` check, just accounting for the native availability check
+    // being async where the web one wasn't).
+    async ensureReady() {
+      if (isCapacitorNative()) return checkNativeAvailability();
+      return !!recognition;
+    },
+
+    async start({ language, onInterimResult, onFinalResult, onError }) {
+      if (isCapacitorNative()) {
+        const plugin = getNativePlugin();
+        const available = await checkNativeAvailability();
+        if (!plugin || !available) {
+          onError?.({ reason: "unsupported" });
+          return;
+        }
+
+        let permission;
+        try {
+          permission = await plugin.requestPermissions();
+        } catch (error) {
+          onError?.({ reason: "error" });
+          return;
+        }
+        if (permission?.speechRecognition !== "granted") {
+          onError?.({ reason: "permission-denied" });
+          return;
+        }
+
+        attachNativeListenersOnce();
+        activeSession = { onInterimResult, onFinalResult, transcriptSoFar: "" };
+
+        try {
+          await plugin.start({ language: language || "en-US", partialResults: true, popup: false });
+        } catch (error) {
+          activeSession = null;
+          onError?.({ reason: "error" });
+        }
+        return;
+      }
+
+      // Web path — byte-for-byte the same behavior as before this module
+      // existed, just routed through onInterimResult/onFinalResult/onError
+      // callbacks instead of assigning recognition.onresult/onend/onerror
+      // directly inside startListening().
+      if (!recognition) {
+        onError?.({ reason: "unsupported" });
+        return;
+      }
+      recognition.lang = language || "en-US";
+      let finalTranscript = "";
+
+      recognition.onresult = (event) => {
+        let interim = "";
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = pickBestAlternative(event.results[i]).transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript;
+          } else {
+            interim += transcript;
+          }
+        }
+        onInterimResult?.(finalTranscript || interim);
+      };
+      recognition.onend = () => {
+        onFinalResult?.(finalTranscript.trim());
+      };
+      recognition.onerror = () => {
+        onError?.({ reason: "error" });
+      };
+
+      try {
+        recognition.start();
+      } catch (error) {
+        onError?.({ reason: "error" });
+      }
+    },
+
+    stop() {
+      if (isCapacitorNative()) {
+        const plugin = getNativePlugin();
+        if (plugin && activeSession) {
+          plugin.stop().catch(() => {});
+        }
+        return;
+      }
+      if (!recognition) return;
+      try {
+        recognition.stop();
+      } catch (error) {
+        // Already stopped — harmless.
+      }
+    },
+  };
+})();
+
+SabriSpeechRecognition.ensureReady().then((ready) => {
+  if (!ready) micBtn.classList.add("hidden");
+});
+
+function showMicPermissionDenied() {
+  if (!micPermissionDenied) return;
+  micPermissionHint.classList.remove("hidden");
+  micPermissionDenied.classList.remove("hidden");
+}
+
+if (micPermissionCloseBtn) {
+  micPermissionCloseBtn.addEventListener("click", () => micPermissionDenied.classList.add("hidden"));
+}
+if (micPermissionRetryBtn) {
+  micPermissionRetryBtn.addEventListener("click", () => {
+    micPermissionDenied.classList.add("hidden");
+    startListening();
+  });
 }
 
 // Always tappable: a tap during an active narration interrupts it cleanly
@@ -4958,7 +5166,7 @@ listeningHint.addEventListener("click", () => {
 });
 
 function startListening() {
-  if (!recognition || isListening) return;
+  if (isListening) return;
 
   interruptPlayback();
   // Keeping this alive/running is the standard practical mitigation for the
@@ -4975,31 +5183,13 @@ function startListening() {
   listeningHint.textContent = "Tap to cancel";
   statusText.textContent = "Listening...";
 
-  recognition.lang = SPEECH_RECOGNITION_LANGS[settings.language] || "en-US";
-
-  let finalTranscript = "";
   const resetSilenceTimer = (duration) => {
     clearTimeout(silenceTimer);
     silenceTimer = setTimeout(() => stopListening(), duration);
   };
   resetSilenceTimer(INITIAL_SILENCE_MS);
 
-  recognition.onresult = (event) => {
-    resetSilenceTimer(FOLLOWUP_SILENCE_MS);
-
-    let interim = "";
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const transcript = pickBestAlternative(event.results[i]).transcript;
-      if (event.results[i].isFinal) {
-        finalTranscript += transcript;
-      } else {
-        interim += transcript;
-      }
-    }
-    askSubtitle.textContent = finalTranscript || interim;
-  };
-
-  recognition.onend = () => {
+  const finishListening = (question) => {
     clearTimeout(silenceTimer);
     isListening = false;
     micBtn.classList.remove("is-listening");
@@ -5013,7 +5203,6 @@ function startListening() {
       return;
     }
 
-    const question = finalTranscript.trim();
     if (!question || question.length < MIN_QUESTION_LENGTH) {
       askSubtitle.textContent = "I didn't catch that — tap to try again";
       setTimeout(() => askSubtitle.classList.add("hidden"), 2500);
@@ -5029,48 +5218,42 @@ function startListening() {
     setTimeout(() => askSabri(question), CONFIRM_DISPLAY_MS);
   };
 
-  recognition.onerror = () => {
-    clearTimeout(silenceTimer);
-    isListening = false;
-    isConversing = false;
-    isCancelledListening = false;
-    micBtn.classList.remove("is-listening");
-    listeningHint.classList.add("hidden");
-    askSubtitle.classList.add("hidden");
-    statusText.textContent = "Didn't catch that — tap the mic to try again.";
-  };
-
-  try {
-    recognition.start();
-  } catch (error) {
-    isListening = false;
-    isConversing = false;
-    micBtn.classList.remove("is-listening");
-    listeningHint.classList.add("hidden");
-  }
+  SabriSpeechRecognition.start({
+    language: SPEECH_RECOGNITION_LANGS[settings.language] || "en-US",
+    onInterimResult: (text) => {
+      resetSilenceTimer(FOLLOWUP_SILENCE_MS);
+      askSubtitle.textContent = text;
+    },
+    onFinalResult: (text) => finishListening(text),
+    onError: (info) => {
+      clearTimeout(silenceTimer);
+      isListening = false;
+      isConversing = false;
+      isCancelledListening = false;
+      micBtn.classList.remove("is-listening");
+      listeningHint.classList.add("hidden");
+      askSubtitle.classList.add("hidden");
+      if (info?.reason === "permission-denied") {
+        statusText.textContent = "Keep walking, discovering...";
+        showMicPermissionDenied();
+      } else {
+        statusText.textContent = "Didn't catch that — tap the mic to try again.";
+      }
+    },
+  });
 }
 
 // Stops listening AND sends whatever was captured — same completion path
 // as the silence timeout firing on its own.
 function stopListening() {
-  if (!recognition) return;
-  try {
-    recognition.stop();
-  } catch (error) {
-    // Already stopped — harmless.
-  }
+  SabriSpeechRecognition.stop();
 }
 
 // Stops listening and discards the transcript entirely — nothing gets sent
 // to Claude, unlike stopListening()/the silence timeout.
 function cancelListening() {
-  if (!recognition) return;
   isCancelledListening = true;
-  try {
-    recognition.stop();
-  } catch (error) {
-    // Already stopped — harmless.
-  }
+  SabriSpeechRecognition.stop();
 }
 
 async function askSabri(question) {

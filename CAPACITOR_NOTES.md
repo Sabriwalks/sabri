@@ -6,7 +6,8 @@ scattered through `app.js`, `server.js`, and `ios/App/App/Info.plist`.
 ## What exists now
 
 - `@capacitor/core`, `@capacitor/cli`, `@capacitor/ios`, `@capacitor/geolocation`,
-  `@capacitor/browser`, `@capacitor/app` installed (see `package.json`).
+  `@capacitor/browser`, `@capacitor/app`, `@capacitor-community/speech-recognition`
+  installed (see `package.json`).
 - `capacitor.config.json` — appId `com.getsabri.app`, appName `Sabri`, webDir `www`.
 - `ios/` — the native Xcode project scaffold (`npx cap add ios`), committed to
   git (unlike `www/`, this contains real native project state — Info.plist
@@ -16,10 +17,10 @@ scattered through `app.js`, `server.js`, and `ios/App/App/Info.plist`.
   app.js, style.css, etc. live at the repo root next to `server.js` and
   `.env`. Run `npm run build:capacitor` (copies only the client-safe files
   into `www/`) before `npx cap sync ios` whenever a client file changes.
-- `ios/App/App/Info.plist` — camera/microphone/location usage strings,
-  `UIBackgroundModes` (audio + location, for narration continuing with the
-  screen locked), and a custom URL scheme (`com.getsabri.app://`) for the
-  native Google Sign-In redirect.
+- `ios/App/App/Info.plist` — camera/microphone/location/speech-recognition
+  usage strings, `UIBackgroundModes` (audio + location, for narration
+  continuing with the screen locked), and a custom URL scheme
+  (`com.getsabri.app://`) for the native Google Sign-In redirect.
 - `ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png` — the
   new logo at 1024x1024, no alpha channel.
 - `branding-source-logo.jpg` — the source illustration, committed so icons
@@ -33,7 +34,7 @@ scattered through `app.js`, `server.js`, and `ios/App/App/Info.plist`.
 |---|---|---|
 | `getUserMedia` (camera) | **Yes** — WKWebView supports it directly given `NSCameraUsageDescription`. `@capacitor/camera` exists but suits a "take one photo" native-picker flow, not this app's live viewfinder overlay — deliberately NOT swapped in, to preserve the current UX. | Nothing changed; Info.plist permission string added. |
 | `navigator.geolocation` | Works, but `@capacitor/geolocation` is the more idiomatic/reliable choice for background behavior in a native app. | **Swapped.** `app.js` now has `geoGetCurrentPosition`/`geoWatchPosition`/`geoClearWatch`/`hasGeolocationSupport` wrappers that call `window.Capacitor.Plugins.Geolocation` when `isCapacitorNative()`, else fall back to the Web API — same file serves both the web PWA and the native app, so this had to be runtime-detected, not build-time-swapped. |
-| `SpeechRecognition` / `webkitSpeechRecognition` | **No — this is the real gap.** iOS Safari/WKWebView has historically had little-to-no support for the Web Speech *recognition* API (as opposed to speech *synthesis*, which is unrelated and not used here). | **Not fixed — flagged as a manual next step.** "Talk to Sabri" (tap-to-talk Q&A, conversational onboarding, planner chat mic) will likely not work at all natively without a real plugin, e.g. `@capacitor-community/speech-recognition` (wraps iOS's native Speech framework). This needs to be verified on a real device and, if broken, requires installing that plugin and rewriting `recognition`/`pickBestAlternative` call sites in `app.js` to branch the same way geolocation now does. **Do this early in Xcode testing — it's the single biggest functional risk in this whole conversion.** |
+| `SpeechRecognition` / `webkitSpeechRecognition` | **No.** iOS Safari/WKWebView has historically had little-to-no support for the Web Speech *recognition* API (as opposed to speech *synthesis*, which is unrelated and not used here). | **Swapped for the core "Talk to Sabri" flow only.** `@capacitor-community/speech-recognition` installed; `app.js` has a `SabriSpeechRecognition` abstraction (same runtime-detection pattern as geolocation) that `startListening()`/`stopListening()`/`cancelListening()` now go through. The onboarding-chat and planner-chat mic buttons were deliberately left untouched — they still call the raw Web Speech API directly, so they simply won't have working mic input inside the native app until/unless they're converted the same way later. **See "First things to test in Xcode" below — this is unverified on a real device and the single biggest functional risk in the conversion.** |
 | `navigator.mediaSession` (lock-screen controls) | Should work — WKWebView on iOS 15+ supports Media Session. | Nothing changed. `UIBackgroundModes: audio` was added to Info.plist since background audio continuation needs that native capability declared regardless of the web API support. |
 | `navigator.sendBeacon` | Should work (WebKit-based). | Nothing changed. |
 | Service worker / cache-busting-via-version-bump | **Doesn't apply** — the native app bundles its own assets locally and updates via App Store review, not live cache invalidation. Registering a SW there is pure overhead at best, unknown-behavior risk at worst (WebView backgrounding/foregrounding was never tested against it). | **Disabled for native.** `if ("serviceWorker" in navigator && !isCapacitorNative())` — same for the PWA install banner (`beforeinstallprompt`/`isIosSafari` logic), which is meaningless inside an already-installed native app. |
@@ -85,21 +86,62 @@ user's own access):**
   per device size, etc.) — separate from the in-app icon, not attempted
   here, genuinely a manual/design task for later.
 
+## First things to test once this can run in Xcode
+
+In priority order — do these before anything else, since both are
+foundational to the core "walking with the phone locked, listening via
+AirPods" use case:
+
+1. **Speech recognition (`SabriSpeechRecognition`, `app.js`).** Tap the mic
+   button and confirm, in order: (a) the native permission prompt actually
+   appears (iOS should ask for both Speech Recognition and Microphone the
+   first time — `NSSpeechRecognitionUsageDescription` +
+   `NSMicrophoneUsageDescription` are both in `Info.plist`); (b) denying it
+   shows the friendly `#mic-permission-denied` overlay, not a silent
+   failure; (c) granting it and speaking a real question gets transcribed
+   correctly and flows into `askSabri()` exactly like the web version does
+   — same silence-timeout behavior, same short-transcript rejection, same
+   "confirm the captured text for a beat" delay before it's sent.
+   **Unverified in this environment** — no Mac/simulator available, so this
+   was built strictly against the plugin's documented TypeScript API
+   (verified to match `node_modules/@capacitor-community/speech-recognition`'s
+   actual `definitions.d.ts`) and tested as thoroughly as possible on the
+   *web* path (confirmed zero regression there — interim results, final
+   transcript, cancel, and short-transcript rejection all still work
+   exactly as before). The native branch itself has not run on real
+   hardware.
+   **Rollback note:** because everything routes through the
+   `SabriSpeechRecognition` abstraction, if the native plugin has problems
+   on a real device, only that module's native branch (inside
+   `SabriSpeechRecognition` in `app.js`) needs fixing or swapping for a
+   different plugin — `startListening()`, `askSabri()`, and everything else
+   that consumes a transcript are unaffected either way.
+   One packaging note: unlike the other plugins, `@capacitor-community/speech-recognition`
+   does **not** ship a `Package.swift` (Capacitor's sync warned about this),
+   so it isn't Swift-Package-Manager-compatible — Xcode will need
+   CocoaPods to install it, where the other plugins didn't require that.
+2. **Background audio.** Start narration, lock the phone, confirm audio
+   keeps playing and lock-screen/AirPods controls (play/pause/skip) still
+   work — matching the existing web PWA behavior on iOS Safari.
+   `UIBackgroundModes: audio` is already declared in `Info.plist` (added in
+   an earlier pass, confirmed present, no conflicts with the other keys
+   added since). This is a config-only declaration; the Media Session API
+   code already built for the web version is reused as-is — Media Session
+   generally works fine inside WKWebView once background audio is
+   declared, but this assumption specifically needs confirming on real
+   hardware too, since it's never actually been tested outside Safari.
+
 ## Manual next steps requiring Xcode / Apple Developer account / a Mac
 
 None of the following could be done from this environment:
 
-1. Open `ios/App/App.xcworkspace` in Xcode, resolve Swift Package Manager
-   dependencies (should be automatic on first open, given `Package.swift`
-   already lists the 3 plugins).
-2. **Verify SpeechRecognition actually works** — this is the top risk. If it
-   doesn't, install `@capacitor-community/speech-recognition` and rewire
-   the `recognition`/mic call sites in `app.js` the same way geolocation
-   was wired.
+1. Open `ios/App/App.xcworkspace` in Xcode, resolve Swift Package Manager /
+   CocoaPods dependencies (SPM should be automatic on first open; CocoaPods
+   is needed specifically for the speech-recognition plugin, see above).
+2. The two tests above — speech recognition and background audio — first.
 3. Run on a simulator (`npx cap run ios` from a Mac, or Xcode's own Run
-   button) and walk through: onboarding, sign-in (native OAuth flow above),
-   camera, geolocation/map, voice input, background audio with the screen
-   locked.
+   button) and walk through the rest: onboarding, sign-in (native OAuth
+   flow above), camera, geolocation/map.
 4. Set up code signing — requires an Apple Developer account (noted in an
    earlier task as still pending).
 5. Add the Supabase + Google Cloud Console redirect URL entries above.

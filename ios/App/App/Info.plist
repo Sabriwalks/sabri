@@ -70,6 +70,8 @@
 	<string>Sabri uses your camera so you can point it at something you're curious about and have Sabri identify it and tell you its story. Nothing is saved or shared — a photo is only sent once to figure out what you're looking at.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Sabri listens when you tap the microphone to ask a question about where you are, so it can hear you and answer out loud.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Sabri uses speech recognition so you can ask questions and talk to your guide while walking.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Sabri uses your location to guide you through your surroundings and narrate the places you're walking past as you explore.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
