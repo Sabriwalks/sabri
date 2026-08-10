@@ -1005,6 +1005,11 @@ app.get("/api/debug-key-fingerprint", (req, res) => {
   const result = {
     configured: true,
     length: key.length,
+    // Prefix is category-identifying, not entropy-bearing (e.g.
+    // "sb_secret_" vs "sb_publishable_" vs the legacy "eyJ..." JWT header)
+    // — safe to expose, unlike the suffix, which is only 6 chars for the
+    // same reason.
+    keyPrefix: key.slice(0, 10),
     keySuffix: key.slice(-6),
   };
 
