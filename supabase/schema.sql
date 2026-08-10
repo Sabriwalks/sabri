@@ -110,12 +110,29 @@ create table if not exists interaction_events (
   created_at timestamptz not null default now()
 );
 
+-- Tester bug/feedback reports (Settings > Report a Problem). Deliberately
+-- NOT gated behind sign-in — user_id is nullable so someone can report a
+-- problem before ever completing onboarding, which is exactly when a lot
+-- of real bugs surface. screenshot_url stores a Storage PATH (not a public
+-- URL — the feedback-screenshots bucket below is private), resolved to a
+-- signed URL on demand by the admin dashboard (see server.js).
+create table if not exists feedback_reports (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles (id) on delete cascade,
+  message text not null,
+  screenshot_url text,
+  app_context jsonb default '{}',
+  status text not null default 'new' check (status in ('new', 'reviewed', 'resolved')),
+  created_at timestamptz not null default now()
+);
+
 create index if not exists visited_places_user_id_idx on visited_places (user_id, visited_at desc);
 create index if not exists walk_sessions_user_id_idx on walk_sessions (user_id, started_at desc);
 create index if not exists user_questions_user_id_idx on user_questions (user_id, asked_at desc);
 create index if not exists interaction_events_user_id_idx on interaction_events (user_id);
 create index if not exists interaction_events_event_type_idx on interaction_events (event_type);
 create index if not exists interaction_events_created_at_idx on interaction_events (created_at desc);
+create index if not exists feedback_reports_status_created_at_idx on feedback_reports (status, created_at desc);
 
 -- The backend always talks to Supabase with the service_role key (which
 -- bypasses RLS entirely), so these policies exist purely as defense in
@@ -127,6 +144,7 @@ alter table visited_places enable row level security;
 alter table user_questions enable row level security;
 alter table guide_personas enable row level security;
 alter table interaction_events enable row level security;
+alter table feedback_reports enable row level security;
 
 drop policy if exists "Users manage their own profile" on profiles;
 create policy "Users manage their own profile" on profiles
@@ -156,3 +174,27 @@ create policy "Anyone can read guide personas" on guide_personas
 drop policy if exists "Users manage their own interaction events" on interaction_events;
 create policy "Users manage their own interaction events" on interaction_events
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- Anyone (signed in or fully anonymous) can file a bug report — that's the
+-- whole point, reporting shouldn't require completing onboarding first.
+-- Deliberately no select/update policy for anon/authenticated: only the
+-- server's service-role client (which bypasses RLS) can read or triage
+-- reports, via the admin dashboard — a tester should never be able to read
+-- back OTHER people's reports through the anon key.
+drop policy if exists "Anyone can submit feedback" on feedback_reports;
+create policy "Anyone can submit feedback" on feedback_reports
+  for insert with check (true);
+
+-- Feedback screenshots — private bucket (public = false): uploadable by
+-- anyone (same "no sign-in required" reasoning as the table above), but
+-- only ever readable via signed URLs the admin dashboard generates
+-- server-side with the service-role client, which bypasses storage RLS
+-- entirely. No select policy is added here for the same reason none is
+-- added for the table itself.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('feedback-screenshots', 'feedback-screenshots', false, 5242880, array['image/jpeg', 'image/png', 'image/webp'])
+on conflict (id) do nothing;
+
+drop policy if exists "Anyone can upload feedback screenshots" on storage.objects;
+create policy "Anyone can upload feedback screenshots" on storage.objects
+  for insert with check (bucket_id = 'feedback-screenshots');

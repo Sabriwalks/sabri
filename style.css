@@ -1174,6 +1174,80 @@ body {
   color: var(--text-secondary);
 }
 
+.feedback-textarea {
+  width: 100%;
+  min-height: 110px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--bg);
+  color: var(--white);
+  font-size: 14px;
+  font-family: inherit;
+  resize: vertical;
+  margin-bottom: 14px;
+}
+
+.feedback-screenshot-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.feedback-screenshot-input {
+  width: 100%;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.feedback-screenshot-preview {
+  position: relative;
+  display: inline-block;
+  margin-bottom: 12px;
+}
+
+.feedback-screenshot-preview img {
+  max-width: 140px;
+  max-height: 140px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  display: block;
+}
+
+.feedback-screenshot-remove-btn {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: none;
+  background: var(--bg);
+  color: var(--white);
+  font-size: 12px;
+  line-height: 1;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.feedback-error {
+  font-size: 12px;
+  color: var(--terracotta);
+  margin-bottom: 12px;
+}
+
+.feedback-confirm {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--gold);
+  margin-bottom: 12px;
+}
+
+.feedback-submit-btn {
+  margin-top: 4px;
+}
+
 .settings-about {
   padding-top: 16px;
   border-top: 1px solid var(--border);

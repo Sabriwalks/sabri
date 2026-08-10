@@ -415,6 +415,10 @@ const CONTEXT_PLACE_LIMIT = 5;
 // (/api/identify) — everything else in this app sends small JSON bodies,
 // so raising the ceiling here doesn't loosen anything that mattered before.
 app.use(express.json({ limit: "8mb" }));
+// Only used by the admin dashboard's plain HTML <form> status-toggle
+// (application/x-www-form-urlencoded) — every other endpoint in this app
+// is JSON.
+app.use(express.urlencoded({ extended: false }));
 
 // A real Supabase project URL or anon/publishable key never contains a
 // newline or another env var's name — if either does, something is
@@ -531,8 +535,11 @@ function renderAdminShell(bodyHtml) {
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid rgba(212,168,83,0.15); font-family: "SF Mono", Consolas, monospace; }
   th { color: #B8A898; font-weight: 600; text-transform: uppercase; font-size: 10px; }
   td { color: #FAF7F2; }
-  form input { background: #1A2B3D; border: 1px solid #D4A853; border-radius: 8px; padding: 10px 14px; color: #FAF7F2; font-size: 14px; }
-  form button { background: #D4A853; border: none; border-radius: 8px; padding: 10px 18px; font-weight: 700; margin-left: 8px; }
+  form input, form select { background: #1A2B3D; border: 1px solid #D4A853; border-radius: 8px; padding: 10px 14px; color: #FAF7F2; font-size: 14px; }
+  form button { background: #D4A853; border: none; border-radius: 8px; padding: 10px 18px; font-weight: 700; margin-left: 8px; cursor: pointer; }
+  td form { margin: 0; }
+  td form select { padding: 4px 6px; font-size: 12px; }
+  td form button { padding: 4px 10px; font-size: 12px; margin-left: 0; }
   .note { font-size: 11px; color: #B8A898; margin-top: 8px; }
   a { color: #D4A853; }
 </style>
@@ -559,6 +566,7 @@ async function renderAdminDashboard() {
     totalWalksCount,
     recentSessionsResult,
     allSessionsForStatsResult,
+    feedbackResult,
   ] = await Promise.all([
     supabaseAdmin.from("profiles").select("*", { count: "exact", head: true }),
     supabaseAdmin.from("walk_sessions").select("*", { count: "exact", head: true }),
@@ -575,6 +583,8 @@ async function renderAdminDashboard() {
       .select("user_id, city, total_narrations, started_at")
       .order("started_at", { ascending: false })
       .limit(2000),
+    // No pagination — beta-week volume is expected to stay well under 100.
+    supabaseAdmin.from("feedback_reports").select("*").order("created_at", { ascending: false }).limit(100),
   ]);
 
   const allSessions = allSessionsForStatsResult.data || [];
@@ -612,6 +622,57 @@ async function renderAdminDashboard() {
     .map(([city, count]) => `<tr><td>${escapeHtml(city)}</td><td>${count}</td></tr>`)
     .join("");
 
+  // The feedback-screenshots bucket is private (see supabase/schema.sql) —
+  // a stored screenshot_url is a Storage PATH, not a usable URL on its own,
+  // so each one needs a fresh signed URL to actually be viewable here.
+  // 1 hour is comfortably longer than a single admin review session; these
+  // regenerate on every dashboard load anyway (which itself happens at
+  // least every 60s via the auto-refresh).
+  const feedbackReports = feedbackResult.data || [];
+  const screenshotPaths = feedbackReports.filter((r) => r.screenshot_url).map((r) => r.screenshot_url);
+  const signedUrlByPath = new Map();
+  if (screenshotPaths.length > 0) {
+    try {
+      const { data: signedUrlsData } = await supabaseAdmin.storage
+        .from("feedback-screenshots")
+        .createSignedUrls(screenshotPaths, 3600);
+      for (const entry of signedUrlsData || []) {
+        if (entry.path && entry.signedUrl) signedUrlByPath.set(entry.path, entry.signedUrl);
+      }
+    } catch (error) {
+      console.log("[debug] admin dashboard: failed to sign feedback screenshot URLs:", error?.message || error);
+    }
+  }
+
+  const feedbackRows = feedbackReports
+    .map((r) => {
+      const signedUrl = r.screenshot_url ? signedUrlByPath.get(r.screenshot_url) : null;
+      const screenshotCell = signedUrl
+        ? `<a href="${escapeHtml(signedUrl)}" target="_blank" rel="noopener"><img src="${escapeHtml(signedUrl)}" alt="Screenshot" style="max-width:72px; max-height:72px; border-radius:6px; display:block;" /></a>`
+        : "—";
+      const contextEntries = Object.entries(r.app_context || {});
+      const contextCell = contextEntries.length
+        ? contextEntries.map(([k, v]) => `${escapeHtml(k)}: ${escapeHtml(String(v))}`).join("<br/>")
+        : "—";
+      return `<tr>
+        <td style="white-space:nowrap;">${escapeHtml(new Date(r.created_at).toLocaleString())}</td>
+        <td style="max-width:260px; white-space:normal;">${escapeHtml(r.message)}</td>
+        <td>${screenshotCell}</td>
+        <td style="max-width:200px; white-space:normal; font-size:11px;">${contextCell}</td>
+        <td>
+          <form method="POST" action="/admin/feedback/${escapeHtml(r.id)}/status" style="display:flex; gap:6px; align-items:center;">
+            <select name="status">
+              <option value="new" ${r.status === "new" ? "selected" : ""}>new</option>
+              <option value="reviewed" ${r.status === "reviewed" ? "selected" : ""}>reviewed</option>
+              <option value="resolved" ${r.status === "resolved" ? "selected" : ""}>resolved</option>
+            </select>
+            <button type="submit">Save</button>
+          </form>
+        </td>
+      </tr>`;
+    })
+    .join("");
+
   return renderAdminShell(`
 <body>
   <meta http-equiv="refresh" content="60">
@@ -639,6 +700,12 @@ async function renderAdminDashboard() {
   </table>
 
   <p class="note">Estimated costs are approximations based on average usage (Claude narrations × $0.003, OpenAI TTS × $0.010, Google Places × $0.002 per narration), computed over the last ${allSessions.length} sessions.</p>
+
+  <h1 style="font-size:15px;">Feedback reports (${feedbackReports.length} most recent)</h1>
+  <table>
+    <tr><th>Reported</th><th>Message</th><th>Screenshot</th><th>Context</th><th>Status</th></tr>
+    ${feedbackRows || "<tr><td colspan='5'>No feedback reports yet.</td></tr>"}
+  </table>
 </body>`);
 }
 
@@ -673,6 +740,27 @@ app.get("/admin", async (req, res) => {
   } catch (error) {
     res.status(502).type("html").send(renderAdminShell(`<body><p>Failed to load dashboard data.</p></body>`));
   }
+});
+
+// Backs the status <select>/Save form in the feedback reports table above.
+// Same cookie-only auth as /admin itself — no separate API key, this is
+// only ever reachable from the admin dashboard's own HTML.
+app.post("/admin/feedback/:id/status", async (req, res) => {
+  const cookies = parseCookies(req);
+  if (!ADMIN_PASSWORD || cookies[ADMIN_SESSION_COOKIE] !== ADMIN_PASSWORD) {
+    return res.status(401).type("html").send(renderAdminLogin("Session expired — please log in again."));
+  }
+  if (!supabaseAdmin) {
+    return res.status(500).type("html").send(renderAdminLogin("Supabase is not configured on the server."));
+  }
+
+  const { status } = req.body || {};
+  if (!["new", "reviewed", "resolved"].includes(status)) {
+    return res.status(400).send("Invalid status.");
+  }
+
+  await supabaseAdmin.from("feedback_reports").update({ status }).eq("id", req.params.id);
+  res.redirect(303, "/admin");
 });
 
 const PRIVACY_EFFECTIVE_DATE = new Date().toLocaleDateString("en-US", {
@@ -864,6 +952,7 @@ const REQUIRED_TABLES = [
   "user_questions",
   "guide_personas",
   "interaction_events",
+  "feedback_reports",
 ];
 
 // supabase-js has no API for running arbitrary DDL, so this can't actually
@@ -2912,6 +3001,7 @@ const LOGGED_EVENT_TYPES = [
   "camera_identify_used",
   "session_duration",
   "onboarding_path_chosen",
+  "feedback_submitted",
 ];
 
 // Fire-and-forget from the client (app.js's logEvent) — never something the
@@ -2941,6 +3031,71 @@ app.post("/api/log-event", async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.json({ success: false });
+  }
+});
+
+// Settings > Report a Problem. Deliberately does NOT require sign-in
+// (userId is optional/nullable throughout) — a lot of real bugs surface
+// before someone's ever finished onboarding, and requiring an account
+// would just mean fewer testers bother reporting anything. The screenshot,
+// if present, arrives as a data URI (same convention /api/identify already
+// uses for the camera feature) and gets uploaded to the private
+// feedback-screenshots Storage bucket BEFORE the report row is inserted —
+// if the upload fails, the whole request fails rather than silently saving
+// a report with a broken screenshot reference.
+app.post("/api/feedback", async (req, res) => {
+  const { message, screenshotBase64, screenshotMediaType, userId, appContext } = req.body || {};
+  if (!message || !message.trim()) {
+    return res.status(400).json({ error: "A message is required." });
+  }
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: "Supabase is not configured on the server." });
+  }
+
+  let screenshotPath = null;
+  if (screenshotBase64) {
+    const resolvedMediaType = ["image/jpeg", "image/png", "image/webp"].includes(screenshotMediaType)
+      ? screenshotMediaType
+      : "image/jpeg";
+    const extension = resolvedMediaType.split("/")[1];
+    // Data URIs (data:image/jpeg;base64,....) come through from a
+    // <canvas>/<input type="file"> read — strip the prefix if present so
+    // we only upload the raw bytes.
+    const rawBase64 = screenshotBase64.includes(",") ? screenshotBase64.split(",").pop() : screenshotBase64;
+    const buffer = Buffer.from(rawBase64, "base64");
+
+    // Matches the feedback-screenshots bucket's own file_size_limit (see
+    // supabase/schema.sql) — checked here too so an oversized upload fails
+    // clearly instead of the bucket silently rejecting it mid-request.
+    if (buffer.length > 5 * 1024 * 1024) {
+      return res.status(400).json({ error: "Screenshot is too large (5MB max)." });
+    }
+
+    const path = `${userId || "anonymous"}/${Date.now()}-${crypto.randomUUID()}.${extension}`;
+    try {
+      const { error: uploadError } = await supabaseAdmin.storage
+        .from("feedback-screenshots")
+        .upload(path, buffer, { contentType: resolvedMediaType });
+      if (uploadError) throw uploadError;
+      screenshotPath = path;
+    } catch (error) {
+      console.log("[debug] feedback screenshot upload failed:", error?.message || error);
+      return res.status(502).json({ error: "Failed to upload screenshot — please try again." });
+    }
+  }
+
+  try {
+    const { error } = await supabaseAdmin.from("feedback_reports").insert({
+      user_id: userId || null,
+      message: message.trim(),
+      screenshot_url: screenshotPath,
+      app_context: appContext && typeof appContext === "object" ? appContext : {},
+    });
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    console.log("[debug] /api/feedback insert failed:", error?.message || error);
+    res.status(502).json({ error: "Failed to save your report — please try again." });
   }
 });
 

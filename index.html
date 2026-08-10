@@ -771,6 +771,14 @@
         </div>
       </section>
 
+      <!-- Deliberately outside account-signed-in/account-guest — reporting a
+           problem should never require being signed in. See openFeedbackForm
+           in app.js and /api/feedback in server.js. -->
+      <section class="settings-section">
+        <h3 class="settings-section-title">Support</h3>
+        <button id="report-problem-btn" class="account-btn account-btn--outline">Report a Problem</button>
+      </section>
+
       <section class="settings-about">
         <p>Sabri v1.0 — Your personal AI tour guide, everywhere you go.</p>
         <button id="reset-onboarding-btn" class="reset-onboarding-btn">Reset onboarding</button>
@@ -783,6 +791,44 @@
           <button id="delete-account-confirm-btn" class="delete-account-confirm-btn">Yes, delete everything</button>
         </p>
         <p><a href="/privacy" class="privacy-link">Privacy Policy</a></p>
+      </section>
+    </div>
+  </aside>
+
+  <!-- Report a Problem — reachable from Settings > Support, signed in or
+       not. Reuses the settings-drawer shell (same pattern as
+       preferences-overlay/preferences-drawer). See openFeedbackForm /
+       closeFeedbackForm / submitFeedbackReport in app.js. -->
+  <div id="feedback-overlay" class="settings-overlay hidden"></div>
+  <aside id="feedback-drawer" class="settings-drawer" aria-hidden="true">
+    <div class="settings-drawer-header">
+      <h2>Report a Problem</h2>
+      <button id="feedback-close" class="drawer-close" aria-label="Close report a problem">✕</button>
+    </div>
+
+    <div class="settings-drawer-body">
+      <section class="settings-section">
+        <h3 class="settings-section-title">What happened? Be as specific as you can.</h3>
+        <textarea
+          id="feedback-message-input"
+          class="feedback-textarea"
+          rows="5"
+          placeholder="e.g. The narration cut out when I tapped a pin near..."
+        ></textarea>
+
+        <label for="feedback-screenshot-input" class="feedback-screenshot-label">
+          Attach a screenshot (optional)
+        </label>
+        <input id="feedback-screenshot-input" type="file" accept="image/*" class="feedback-screenshot-input" />
+        <div id="feedback-screenshot-preview" class="feedback-screenshot-preview hidden">
+          <img id="feedback-screenshot-preview-img" alt="Screenshot preview" />
+          <button id="feedback-screenshot-remove-btn" class="feedback-screenshot-remove-btn" aria-label="Remove screenshot">✕</button>
+        </div>
+
+        <p id="feedback-error" class="feedback-error hidden"></p>
+        <p id="feedback-confirm" class="feedback-confirm hidden">Thanks — got it!</p>
+
+        <button id="feedback-submit-btn" class="account-btn account-btn--gold feedback-submit-btn">Submit</button>
       </section>
     </div>
   </aside>

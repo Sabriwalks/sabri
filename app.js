@@ -78,6 +78,19 @@ const preferencesDepthPills = document.querySelectorAll("#preferences-drawer .de
 const preferencesLanguageSelect = document.getElementById("preferences-language");
 const preferencesSaveBtn = document.getElementById("preferences-save-btn");
 
+const reportProblemBtn = document.getElementById("report-problem-btn");
+const feedbackDrawer = document.getElementById("feedback-drawer");
+const feedbackOverlay = document.getElementById("feedback-overlay");
+const feedbackClose = document.getElementById("feedback-close");
+const feedbackMessageInput = document.getElementById("feedback-message-input");
+const feedbackScreenshotInput = document.getElementById("feedback-screenshot-input");
+const feedbackScreenshotPreview = document.getElementById("feedback-screenshot-preview");
+const feedbackScreenshotPreviewImg = document.getElementById("feedback-screenshot-preview-img");
+const feedbackScreenshotRemoveBtn = document.getElementById("feedback-screenshot-remove-btn");
+const feedbackError = document.getElementById("feedback-error");
+const feedbackConfirm = document.getElementById("feedback-confirm");
+const feedbackSubmitBtn = document.getElementById("feedback-submit-btn");
+
 const tourModeModal = document.getElementById("tour-mode-modal");
 const tourModeClose = document.getElementById("tour-mode-close");
 const tourModeWanderBtn = document.getElementById("tour-mode-wander-btn");
@@ -2108,6 +2121,166 @@ if (preferencesSaveBtn) {
     updateAccountSettingsUI();
     closePreferences();
     showToast("Preferences updated");
+  });
+}
+
+// --- Report a Problem (Settings > Support) ---
+// Deliberately reachable whether or not the tester has signed in — see
+// /api/feedback in server.js and feedback_reports in supabase/schema.sql.
+// Kept intentionally lightweight: one textarea, one optional screenshot,
+// one submit button, no categories/severity — the goal is a tester filing
+// this mid-walk without breaking stride.
+
+// A rough, best-effort snapshot of "what screen was the tester looking at"
+// — not a real state machine, just checks which top-level overlay (if any)
+// is currently visible. Good enough for triage context; see app_context in
+// the feedback_reports schema comment for the full rationale.
+function getCurrentAppScreen() {
+  if (onboarding && !onboarding.classList.contains("hidden")) return "onboarding";
+  if (cameraOverlay && !cameraOverlay.classList.contains("hidden")) return "camera";
+  if (tourPlanner && !tourPlanner.classList.contains("hidden")) return "guided_tour_planner";
+  if (settingsDrawer && settingsDrawer.classList.contains("is-open")) return "settings";
+  return "wander_mode";
+}
+
+async function getServiceWorkerVersion() {
+  if (!("caches" in window)) return null;
+  try {
+    const keys = await caches.keys();
+    return keys.find((key) => key.startsWith("sabri-cache-")) || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+let feedbackScreenshotDataUrl = null;
+
+function resetFeedbackForm() {
+  feedbackMessageInput.value = "";
+  feedbackScreenshotInput.value = "";
+  feedbackScreenshotDataUrl = null;
+  feedbackScreenshotPreview.classList.add("hidden");
+  feedbackScreenshotPreviewImg.src = "";
+  feedbackError.classList.add("hidden");
+  feedbackError.textContent = "";
+  feedbackConfirm.classList.add("hidden");
+  feedbackSubmitBtn.disabled = false;
+  feedbackSubmitBtn.textContent = "Submit";
+}
+
+function openFeedbackForm() {
+  closeSettings();
+  resetFeedbackForm();
+  feedbackDrawer.classList.add("is-open");
+  feedbackDrawer.setAttribute("aria-hidden", "false");
+  feedbackOverlay.classList.remove("hidden");
+}
+
+function closeFeedbackForm() {
+  feedbackDrawer.classList.remove("is-open");
+  feedbackDrawer.setAttribute("aria-hidden", "true");
+  feedbackOverlay.classList.add("hidden");
+}
+
+if (reportProblemBtn) reportProblemBtn.addEventListener("click", openFeedbackForm);
+if (feedbackClose) feedbackClose.addEventListener("click", closeFeedbackForm);
+if (feedbackOverlay) feedbackOverlay.addEventListener("click", closeFeedbackForm);
+
+if (feedbackScreenshotInput) {
+  feedbackScreenshotInput.addEventListener("change", () => {
+    const file = feedbackScreenshotInput.files && feedbackScreenshotInput.files[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      feedbackError.textContent = "Please choose an image file.";
+      feedbackError.classList.remove("hidden");
+      feedbackScreenshotInput.value = "";
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      feedbackError.textContent = "That screenshot is too large (5MB max).";
+      feedbackError.classList.remove("hidden");
+      feedbackScreenshotInput.value = "";
+      return;
+    }
+    feedbackError.classList.add("hidden");
+    const reader = new FileReader();
+    reader.onload = () => {
+      feedbackScreenshotDataUrl = reader.result;
+      feedbackScreenshotPreviewImg.src = feedbackScreenshotDataUrl;
+      feedbackScreenshotPreview.classList.remove("hidden");
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+if (feedbackScreenshotRemoveBtn) {
+  feedbackScreenshotRemoveBtn.addEventListener("click", () => {
+    feedbackScreenshotInput.value = "";
+    feedbackScreenshotDataUrl = null;
+    feedbackScreenshotPreview.classList.add("hidden");
+    feedbackScreenshotPreviewImg.src = "";
+  });
+}
+
+if (feedbackSubmitBtn) {
+  feedbackSubmitBtn.addEventListener("click", async () => {
+    const message = feedbackMessageInput.value.trim();
+    if (!message) {
+      feedbackError.textContent = "Let us know what happened before submitting.";
+      feedbackError.classList.remove("hidden");
+      return;
+    }
+
+    feedbackError.classList.add("hidden");
+    feedbackSubmitBtn.disabled = true;
+    feedbackSubmitBtn.textContent = "Submitting...";
+
+    const serviceWorkerVersion = await getServiceWorkerVersion();
+    const appContext = {
+      screen: getCurrentAppScreen(),
+      city: currentCity || null,
+      session_id: currentSessionId || null,
+      service_worker_version: serviceWorkerVersion,
+      user_agent: navigator.userAgent,
+    };
+
+    let screenshotBase64 = null;
+    let screenshotMediaType = null;
+    if (feedbackScreenshotDataUrl) {
+      const match = /^data:([^;]+);base64,/.exec(feedbackScreenshotDataUrl);
+      screenshotMediaType = match ? match[1] : "image/jpeg";
+      screenshotBase64 = feedbackScreenshotDataUrl;
+    }
+
+    try {
+      const response = await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          screenshotBase64,
+          screenshotMediaType,
+          userId: currentUser ? currentUser.id : null,
+          appContext,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || "Failed to submit — please try again.");
+      }
+
+      logEvent("feedback_submitted", { hasScreenshot: Boolean(screenshotBase64), screen: appContext.screen });
+
+      feedbackConfirm.classList.remove("hidden");
+      feedbackSubmitBtn.textContent = "Submit";
+      feedbackSubmitBtn.disabled = false;
+      setTimeout(closeFeedbackForm, 1200);
+    } catch (error) {
+      feedbackError.textContent = error.message || "Failed to submit — please try again.";
+      feedbackError.classList.remove("hidden");
+      feedbackSubmitBtn.disabled = false;
+      feedbackSubmitBtn.textContent = "Submit";
+    }
   });
 }
 
