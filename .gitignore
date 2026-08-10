@@ -6,3 +6,6 @@ node_modules/
 # (index.html, app.js, style.css, etc. at repo root) via `npm run
 # build:capacitor` before `npx cap sync`. Never edit files in here directly.
 www/
+
+.vercel
+.env*

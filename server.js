@@ -759,7 +759,8 @@ app.post("/admin/feedback/:id/status", async (req, res) => {
     return res.status(400).send("Invalid status.");
   }
 
-  await supabaseAdmin.from("feedback_reports").update({ status }).eq("id", req.params.id);
+  const { error } = await supabaseAdmin.from("feedback_reports").update({ status }).eq("id", req.params.id);
+  if (error) console.error("[supabase] feedback_reports status update failed:", error.message);
   res.redirect(303, "/admin");
 });
 
@@ -965,12 +966,22 @@ async function checkDbSetup() {
   }
 
   const missingTables = [];
+  // "missingTables" is a misnomer carried over from before this logged
+  // anything — a table showing up here can also mean it exists but the
+  // configured key can't read it (wrong key, stale/rotated key, missing
+  // grants), which reads identically to "doesn't exist" from a plain
+  // count query. tableErrors captures the real reason for each.
+  const tableErrors = {};
   for (const table of REQUIRED_TABLES) {
     const { error } = await supabaseAdmin.from(table).select("*", { head: true, count: "exact" }).limit(1);
-    if (error) missingTables.push(table);
+    if (error) {
+      missingTables.push(table);
+      tableErrors[table] = error.message;
+      console.error(`[supabase] setup check failed for "${table}":`, error.message);
+    }
   }
 
-  return { ok: missingTables.length === 0, configured: true, missingTables };
+  return { ok: missingTables.length === 0, configured: true, missingTables, tableErrors };
 }
 
 app.post("/api/setup-db", async (req, res) => {
@@ -1202,12 +1213,17 @@ app.post("/api/get-persona", async (req, res) => {
   }
 
   try {
-    const { data: existing } = await supabaseAdmin
+    const { data: existing, error: lookupError } = await supabaseAdmin
       .from("guide_personas")
       .select("*")
       .eq("city", city)
       .eq("archetype", archetype)
       .maybeSingle();
+
+    // Doesn't abort the request — worst case a cache-lookup failure means
+    // regenerating (and re-paying for) a persona that already exists, not
+    // data loss. Still worth knowing about if it's happening on every call.
+    if (lookupError) console.error("[supabase] guide_personas select failed:", lookupError.message);
 
     if (existing) {
       return res.json({ persona: existing, cached: true });
@@ -1275,7 +1291,10 @@ app.post("/api/get-persona", async (req, res) => {
       .select()
       .single();
 
-    if (error) return res.status(502).json({ error: "Failed to save the generated persona." });
+    if (error) {
+      console.error("[supabase] guide_personas upsert failed:", error.message || error);
+      return res.status(502).json({ error: "Failed to save the generated persona." });
+    }
     res.json({ persona: inserted, cached: false });
   } catch (error) {
     res.status(502).json({ error: "Failed to get a guide persona." });
@@ -2872,7 +2891,10 @@ app.post("/api/auth/save-profile", async (req, res) => {
 
   const { error } = await supabaseAdmin.from("profiles").upsert(row, { onConflict: "id" });
 
-  if (error) return res.status(502).json({ error: "Failed to save profile." });
+  if (error) {
+    console.error("[supabase] profiles upsert failed:", error.message || error);
+    return res.status(502).json({ error: "Failed to save profile." });
+  }
   res.json({ success: true });
 });
 
@@ -2894,7 +2916,10 @@ app.post("/api/auth/save-visit", async (req, res) => {
     narration_summary: narrationSummary ? String(narrationSummary).slice(0, 200) : null,
   });
 
-  if (error) return res.status(502).json({ error: "Failed to save visit." });
+  if (error) {
+    console.error("[supabase] visited_places insert failed:", error.message || error);
+    return res.status(502).json({ error: "Failed to save visit." });
+  }
   res.json({ success: true });
 });
 
@@ -2916,7 +2941,10 @@ app.post("/api/auth/save-question", async (req, res) => {
     answer_summary: answerSummary ? String(answerSummary).slice(0, 200) : null,
   });
 
-  if (error) return res.status(502).json({ error: "Failed to save question." });
+  if (error) {
+    console.error("[supabase] user_questions insert failed:", error.message || error);
+    return res.status(502).json({ error: "Failed to save question." });
+  }
   res.json({ success: true });
 });
 
@@ -2941,6 +2969,15 @@ app.get("/api/auth/user-history", async (req, res) => {
         .limit(3),
       supabaseAdmin.from("profiles").select("*").eq("id", userId).maybeSingle(),
     ]);
+
+    // None of these throw on a PostgREST-level error (bad key, missing
+    // grants, RLS) — only on a genuine network failure, caught below. Log
+    // each explicitly so a returning user silently looking brand-new (empty
+    // profile/history) is diagnosable instead of indistinguishable from
+    // "this really is a new user."
+    if (placesResult.error) console.error("[supabase] visited_places select failed:", placesResult.error.message);
+    if (sessionsResult.error) console.error("[supabase] walk_sessions select failed:", sessionsResult.error.message);
+    if (profileResult.error) console.error("[supabase] profiles select failed:", profileResult.error.message);
 
     res.json({
       profile: profileResult.data || null,
@@ -2967,7 +3004,10 @@ app.post("/api/auth/save-session", async (req, res) => {
     questions_asked: Number.isFinite(questionsAsked) ? questionsAsked : 0,
   });
 
-  if (error) return res.status(502).json({ error: "Failed to save session." });
+  if (error) {
+    console.error("[supabase] walk_sessions insert failed:", error.message || error);
+    return res.status(502).json({ error: "Failed to save session." });
+  }
   res.json({ success: true });
 });
 
@@ -3021,15 +3061,26 @@ app.post("/api/log-event", async (req, res) => {
   }
 
   try {
-    await supabaseAdmin.from("interaction_events").insert({
+    // supabase-js only throws on a genuine network failure — a rejected
+    // insert (bad key, missing grants, RLS) comes back as {error} without
+    // throwing, so it has to be checked explicitly or this silently reports
+    // success on every failure (this was the actual prior behavior; see
+    // CAPACITOR_NOTES.md-adjacent incident writeup for how that went
+    // unnoticed).
+    const { error } = await supabaseAdmin.from("interaction_events").insert({
       user_id: userId,
       session_id: sessionId || null,
       event_type: eventType,
       event_data: eventData && typeof eventData === "object" ? eventData : {},
       city: city || null,
     });
+    if (error) {
+      console.error("[supabase] interaction_events insert failed:", error.message || error);
+      return res.json({ success: false });
+    }
     res.json({ success: true });
   } catch (error) {
+    console.error("[supabase] interaction_events insert threw:", error.message || error);
     res.json({ success: false });
   }
 });
@@ -3166,13 +3217,15 @@ app.post("/api/infer-interests", async (req, res) => {
     const textBlock = message.content.find((block) => block.type === "text");
     const parsed = textBlock ? JSON.parse(textBlock.text) : { inferredInterests: [] };
 
-    await supabaseAdmin
+    const { error: updateError } = await supabaseAdmin
       .from("profiles")
       .update({ inferred_interests: parsed.inferredInterests || [] })
       .eq("id", userId);
+    if (updateError) console.error("[supabase] profiles.inferred_interests update failed:", updateError.message);
 
     res.json({ inferredInterests: parsed.inferredInterests || [] });
   } catch (error) {
+    console.error("[supabase] inferInterestsForUser threw:", error.message || error);
     res.status(502).json({ error: "Failed to infer interests." });
   }
 });
@@ -3186,16 +3239,31 @@ app.delete("/api/auth/delete-account", async (req, res) => {
   if (!supabaseAdmin) return res.status(500).json({ error: "Supabase is not configured on the server." });
 
   try {
-    await Promise.all([
+    // Mostly defensive — profiles.id references auth.users with `on delete
+    // cascade`, and every other table here references profiles the same
+    // way, so deleteUser() below cascades through all of them regardless.
+    // Still checked explicitly so a partial failure here is visible rather
+    // than assumed-fine.
+    const deleteResults = await Promise.all([
       supabaseAdmin.from("visited_places").delete().eq("user_id", userId),
       supabaseAdmin.from("walk_sessions").delete().eq("user_id", userId),
       supabaseAdmin.from("user_questions").delete().eq("user_id", userId),
       supabaseAdmin.from("interaction_events").delete().eq("user_id", userId),
       supabaseAdmin.from("profiles").delete().eq("id", userId),
     ]);
-    await supabaseAdmin.auth.admin.deleteUser(userId);
+    const deleteTables = ["visited_places", "walk_sessions", "user_questions", "interaction_events", "profiles"];
+    deleteResults.forEach((result, i) => {
+      if (result.error) console.error(`[supabase] ${deleteTables[i]} delete failed:`, result.error.message);
+    });
+
+    const { error: authDeleteError } = await supabaseAdmin.auth.admin.deleteUser(userId);
+    if (authDeleteError) {
+      console.error("[supabase] auth.admin.deleteUser failed:", authDeleteError.message);
+      return res.status(502).json({ error: "Failed to delete account." });
+    }
     res.json({ success: true });
   } catch (error) {
+    console.error("[supabase] delete-account threw:", error.message || error);
     res.status(502).json({ error: "Failed to delete account." });
   }
 });
