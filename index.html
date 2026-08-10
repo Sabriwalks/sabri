@@ -8,7 +8,14 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Sabri" />
-  <link rel="apple-touch-icon" href="/icon-512.png" />
+  <link rel="apple-touch-icon" href="/icon-180.png" />
+  <!-- Browser tab favicon — favicon.ico is a tight crop of just the cactus
+       (the full desert scene turns muddy at 16x16/32x32); the larger PNG
+       variants below use the full illustration, where the detail reads
+       fine. See scripts/generate-icons.ps1. -->
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
   <title>Sabri — AI Audio Tour Guide</title>
   <link rel="stylesheet" href="/style.css" />
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -460,6 +467,33 @@
     <div class="camera-frame" aria-hidden="true"></div>
     <button id="camera-close-btn" class="camera-close-btn" aria-label="Close camera">✕</button>
     <button id="camera-identify-btn" class="camera-identify-btn">Identify this</button>
+
+    <!-- Loading state while the captured frame is with Claude — mirrors the
+         onboarding-chat-loading wave+text pattern used elsewhere. -->
+    <div id="camera-loading" class="camera-loading hidden">
+      <span class="narration-wave" aria-hidden="true"><span></span><span></span><span></span></span>
+      <span>Sabri is looking...</span>
+    </div>
+  </div>
+
+  <!-- Shown in place of the live preview when getUserMedia is denied/
+       unavailable — explains why Sabri wants camera access and how to
+       re-enable it, rather than a silent failure or a bare toast. -->
+  <div id="camera-permission-denied" class="camera-overlay camera-permission-denied hidden">
+    <button id="camera-permission-close-btn" class="camera-close-btn" aria-label="Close camera">✕</button>
+    <div class="camera-permission-content">
+      <p class="camera-permission-icon" aria-hidden="true">📷</p>
+      <h3 class="camera-permission-title">Sabri needs your camera</h3>
+      <p id="camera-permission-message" class="camera-permission-message">
+        Point-and-learn uses your camera to identify what you're looking at — nothing is saved or shared, it's
+        just sent once to figure out what you're seeing.
+      </p>
+      <p id="camera-permission-hint" class="camera-permission-hint hidden">
+        Looks like camera access was blocked earlier. Enable it for this site in your browser's site settings
+        (usually the 🔒 or ⓘ icon next to the address bar), then try again.
+      </p>
+      <button id="camera-permission-retry-btn" class="camera-identify-btn camera-permission-retry-btn">Try Again</button>
+    </div>
   </div>
 
   <!-- Tour mode selector — shown instead of immediately starting GPS when
@@ -899,6 +933,14 @@
     </div>
   </div>
 
+  <!-- Capacitor's native bridge — only exists inside the native app bundle
+       (cap sync generates a real capacitor.js in ios/App/App/public/ from
+       @capacitor/core; this 404s harmlessly on the plain web PWA, where
+       Express has no such file and window.Capacitor is simply never
+       defined). Every native-vs-web branch in app.js checks
+       window.Capacitor?.isNativePlatform?.() before using it — see
+       CAPACITOR_NOTES.md. -->
+  <script src="capacitor.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -5,7 +5,8 @@
   "main": "app.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build:capacitor": "node scripts/build-capacitor-www.js"
   },
   "keywords": [],
   "author": "",
@@ -16,6 +17,12 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.112.1",
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/browser": "^8.0.4",
+    "@capacitor/cli": "^8.5.0",
+    "@capacitor/core": "^8.5.0",
+    "@capacitor/geolocation": "^8.2.1",
+    "@capacitor/ios": "^8.5.0",
     "@supabase/supabase-js": "^2.110.8",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",

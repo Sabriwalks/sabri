@@ -1732,6 +1732,75 @@ body {
   transform: translateX(-50%) scale(0.97);
 }
 
+.camera-identify-btn:disabled {
+  opacity: 0.6;
+}
+
+/* Loading state while the captured frame is with Claude — a translucent
+   layer over the (now-frozen-looking) preview so it's unmistakably "working
+   on it", not stuck. */
+.camera-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: rgba(15, 27, 45, 0.55);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  color: var(--white);
+  font-size: 15px;
+  font-weight: 500;
+}
+
+/* Permission-denied state — replaces the live preview entirely (there's
+   nothing to show without camera access) with an explanation and a retry
+   action, rather than a silent failure or a bare toast. */
+.camera-permission-denied {
+  background: var(--bg);
+  padding: 24px;
+}
+
+.camera-permission-content {
+  max-width: 340px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.camera-permission-icon {
+  font-size: 40px;
+  opacity: 0.85;
+}
+
+.camera-permission-title {
+  font-family: var(--font-serif);
+  font-size: 21px;
+  color: var(--white);
+}
+
+.camera-permission-message,
+.camera-permission-hint {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.camera-permission-hint {
+  color: var(--gold);
+}
+
+.camera-permission-retry-btn {
+  position: static;
+  transform: none;
+  margin-top: 8px;
+}
+
 /* Delete account + privacy link — bottom of the settings drawer. */
 .settings-danger {
   margin-top: 12px;

@@ -19,6 +19,12 @@ const cameraVideo = document.getElementById("camera-video");
 const cameraCanvas = document.getElementById("camera-canvas");
 const cameraCloseBtn = document.getElementById("camera-close-btn");
 const cameraIdentifyBtn = document.getElementById("camera-identify-btn");
+const cameraLoading = document.getElementById("camera-loading");
+const cameraPermissionDenied = document.getElementById("camera-permission-denied");
+const cameraPermissionMessage = document.getElementById("camera-permission-message");
+const cameraPermissionHint = document.getElementById("camera-permission-hint");
+const cameraPermissionCloseBtn = document.getElementById("camera-permission-close-btn");
+const cameraPermissionRetryBtn = document.getElementById("camera-permission-retry-btn");
 const deleteAccountBtn = document.getElementById("delete-account-btn");
 const deleteAccountConfirm = document.getElementById("delete-account-confirm");
 const deleteAccountConfirmBtn = document.getElementById("delete-account-confirm-btn");
@@ -1103,7 +1109,73 @@ if (onboardingSigninExistingBtn) {
   });
 }
 
+// --- Native Google Sign-In (Capacitor) ---
+// Google's OAuth policy explicitly disallows embedded/in-app-WebView sign-in
+// (it detects "embedded user-agents" and blocks them with a "this browser
+// or app may not be secure" error) — inside the native app, the consent
+// screen MUST open in the real system browser via @capacitor/browser, not
+// this app's own WKWebView. The redirect back into the app then needs a
+// custom URL scheme (registered in Info.plist's CFBundleURLTypes — see
+// CAPACITOR_NOTES.md) that @capacitor/app's appUrlOpen listener catches.
+//
+// IMPORTANT — this is implemented per Supabase + Capacitor's documented
+// pattern but has NOT been verified on a real device/simulator (none
+// available in this environment): the exact session-exchange call
+// (exchangeCodeForSession) should be re-checked against the installed
+// @supabase/supabase-js version's current docs, and this whole flow also
+// needs the custom-scheme redirect URL added to the Supabase dashboard's
+// allowed redirect URLs before it can work at all. See CAPACITOR_NOTES.md.
+const NATIVE_OAUTH_REDIRECT_URL = "com.getsabri.app://auth/callback";
+
+async function signInWithGoogleNative() {
+  const capBrowser = window.Capacitor?.Plugins?.Browser;
+  if (!supabaseClient || !capBrowser) {
+    showToast("Sign in isn't available right now.");
+    return;
+  }
+
+  try {
+    const { data, error } = await supabaseClient.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: NATIVE_OAUTH_REDIRECT_URL,
+        skipBrowserRedirect: true, // we open the URL ourselves, in the system browser below
+      },
+    });
+    if (error) throw error;
+    if (data?.url) {
+      await capBrowser.open({ url: data.url });
+    }
+  } catch (error) {
+    console.log("[debug] signInWithGoogleNative failed:", error?.message || error);
+    showToast("Sign in failed — please try again.");
+  }
+}
+
+if (isCapacitorNative()) {
+  const capApp = window.Capacitor?.Plugins?.App;
+  if (capApp) {
+    capApp.addListener("appUrlOpen", async ({ url }) => {
+      if (!url || !url.startsWith(NATIVE_OAUTH_REDIRECT_URL)) return;
+      const capBrowser = window.Capacitor?.Plugins?.Browser;
+      if (capBrowser) capBrowser.close().catch(() => {});
+      try {
+        const { data, error } = await supabaseClient.auth.exchangeCodeForSession(url);
+        if (error) throw error;
+        if (data?.session) await handleOAuthSignIn(data.session);
+      } catch (error) {
+        console.log("[debug] native OAuth callback failed:", error?.message || error);
+        showToast("Sign in failed — please try again.");
+      }
+    });
+  }
+}
+
 async function signInWithGoogle() {
+  if (isCapacitorNative()) {
+    return signInWithGoogleNative();
+  }
+
   console.log("Sign in button tapped");
   console.log(
     "[debug] supabaseClient exists:",
@@ -2052,7 +2124,14 @@ if (preferencesSaveBtn) {
 // user actually taps it. If they never tap it, the next NATURAL cold open
 // of the app already gets the new worker (since it activated immediately),
 // so nothing is ever permanently stuck on the old version.
-if ("serviceWorker" in navigator) {
+//
+// Skipped entirely inside the native Capacitor app: it bundles its own
+// assets locally and updates via the App Store, not live cache
+// invalidation — registering a service worker there would be pure
+// overhead at best, and at worst an unknown interaction with the native
+// WebView's own lifecycle (backgrounding/foregrounding) that was never
+// designed for or tested. See CAPACITOR_NOTES.md.
+if ("serviceWorker" in navigator && !isCapacitorNative()) {
   window.addEventListener("load", () => {
     navigator.serviceWorker
       .register("/service-worker.js")
@@ -2082,23 +2161,39 @@ if ("serviceWorker" in navigator) {
       .catch(() => {});
   });
 
-  // Reloads exactly once when the new worker actually takes control —
-  // guarded so rapid/duplicate taps on the update button (which could each
-  // independently trigger a controllerchange) can never cause a reload
-  // loop.
-  let hasReloadedForUpdate = false;
+  // Reloads when the new worker actually takes control — but ONLY if the
+  // user actually tapped the update banner (userRequestedUpdate, set below).
+  //
+  // This guard is the fix for a real production bug: service-worker.js's
+  // self.skipWaiting() (install) and self.clients.claim() (activate) are
+  // BOTH unconditional by design (see the comment above), so a new worker
+  // silently self-activates and claims every open page on its own,
+  // completely independent of whether anyone ever saw or tapped the
+  // banner. Without this guard, *every* controllerchange event — including
+  // one firing on a totally ordinary page load that just happens to
+  // coincide with a fresh deploy activating — triggered an unrequested
+  // location.reload(). The Google OAuth sign-in flow full-page-navigates
+  // to accounts.google.com and back, landing on a freshly loaded page at
+  // exactly the moment bootstrapApp()/handleOAuthSignIn() are mid-flight
+  // parsing the returned session — an unrequested reload right then aborts
+  // that in-progress resume, which is what "looks like it's working then
+  // bounces back to onboarding" actually was.
   navigator.serviceWorker.addEventListener("controllerchange", () => {
-    if (hasReloadedForUpdate) return;
+    if (hasReloadedForUpdate || !userRequestedUpdate) return;
     hasReloadedForUpdate = true;
     window.location.reload();
   });
 }
+
+let hasReloadedForUpdate = false;
+let userRequestedUpdate = false;
 
 function showUpdateBanner(registration) {
   if (!updateBanner || updateBanner.classList.contains("is-visible")) return;
   updateBanner.classList.add("is-visible");
   updateBannerCta.onclick = () => {
     updateBannerCta.disabled = true;
+    userRequestedUpdate = true;
     const waitingWorker = registration.waiting;
     if (waitingWorker) {
       waitingWorker.postMessage({ type: "SKIP_WAITING" });
@@ -2167,7 +2262,11 @@ function configureInstallBannerForAndroid() {
 
 installBannerClose.addEventListener("click", dismissInstallBanner);
 
-if (isIosSafari && !isStandalone) {
+// "Install to your home screen" is meaningless inside the native app —
+// it's already installed. Guarded out entirely there rather than relying
+// on isStandalone/beforeinstallprompt to naturally not fire, since neither
+// is guaranteed never to fire inside a native WebView.
+if (isIosSafari && !isStandalone && !isCapacitorNative()) {
   configureInstallBannerForIos();
   setTimeout(showInstallBanner, 3000);
 }
@@ -2175,7 +2274,7 @@ if (isIosSafari && !isStandalone) {
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
   deferredInstallPrompt = event;
-  if (!isIosSafari) {
+  if (!isIosSafari && !isCapacitorNative()) {
     configureInstallBannerForAndroid();
     showInstallBanner();
   }
@@ -2865,12 +2964,12 @@ if (plannerStep0NextBtn) {
 
 if (plannerUseCurrentLocationBtn) {
   plannerUseCurrentLocationBtn.addEventListener("click", () => {
-    if (!("geolocation" in navigator)) {
+    if (!hasGeolocationSupport()) {
       showToast("Location isn't available on this device");
       return;
     }
     plannerUseCurrentLocationBtn.textContent = "Locating...";
-    navigator.geolocation.getCurrentPosition(
+    geoGetCurrentPosition(
       async (position) => {
         const { latitude, longitude } = position.coords;
         let name = "Current location";
@@ -3097,11 +3196,11 @@ if (plannedTourStartBtn) {
     // watchPosition hasn't produced any reading yet at this exact moment.
     const firstStopPlace = plannedTour.stops[0]?.place;
     const distanceToStart = await new Promise((resolve) => {
-      if (!firstStopPlace || !("geolocation" in navigator)) {
+      if (!firstStopPlace || !hasGeolocationSupport()) {
         resolve(0);
         return;
       }
-      navigator.geolocation.getCurrentPosition(
+      geoGetCurrentPosition(
         (position) =>
           resolve(
             distanceInMeters(
@@ -3462,14 +3561,58 @@ async function handleCameraTap() {
   try {
     cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
     cameraVideo.srcObject = cameraStream;
+    if (cameraPermissionDenied) cameraPermissionDenied.classList.add("hidden");
     cameraOverlay.classList.remove("hidden");
   } catch (error) {
-    showToast("Camera permission denied");
+    showCameraPermissionDenied(error);
   }
+}
+
+// Replaces the bare "Camera permission denied" toast — explains WHY Sabri
+// wants camera access and, specifically for the "previously blocked" case
+// (NotAllowedError/SecurityError on a repeat attempt), how to actually
+// re-enable it, since a silent failure or generic toast leaves the user
+// with no path forward.
+function showCameraPermissionDenied(error) {
+  if (!cameraPermissionDenied) {
+    showToast("Camera permission denied");
+    return;
+  }
+  cameraOverlay.classList.add("hidden");
+
+  const wasBlocked = error && (error.name === "NotAllowedError" || error.name === "SecurityError");
+  const noCameraFound = error && (error.name === "NotFoundError" || error.name === "OverconstrainedError");
+
+  if (noCameraFound) {
+    cameraPermissionMessage.textContent =
+      "No camera was found on this device — point-and-learn needs one to identify what you're looking at.";
+  } else {
+    cameraPermissionMessage.textContent =
+      "Point-and-learn uses your camera to identify what you're looking at — nothing is saved or shared, it's " +
+      "just sent once to figure out what you're seeing.";
+  }
+  cameraPermissionHint.classList.toggle("hidden", !wasBlocked);
+  cameraPermissionRetryBtn.classList.toggle("hidden", noCameraFound);
+  cameraPermissionDenied.classList.remove("hidden");
+}
+
+if (cameraPermissionRetryBtn) {
+  cameraPermissionRetryBtn.addEventListener("click", () => {
+    cameraPermissionDenied.classList.add("hidden");
+    handleCameraTap();
+  });
+}
+
+if (cameraPermissionCloseBtn) {
+  cameraPermissionCloseBtn.addEventListener("click", () => {
+    cameraPermissionDenied.classList.add("hidden");
+  });
 }
 
 function closeCameraOverlay() {
   cameraOverlay.classList.add("hidden");
+  if (cameraPermissionDenied) cameraPermissionDenied.classList.add("hidden");
+  if (cameraLoading) cameraLoading.classList.add("hidden");
   if (cameraStream) {
     cameraStream.getTracks().forEach((track) => track.stop());
     cameraStream = null;
@@ -3480,11 +3623,25 @@ if (cameraCloseBtn) {
   cameraCloseBtn.addEventListener("click", closeCameraOverlay);
 }
 
+// In-character, spoken failure message — matches how every other failure
+// in the app (narration, Q&A) stays in Sabri's voice rather than a raw
+// error, and is spoken aloud since this app is voice-first throughout.
+function handleIdentifyFailure() {
+  const message = "Hmm, I couldn't quite make that out — want to try again?";
+  showToast(message);
+  speakNarration(message).catch(() => {});
+}
+
 if (cameraIdentifyBtn) {
   cameraIdentifyBtn.addEventListener("click", async () => {
     if (isIdentifying || !cameraStream) return;
     isIdentifying = true;
-    cameraIdentifyBtn.textContent = "Looking...";
+    cameraIdentifyBtn.disabled = true;
+    // Loading state layers OVER the still-live (but now static-looking)
+    // preview for the few seconds Claude is processing the frame — matches
+    // the wave+text loading pattern used for narration/onboarding chat
+    // elsewhere, rather than just a button-text change that's easy to miss.
+    if (cameraLoading) cameraLoading.classList.remove("hidden");
 
     try {
       const videoWidth = cameraVideo.videoWidth || 1280;
@@ -3498,14 +3655,14 @@ if (cameraIdentifyBtn) {
       const response = await fetch("/api/identify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageBase64, mediaType: "image/jpeg" }),
+        body: JSON.stringify({ imageBase64, mediaType: "image/jpeg", language: settings.language }),
       });
       const data = await response.json();
 
       closeCameraOverlay();
 
       if (!response.ok || !data.narration) {
-        showToast("Couldn't identify that — try again");
+        handleIdentifyFailure();
         return;
       }
 
@@ -3522,10 +3679,11 @@ if (cameraIdentifyBtn) {
       await speakNarration(data.narration);
     } catch (error) {
       closeCameraOverlay();
-      showToast("Couldn't identify that — try again");
+      handleIdentifyFailure();
     } finally {
       isIdentifying = false;
-      cameraIdentifyBtn.textContent = "Identify this";
+      cameraIdentifyBtn.disabled = false;
+      if (cameraLoading) cameraLoading.classList.add("hidden");
     }
   });
 }
@@ -3778,14 +3936,69 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function startTour() {
-  if (!("geolocation" in navigator)) {
+// --- Geolocation: Capacitor's native plugin when running inside the
+// native app shell, the standard Web API everywhere else (including the
+// plain web PWA, served from this exact same app.js — there's no separate
+// native build of this file). Both APIs expose the same Position shape
+// ({coords: {latitude, longitude, ...}}), so these wrappers just pick the
+// right implementation underneath and every OTHER call site in this file
+// stays exactly as it was. See CAPACITOR_NOTES.md for the full context.
+function isCapacitorNative() {
+  return !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === "function" && window.Capacitor.isNativePlatform());
+}
+
+function getCapacitorGeolocation() {
+  return window.Capacitor?.Plugins?.Geolocation || null;
+}
+
+function hasGeolocationSupport() {
+  return isCapacitorNative() || "geolocation" in navigator;
+}
+
+function geoGetCurrentPosition(onSuccess, onError, options) {
+  const capGeo = isCapacitorNative() ? getCapacitorGeolocation() : null;
+  if (capGeo) {
+    capGeo.getCurrentPosition(options).then(onSuccess).catch(onError);
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(onSuccess, onError, options);
+}
+
+// The Web API's watchPosition returns a numeric id synchronously;
+// Capacitor's returns a Promise<string>. Every call site already treats
+// the watch id as an opaque value only ever passed back into
+// geoClearWatch, so the TYPE difference doesn't matter — but the ASYNC
+// difference does, which is why this (and startTour, its only caller) is
+// async where the old code wasn't.
+async function geoWatchPosition(onSuccess, onError, options) {
+  const capGeo = isCapacitorNative() ? getCapacitorGeolocation() : null;
+  if (capGeo) {
+    return capGeo.watchPosition(options, (position, error) => {
+      if (error) onError(error);
+      else onSuccess(position);
+    });
+  }
+  return navigator.geolocation.watchPosition(onSuccess, onError, options);
+}
+
+function geoClearWatch(watchId) {
+  if (watchId === null || watchId === undefined) return;
+  const capGeo = isCapacitorNative() ? getCapacitorGeolocation() : null;
+  if (capGeo) {
+    capGeo.clearWatch({ id: String(watchId) });
+    return;
+  }
+  navigator.geolocation.clearWatch(watchId);
+}
+
+async function startTour() {
+  if (!hasGeolocationSupport()) {
     statusText.textContent = "Geolocation isn't supported on this device.";
     return;
   }
 
   if (watchId !== null) {
-    navigator.geolocation.clearWatch(watchId);
+    geoClearWatch(watchId);
   }
 
   recentPositions = [];
@@ -3813,7 +4026,7 @@ function startTour() {
   showTourLoadingOverlay();
 
   statusText.textContent = "Finding your location...";
-  watchId = navigator.geolocation.watchPosition(onLocation, onLocationError, {
+  watchId = await geoWatchPosition(onLocation, onLocationError, {
     enableHighAccuracy: true,
     maximumAge: 10000,
     timeout: 20000,

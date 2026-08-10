@@ -2374,7 +2374,8 @@ const IDENTIFY_SYSTEM_PROMPT =
   "conversational style. Keep it to 2-3 paragraphs. If you cannot identify " +
   "something specific, describe what you observe and offer interesting " +
   "context about that type of thing. Always end with something that makes " +
-  "the user want to explore further.";
+  "the user want to explore further.\n\n" +
+  SPOKEN_LANGUAGE_RULES;
 
 // "Point and learn" camera feature — see CAMERA_ENABLED above for the
 // kill-switch. NOTE for the eventual Capacitor/App Store conversion: this
@@ -2386,7 +2387,7 @@ app.post("/api/identify", async (req, res) => {
     return res.status(404).json({ error: "Camera feature is disabled." });
   }
 
-  const { imageBase64, mediaType } = req.body || {};
+  const { imageBase64, mediaType, language } = req.body || {};
   if (!imageBase64) {
     return res.status(400).json({ error: "imageBase64 is required." });
   }
@@ -2401,11 +2402,17 @@ app.post("/api/identify", async (req, res) => {
   // — strip the prefix if present so we only send the raw base64 payload.
   const rawBase64 = imageBase64.includes(",") ? imageBase64.split(",").pop() : imageBase64;
 
+  // Same per-user language preference narration/ask already respect — a
+  // non-English speaker pointing the camera at something should get the
+  // answer in their language too, not always English.
+  const languageGuidance = buildLanguageGuidance(LANGUAGE_NAMES[language]);
+  const systemPrompt = languageGuidance ? `${IDENTIFY_SYSTEM_PROMPT}\n\n${languageGuidance}` : IDENTIFY_SYSTEM_PROMPT;
+
   try {
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 1024,
-      system: IDENTIFY_SYSTEM_PROMPT,
+      system: systemPrompt,
       messages: [
         {
           role: "user",
