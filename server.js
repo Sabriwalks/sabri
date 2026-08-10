@@ -989,59 +989,6 @@ app.post("/api/setup-db", async (req, res) => {
   res.json(status);
 });
 
-// TEMPORARY — incident diagnostic only, remove once the production
-// "permission denied for table X" investigation is closed. Never returns
-// the key itself, only a fingerprint: its length, last 6 characters, and
-// the `role` claim from its own JWT payload (base64-decoded, unverified —
-// no need to check the signature to read a claim, and we have no way to
-// verify it here anyway). A real service_role key's payload contains
-// "role":"service_role"; an anon key's contains "role":"anon". This is the
-// one check that can't lie about which key is actually loaded in the live
-// process, regardless of what anyone believes was pasted into Vercel.
-app.get("/api/debug-key-fingerprint", (req, res) => {
-  const key = SUPABASE_SERVICE_KEY;
-  if (!key) return res.json({ configured: false });
-
-  const result = {
-    configured: true,
-    length: key.length,
-    // Prefix is category-identifying, not entropy-bearing (e.g.
-    // "sb_secret_" vs "sb_publishable_" vs the legacy "eyJ..." JWT header)
-    // — safe to expose, unlike the suffix, which is only 6 chars for the
-    // same reason.
-    keyPrefix: key.slice(0, 10),
-    keySuffix: key.slice(-6),
-  };
-
-  const parts = key.split(".");
-  if (parts.length === 3) {
-    try {
-      const payload = JSON.parse(Buffer.from(parts[1], "base64").toString("utf8"));
-      result.role = payload.role || null;
-      result.ref = payload.ref || null;
-    } catch (error) {
-      result.role = null;
-      result.jwtDecodeError = error.message;
-    }
-  } else {
-    result.role = null;
-    result.notAJwt = true;
-  }
-
-  res.json(result);
-});
-
-// TEMPORARY — final independent proof for the same incident: a real row
-// count, not just trusting a prior request's {success:true}. A bare
-// integer, nothing sensitive.
-app.get("/api/debug-feedback-count", async (req, res) => {
-  if (!supabaseAdmin) return res.json({ configured: false });
-  const { count, error } = await supabaseAdmin
-    .from("feedback_reports")
-    .select("*", { head: true, count: "exact" });
-  res.json({ count: count ?? null, error: error ? error.message : null });
-});
-
 app.get("/api/places", async (req, res) => {
   const lat = parseFloat(req.query.lat);
   const lng = parseFloat(req.query.lng);
