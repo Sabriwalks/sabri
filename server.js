@@ -1031,6 +1031,17 @@ app.get("/api/debug-key-fingerprint", (req, res) => {
   res.json(result);
 });
 
+// TEMPORARY — final independent proof for the same incident: a real row
+// count, not just trusting a prior request's {success:true}. A bare
+// integer, nothing sensitive.
+app.get("/api/debug-feedback-count", async (req, res) => {
+  if (!supabaseAdmin) return res.json({ configured: false });
+  const { count, error } = await supabaseAdmin
+    .from("feedback_reports")
+    .select("*", { head: true, count: "exact" });
+  res.json({ count: count ?? null, error: error ? error.message : null });
+});
+
 app.get("/api/places", async (req, res) => {
   const lat = parseFloat(req.query.lat);
   const lng = parseFloat(req.query.lng);
