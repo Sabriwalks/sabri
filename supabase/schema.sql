@@ -198,3 +198,17 @@ on conflict (id) do nothing;
 drop policy if exists "Anyone can upload feedback screenshots" on storage.objects;
 create policy "Anyone can upload feedback screenshots" on storage.objects
   for insert with check (bucket_id = 'feedback-screenshots');
+
+-- Belt-and-suspenders, added after a real incident: service_role's defining
+-- trait is BYPASSRLS (it skips row-level security policies), which is a
+-- SEPARATE Postgres permission layer from table-level GRANTs (INSERT,
+-- SELECT, etc.). Supabase normally auto-provisions these grants, but tables
+-- created via raw SQL through the SQL Editor (as this whole file is) can
+-- end up without them, producing "permission denied for table X" even with
+-- a genuine, correctly-scoped service_role key — which is exactly what
+-- happened here. These are idempotent and safe to re-run.
+grant usage on schema public to service_role;
+grant all on all tables in schema public to service_role;
+grant all on all sequences in schema public to service_role;
+alter default privileges in schema public grant all on tables to service_role;
+alter default privileges in schema public grant all on sequences to service_role;
