@@ -108,21 +108,42 @@ function logApiUsage({ provider, endpoint, units, costUsd, userId, meta }) {
 // { endpoint, userId } — purely for attribution; it's never sent to the
 // real API, unlike the SDK's own 2nd `options` argument (request signal,
 // headers, etc.), which passes through untouched.
+// CRITICAL FIX (found during this session's self-review, not introduced
+// today): this wrapper used to be `async function` that awaited the raw
+// call and returned the resolved Message — which silently broke every
+// STREAMED call in production since the day this shipped.
+// anthropic.messages.create() doesn't return a plain Promise, it returns
+// an APIPromise with extra chainable methods (.withResponse(), etc.), and
+// the SDK's own .stream() implementation internally calls exactly
+// `messages.create({...}).withResponse()` — awaiting and returning a plain
+// resolved value throws that away, causing every /api/narrate and
+// /api/ask call to fail with "messages.create(...).withResponse is not a
+// function". Fixed by NOT awaiting here at all: call the raw method, get
+// back the real APIPromise, attach tracking as a non-blocking .then() side
+// effect, and return the original APIPromise completely unchanged so
+// .stream()'s internal chaining keeps working. This function must stay a
+// plain (non-async) function — marking it `async` would itself re-wrap the
+// return value in a new plain Promise and silently reintroduce this exact
+// bug again.
 const rawAnthropicCreate = anthropic.messages.create.bind(anthropic.messages);
-anthropic.messages.create = async function trackedAnthropicCreate(params, options, usageMeta) {
-  const result = await rawAnthropicCreate(params, options);
-  const inputTokens = result?.usage?.input_tokens || 0;
-  const outputTokens = result?.usage?.output_tokens || 0;
-  const costUsd =
-    (inputTokens / 1e6) * API_PRICING.anthropic.inputPerMTok + (outputTokens / 1e6) * API_PRICING.anthropic.outputPerMTok;
-  logApiUsage({
-    provider: "anthropic",
-    endpoint: usageMeta?.endpoint,
-    units: inputTokens + outputTokens,
-    costUsd,
-    userId: usageMeta?.userId,
-    meta: { inputTokens, outputTokens, model: params.model },
-  });
+anthropic.messages.create = function trackedAnthropicCreate(params, options, usageMeta) {
+  const result = rawAnthropicCreate(params, options);
+  result
+    .then((message) => {
+      const inputTokens = message?.usage?.input_tokens || 0;
+      const outputTokens = message?.usage?.output_tokens || 0;
+      const costUsd =
+        (inputTokens / 1e6) * API_PRICING.anthropic.inputPerMTok + (outputTokens / 1e6) * API_PRICING.anthropic.outputPerMTok;
+      logApiUsage({
+        provider: "anthropic",
+        endpoint: usageMeta?.endpoint,
+        units: inputTokens + outputTokens,
+        costUsd,
+        userId: usageMeta?.userId,
+        meta: { inputTokens, outputTokens, model: params.model },
+      });
+    })
+    .catch(() => {}); // a tracking-side failure must never surface as an unhandled rejection
   return result;
 };
 
@@ -183,6 +204,24 @@ function resolveSpeakVoice(language, preferredVoice) {
   if (languageVoice) return languageVoice;
   return VALID_VOICES.includes(preferredVoice) ? preferredVoice : VOICE_CONFIG.voice;
 }
+
+// Same per-language default a first-time listener actually hears (before
+// they've ever touched Settings), used only to decide what gender name to
+// generate for a NEW persona — not involved in resolveSpeakVoice's runtime
+// voice selection at all, and never overrides a user's own Settings choice.
+function resolveDefaultVoiceForLanguage(language) {
+  return LANGUAGE_VOICE_MAP[language] || VOICE_CONFIG.voice;
+}
+
+// Real-world testing: the first narration greeted "Miriam" by name in a
+// clearly male-sounding voice — the default voice was never tied to
+// anything, gendered or otherwise. Rather than adding a voice-gender
+// question at onboarding, the generated persona's NAME is matched to
+// whichever voice is actually the default for the tour's language, so the
+// first impression is at least internally consistent. The user can still
+// override the voice entirely in Settings afterward — this only fixes the
+// untouched default.
+const VOICE_GENDER = { onyx: "male", echo: "male", nova: "female", shimmer: "female" };
 
 const HEBREW_PRONUNCIATION_GUIDE = {
   Nachlaot: "Nakh-lah-OHT",
@@ -712,6 +751,7 @@ async function renderAdminDashboard() {
     allSessionsForStatsResult,
     feedbackResult,
     apiUsageDailyResult,
+    canonicalNarrationsResult,
   ] = await Promise.all([
     supabaseAdmin.from("profiles").select("*", { count: "exact", head: true }),
     supabaseAdmin.from("walk_sessions").select("*", { count: "exact", head: true }),
@@ -735,6 +775,9 @@ async function renderAdminDashboard() {
     // per-narration estimate the "Est. cost (recent)" card above still uses
     // (that one covers usage from before this tracking existed).
     supabaseAdmin.from("api_usage_daily").select("*").order("day", { ascending: false }).limit(14 * 6),
+    // Newest first so freshly-promoted places needing review surface at the
+    // top, not buried under old approved/rejected history.
+    supabaseAdmin.from("canonical_narrations").select("*").order("generated_at", { ascending: false }).limit(50),
   ]);
 
   const allSessions = allSessionsForStatsResult.data || [];
@@ -842,6 +885,37 @@ async function renderAdminDashboard() {
     })
     .join("");
 
+  // Popular-place narration review queue — see canonical_narrations in
+  // supabase/schema.sql. Full text is collapsed by default (<details>) so
+  // a table full of paragraph-length narrations stays scannable; pending
+  // rows are what actually need attention, approved/rejected are just
+  // recent history.
+  const canonicalNarrations = canonicalNarrationsResult.data || [];
+  const canonicalRows = canonicalNarrations
+    .map((r) => {
+      return `<tr>
+        <td style="white-space:nowrap;">${escapeHtml(r.place_name)}${r.city ? `<br/><span style="color:#B8A898; font-size:11px;">${escapeHtml(r.city)}</span>` : ""}</td>
+        <td style="max-width:360px; white-space:normal;">
+          <details>
+            <summary style="cursor:pointer; color:#D4A853;">${escapeHtml(r.narration_text.slice(0, 80))}${r.narration_text.length > 80 ? "…" : ""}</summary>
+            <p style="white-space:pre-wrap; margin-top:8px;">${escapeHtml(r.narration_text)}</p>
+          </details>
+        </td>
+        <td style="white-space:nowrap;">${escapeHtml(new Date(r.generated_at).toLocaleString())}</td>
+        <td>
+          <form method="POST" action="/admin/canonical-narrations/${escapeHtml(r.id)}/status" style="display:flex; gap:6px; align-items:center;">
+            <select name="status">
+              <option value="pending" ${r.status === "pending" ? "selected" : ""}>pending</option>
+              <option value="approved" ${r.status === "approved" ? "selected" : ""}>approved</option>
+              <option value="rejected" ${r.status === "rejected" ? "selected" : ""}>rejected</option>
+            </select>
+            <button type="submit">Save</button>
+          </form>
+        </td>
+      </tr>`;
+    })
+    .join("");
+
   return renderAdminShell(`
 <body>
   <meta http-equiv="refresh" content="60">
@@ -886,6 +960,13 @@ async function renderAdminDashboard() {
     <tr><th>Reported</th><th>Message</th><th>Screenshot</th><th>Context</th><th>Status</th></tr>
     ${feedbackRows || "<tr><td colspan='5'>No feedback reports yet.</td></tr>"}
   </table>
+
+  <h1 style="font-size:15px;">Popular-place narration review queue (${canonicalNarrations.filter((r) => r.status === "pending").length} pending)</h1>
+  <table>
+    <tr><th>Place</th><th>Narration (click to expand)</th><th>Generated</th><th>Status</th></tr>
+    ${canonicalRows || "<tr><td colspan='4'>No places have crossed the popularity threshold yet.</td></tr>"}
+  </table>
+  <p class="note">A place is only eligible once ${POPULARITY_THRESHOLD_USERS}+ distinct users have been narrated it within a rolling ${POPULARITY_WINDOW_DAYS} days. Only "approved" rows are ever served — nothing reaches real users automatically.</p>
 </body>`);
 }
 
@@ -941,6 +1022,32 @@ app.post("/admin/feedback/:id/status", async (req, res) => {
 
   const { error } = await supabaseAdmin.from("feedback_reports").update({ status }).eq("id", req.params.id);
   if (error) console.error("[supabase] feedback_reports status update failed:", error.message);
+  res.redirect(303, "/admin");
+});
+
+// Backs the review queue's status <select>/Save form above — the one
+// manual gate before a canonical narration can ever be served to a real
+// user (see getApprovedCanonicalNarration). Same cookie-only auth pattern
+// as every other /admin/* route.
+app.post("/admin/canonical-narrations/:id/status", async (req, res) => {
+  const cookies = parseCookies(req);
+  if (!ADMIN_PASSWORD || cookies[ADMIN_SESSION_COOKIE] !== ADMIN_PASSWORD) {
+    return res.status(401).type("html").send(renderAdminLogin("Session expired — please log in again."));
+  }
+  if (!supabaseAdmin) {
+    return res.status(500).type("html").send(renderAdminLogin("Supabase is not configured on the server."));
+  }
+
+  const { status } = req.body || {};
+  if (!["pending", "approved", "rejected"].includes(status)) {
+    return res.status(400).send("Invalid status.");
+  }
+
+  const { error } = await supabaseAdmin
+    .from("canonical_narrations")
+    .update({ status, reviewed_at: status === "pending" ? null : new Date().toISOString() })
+    .eq("id", req.params.id);
+  if (error) console.error("[supabase] canonical_narrations status update failed:", error.message);
   res.redirect(303, "/admin");
 });
 
@@ -1137,6 +1244,7 @@ const REQUIRED_TABLES = [
   "place_facts",
   "user_persona_introductions",
   "api_usage",
+  "canonical_narrations",
 ];
 
 // supabase-js has no API for running arbitrary DDL, so this can't actually
@@ -1463,7 +1571,7 @@ app.get("/api/guide-archetypes", (req, res) => {
 });
 
 app.post("/api/get-persona", async (req, res) => {
-  const { city, country, archetype } = req.body || {};
+  const { city, country, archetype, language } = req.body || {};
   if (!city || !archetype || !VALID_ARCHETYPES.includes(archetype)) {
     return res.status(400).json({ error: "A valid city and archetype are required." });
   }
@@ -1471,12 +1579,15 @@ app.post("/api/get-persona", async (req, res) => {
     return res.status(500).json({ error: "Supabase is not configured on the server." });
   }
 
+  const resolvedLanguage = language || "en";
+
   try {
     const { data: existing, error: lookupError } = await supabaseAdmin
       .from("guide_personas")
       .select("*")
       .eq("city", city)
       .eq("archetype", archetype)
+      .eq("language", resolvedLanguage)
       .maybeSingle();
 
     // Doesn't abort the request — worst case a cache-lookup failure means
@@ -1493,13 +1604,23 @@ app.post("/api/get-persona", async (req, res) => {
     }
 
     const archetypeDef = GUIDE_ARCHETYPES[archetype];
+    // The persona's name has to match whichever voice will actually be
+    // speaking it by default — a "Miriam" narrated in a deep male voice was
+    // the real bug this fixes. Not a hard rule about the CITY's own culture
+    // (a male name is just as "authentically local" as a female one
+    // anywhere) — purely about matching the generated name to the gender of
+    // the TTS voice this language defaults to.
+    const defaultVoice = resolveDefaultVoiceForLanguage(resolvedLanguage);
+    const defaultVoiceGender = VOICE_GENDER[defaultVoice] || "female";
     const userMessage =
       `You are creating a local tour guide persona for ${city}${country ? `, ${country}` : ""}. ` +
       `This guide's core personality and focus area is: ${archetypeDef.focus}. Their tone is ${archetypeDef.tone}.\n\n` +
       `Generate:\n` +
       `1) A first name that feels authentically local/fitting to this specific city and culture — not ` +
       `necessarily a literal local name if that would feel like a stereotype, use good judgment (e.g. an ` +
-      `English-speaking expat-friendly name might be more natural in some contexts)\n` +
+      `English-speaking expat-friendly name might be more natural in some contexts). The name must read as ` +
+      `${defaultVoiceGender} — this guide will be voiced by a ${defaultVoiceGender}-sounding text-to-speech ` +
+      `voice by default, and the name needs to match that.\n` +
       `2) A 2-3 sentence bio establishing who they are and why they know this city\n` +
       `3) 2-3 sentences of style notes on how they specifically speak, phrases they might use, their vibe\n\n` +
       `Return as JSON: { name, bio, styleNotes }`;
@@ -1534,19 +1655,20 @@ app.post("/api/get-persona", async (req, res) => {
       city,
       country: country || null,
       archetype,
+      language: resolvedLanguage,
       generated_name: generated.name,
       generated_bio: generated.bio,
       style_notes: generated.styleNotes,
     };
 
     // onConflict handles the (rare but real) race of two users requesting
-    // the same brand-new city+archetype at almost the same moment — the
-    // unique constraint on (city, archetype) means the second insert
-    // becomes a no-op update instead of an error, and both requests end up
-    // returning the same persona rather than two different generated names.
+    // the same brand-new city+archetype+language at almost the same moment
+    // — the unique constraint means the second insert becomes a no-op
+    // update instead of an error, and both requests end up returning the
+    // same persona rather than two different generated names.
     const { data: inserted, error } = await supabaseAdmin
       .from("guide_personas")
-      .upsert(row, { onConflict: "city,archetype" })
+      .upsert(row, { onConflict: "city,archetype,language" })
       .select()
       .single();
 
@@ -1569,13 +1691,14 @@ app.post("/api/get-persona", async (req, res) => {
 // never call this at all — see app.js, which handles that case entirely
 // client-side via localStorage.
 app.post("/api/check-persona-introduction", async (req, res) => {
-  const { userId, city, archetype } = req.body || {};
+  const { userId, city, archetype, language } = req.body || {};
   if (!userId || !city || !archetype) {
     return res.status(400).json({ error: "userId, city, and archetype are required." });
   }
   if (!supabaseAdmin) {
     return res.status(500).json({ error: "Supabase is not configured on the server." });
   }
+  const resolvedLanguage = language || "en";
 
   try {
     const { data: existing, error: lookupError } = await supabaseAdmin
@@ -1584,6 +1707,7 @@ app.post("/api/check-persona-introduction", async (req, res) => {
       .eq("user_id", userId)
       .eq("city", city)
       .eq("archetype", archetype)
+      .eq("language", resolvedLanguage)
       .maybeSingle();
     if (lookupError) {
       console.error("[supabase] user_persona_introductions select failed:", lookupError.message);
@@ -1593,7 +1717,7 @@ app.post("/api/check-persona-introduction", async (req, res) => {
 
     const { error: insertError } = await supabaseAdmin
       .from("user_persona_introductions")
-      .insert({ user_id: userId, city, archetype });
+      .insert({ user_id: userId, city, archetype, language: resolvedLanguage });
     if (insertError) {
       console.error("[supabase] user_persona_introductions insert failed:", insertError.message);
       // Fail safe toward "don't force an introduction" rather than risk
@@ -2685,6 +2809,197 @@ async function streamSentencesSSE(
   }
 }
 
+// --- Popular-place narration caching (canonical_narrations) ---
+//
+// A curated, quality-gated cache of full narration content for places
+// that have proven genuinely popular — distinct from place_facts (a
+// handful of structured Q&A-grounding facts) and from a raw popularity
+// cache (nothing is ever served to a real user without a human approving
+// it first). Scoped to the neighborhood tier only for now: that's the tier
+// where the place is already known upfront (the specific tier picks its
+// focused place DURING generation, via focusedPlaceId — there's no place
+// to check a cache for before that call happens), and it's also where a
+// popular, high-traffic landmark's FIRST narration to a new arrival
+// happens, which is exactly the highest-value place to get right.
+//
+// Flow, all inside the neighborhood tier below:
+// 1. getApprovedCanonicalNarration(placeId) — if an approved row exists,
+//    skip straight to the cheap personalization wrapper instead of a full
+//    fresh generation.
+// 2. Otherwise, proceed with the normal fresh generation exactly as
+//    before, AND fire-and-forget maybePromoteToReviewQueue() — checks
+//    whether this place has just crossed the popularity threshold and, if
+//    so and nothing's already pending/approved for it, generates a
+//    careful canonical narration and drops it in the admin review queue.
+//    Never blocks or slows down the current user's own narration.
+const POPULARITY_THRESHOLD_USERS = 7; // distinct visitors in the rolling window before a place is even considered
+const POPULARITY_WINDOW_DAYS = 30;
+
+async function checkPlacePopularity(placeId) {
+  if (!supabaseAdmin || !placeId) return 0;
+  try {
+    const windowStart = new Date(Date.now() - POPULARITY_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const { data, error } = await supabaseAdmin
+      .from("interaction_events")
+      .select("user_id")
+      .eq("event_type", "narration_started")
+      .gte("created_at", windowStart)
+      .contains("event_data", { placeId });
+    if (error) {
+      console.error("[supabase] interaction_events popularity check failed:", error.message);
+      return 0;
+    }
+    // Deduped by user, not raw narration count — the same person narrating
+    // the same place five times shouldn't count as five toward this.
+    return new Set((data || []).map((row) => row.user_id).filter(Boolean)).size;
+  } catch (error) {
+    return 0;
+  }
+}
+
+async function getApprovedCanonicalNarration(placeId) {
+  if (!supabaseAdmin || !placeId) return null;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("canonical_narrations")
+      .select("narration_text")
+      .eq("place_id", placeId)
+      .eq("status", "approved")
+      .maybeSingle();
+    if (error) {
+      console.error("[supabase] canonical_narrations select failed:", error.message);
+      return null;
+    }
+    return data?.narration_text || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+// A careful, deliberately non-personalized narration meant to be reused —
+// same "hedge rather than invent false precision" bar as place_facts'
+// generation, since this gets reviewed once and then served to many
+// people. No user profile, session log, weather, or mood woven in here —
+// that's the personalization wrapper's job at serve time (see
+// streamPersonalizedFromCanonical), this only needs to nail the
+// substantive content: facts, structure, historical framing.
+async function generateCanonicalNarration(place, city, country) {
+  if (!ANTHROPIC_API_KEY) return null;
+  try {
+    const typeLabel = PLACE_TYPE_LABELS[place.primaryType] || place.primaryType;
+    const vicinity = place.vicinity || "the area";
+    const systemPrompt = [
+      SABRI_SYSTEM_PROMPT,
+      TOURIST_ORIENTATION_GUIDANCE,
+      TIER_GUIDANCE.neighborhood,
+      DEPTH_GUIDANCE.standard,
+      SAFETY_GUIDANCE,
+      SPOKEN_LANGUAGE_RULES,
+      "This narration will be reused for many different listeners, reviewed once by a human before that " +
+        "happens — write it as a strong, well-considered default: warm and in Sabri's voice, but without any " +
+        "greeting, name, weather, or mood-specific framing, since those get layered on separately per listener. " +
+        "Where you're not fully certain of a specific date or claim, hedge honestly rather than stating false " +
+        "precision — this version needs to hold up across many people hearing it, not just sound confident once.",
+    ].join("\n\n");
+    const message = await anthropic.messages.create(
+      {
+        model: "claude-sonnet-4-6",
+        max_tokens: 1024,
+        system: systemPrompt,
+        messages: [
+          {
+            role: "user",
+            content: `I am standing near ${place.name}, a ${typeLabel} in ${vicinity}${city ? `, ${city}` : ""}${country ? `, ${country}` : ""}. Tell me about this place in your signature style.`,
+          },
+        ],
+      },
+      undefined,
+      { endpoint: "canonical-narration-generation" }
+    );
+    const textBlock = message.content.find((block) => block.type === "text");
+    return textBlock ? textBlock.text.trim() : null;
+  } catch (error) {
+    console.error("[canonical-narration] generation failed:", error.message || error);
+    return null;
+  }
+}
+
+// Fire-and-forget — never awaited by the request it's called from, so it
+// can never add latency to any real user's narration.
+async function maybePromoteToReviewQueue(place, city, country) {
+  if (!supabaseAdmin || !place?.placeId) return;
+  try {
+    const { data: existing, error: lookupError } = await supabaseAdmin
+      .from("canonical_narrations")
+      .select("id")
+      .eq("place_id", place.placeId)
+      .maybeSingle();
+    if (lookupError) {
+      console.error("[supabase] canonical_narrations existence check failed:", lookupError.message);
+      return;
+    }
+    if (existing) return; // already pending review, approved, or rejected — don't regenerate
+
+    const distinctUsers = await checkPlacePopularity(place.placeId);
+    if (distinctUsers < POPULARITY_THRESHOLD_USERS) return;
+
+    const canonicalText = await generateCanonicalNarration(place, city, country);
+    if (!canonicalText) return;
+
+    const { error: insertError } = await supabaseAdmin.from("canonical_narrations").insert({
+      place_id: place.placeId,
+      place_name: place.name,
+      city: city || null,
+      country: country || null,
+      narration_text: canonicalText,
+      status: "pending",
+    });
+    if (insertError) {
+      console.error("[supabase] canonical_narrations insert failed:", insertError.message);
+    } else {
+      console.log(`[canonical-narration] "${place.name}" crossed the popularity threshold — queued for review`);
+    }
+  } catch (error) {
+    console.error("[canonical-narration] promotion check threw:", error.message || error);
+  }
+}
+
+// The cheap serve-time step: takes the approved canonical content and
+// layers in the CURRENT listener's live context — name, weather, mood, and
+// recent conversation continuity — without re-deriving the substance. Kept
+// deliberately tight/scoped (no TOURIST_ORIENTATION_GUIDANCE, no
+// TIER/DEPTH guidance re-litigating structure) so this call is meaningfully
+// cheaper than the full generation it's replacing; logged under a distinct
+// endpoint tag specifically so the real savings are measurable, not assumed.
+function streamPersonalizedFromCanonical(res, { canonicalText, place, userProfile, weather, sessionMood, sessionLog, persona, userId }) {
+  const systemPrompt = [
+    "You are Sabri, a warm knowledgeable personal tour guide. Your job right now is ONLY to personalize the " +
+      "following pre-written narration for THIS specific listener — do not rewrite the substance, facts, or " +
+      "structure, just adapt the greeting, tone, and framing to fit them naturally, the way the same tour " +
+      "guide would subtly tailor their delivery for a new group without changing the tour itself.",
+    buildUserProfileGuidance(userProfile),
+    buildWeatherGuidance(weather),
+    buildMoodGuidance(sessionMood),
+    buildSessionLogGuidance(sessionLog, userProfile?.name),
+    buildPersonaGuidance(persona, false, false, false),
+    SPOKEN_LANGUAGE_RULES,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const userMessage =
+    `Here is the pre-written narration content for ${place.name}:\n\n${canonicalText}\n\n` +
+    `Adapt this for the current listener now — weave in their name/context naturally if you have it, ` +
+    `open with a greeting only if this is the start of their walk, and otherwise keep the substance exactly ` +
+    `as given above.`;
+
+  return streamSentencesSSE(res, {
+    system: systemPrompt,
+    userMessage,
+    usageMeta: { endpoint: "narrate-cached-wrapper", userId },
+  });
+}
+
 app.post("/api/narrate", async (req, res) => {
   const {
     tier,
@@ -2728,6 +3043,28 @@ app.post("/api/narrate", async (req, res) => {
 
   if (!ANTHROPIC_API_KEY) {
     return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
+  }
+
+  // Popular-place cache check — neighborhood tier only, see the comment
+  // above checkPlacePopularity for why. Cache hit: skip straight to the
+  // cheap personalization wrapper. Cache miss: proceed exactly as before,
+  // and fire off (without awaiting) a check for whether this place just
+  // crossed the popularity threshold for the review queue.
+  if (resolvedTier === "neighborhood") {
+    const canonicalText = await getApprovedCanonicalNarration(place.placeId);
+    if (canonicalText) {
+      return streamPersonalizedFromCanonical(res, {
+        canonicalText,
+        place,
+        userProfile,
+        weather,
+        sessionMood,
+        sessionLog,
+        persona,
+        userId,
+      });
+    }
+    maybePromoteToReviewQueue(place, city, country);
   }
 
   const resolvedDepth = DEPTH_GUIDANCE[depth] ? depth : "standard";
@@ -3130,23 +3467,98 @@ app.post("/api/speak", async (req, res) => {
   const resolvedText = text.length > 4096 ? text.slice(0, 4096) : text;
 
   try {
+    // response_format: "wav" (not the default mp3) specifically so the
+    // per-clip loudness normalization below can operate on raw PCM samples
+    // directly — see normalizeWavPeak's comment for why this fixes the
+    // real inter-clip volume inconsistency reported over AirPods without
+    // touching timing/cadence at all. Trade-off, stated plainly: WAV is
+    // uncompressed, so each clip is a larger download than the mp3 this
+    // replaced — acceptable for single-sentence clips, but a real cost if
+    // narrations move to much longer per-request audio later.
     const speech = await openai.audio.speech.create(
       {
         model: VOICE_CONFIG.model,
         voice: resolvedVoice,
         input: resolvedText,
         speed: resolvedSpeed,
+        response_format: "wav",
       },
       undefined,
       { endpoint: "speak" }
     );
 
-    res.setHeader("Content-Type", "audio/mpeg");
-    Readable.fromWeb(speech.body).pipe(res);
+    const arrayBuffer = await speech.arrayBuffer();
+    const normalized = normalizeWavPeak(Buffer.from(arrayBuffer));
+
+    res.setHeader("Content-Type", "audio/wav");
+    res.send(normalized);
   } catch (error) {
     res.status(502).json({ error: "Failed to generate speech." });
   }
 });
+
+// Real-world testing over AirPods: volume audibly dipped up and down
+// between TTS clips, since each sentence is an independently generated
+// clip from OpenAI with no consistency enforced between them. Fixed with
+// pure peak normalization on the raw PCM samples — a linear amplitude
+// scale, sample-for-sample, at the exact same sample count and rate as the
+// original. This can only ever change loudness, never cadence/pacing/
+// timing (there is no way for a per-sample linear scale to shift where a
+// sample falls in time), and unlike dynamic-range compression it doesn't
+// reshape the waveform beyond a uniform multiply, so it shouldn't
+// introduce anything that reads as robotic. Deliberately conservative
+// (clamped gain range, skips clips already close to target) — erring
+// toward leaving a clip's natural sound alone over aggressively flattening
+// everything to identical loudness.
+const WAV_TARGET_PEAK = 29200; // ~-1dBFS of 16-bit PCM's 32767 ceiling — a little headroom, not full-scale
+const WAV_MIN_GAIN = 0.3;
+const WAV_MAX_GAIN = 3.0;
+
+function normalizeWavPeak(buffer) {
+  try {
+    // Standard 44-byte canonical WAV header (RIFF/WAVE/fmt /data in that
+    // fixed order) — exactly what OpenAI's TTS API returns. Not attempting
+    // to handle arbitrary/extended WAV chunk layouts here.
+    if (buffer.length < 44 || buffer.toString("ascii", 0, 4) !== "RIFF" || buffer.toString("ascii", 8, 12) !== "WAVE") {
+      return buffer; // not the shape expected — play it unmodified rather than risk corrupting it
+    }
+    const bitsPerSample = buffer.readUInt16LE(34);
+    if (bitsPerSample !== 16) return buffer; // only handling the common 16-bit case OpenAI actually returns
+
+    const dataStart = 44;
+    // NOT trusting the data chunk's declared size field here — OpenAI's TTS
+    // API streams this response without knowing the final length upfront,
+    // so it writes 0xFFFFFFFF (max uint32, a "size unknown" placeholder)
+    // rather than a real byte count. Using the buffer's actual length
+    // instead is what the real data is bounded by regardless of what the
+    // header claims — confirmed live: trusting the header field here
+    // produced an out-of-range read and silently no-opped normalization
+    // every time via the catch below, without ever actually applying it.
+    const dataLength = buffer.length - dataStart;
+    const sampleCount = Math.floor(dataLength / 2);
+
+    let peak = 0;
+    for (let i = 0; i < sampleCount; i++) {
+      const sample = Math.abs(buffer.readInt16LE(dataStart + i * 2));
+      if (sample > peak) peak = sample;
+    }
+    if (peak === 0) return buffer; // silence — nothing to normalize
+
+    const gain = Math.min(WAV_MAX_GAIN, Math.max(WAV_MIN_GAIN, WAV_TARGET_PEAK / peak));
+    if (Math.abs(gain - 1) < 0.02) return buffer; // already close enough — skip the write pass
+
+    const output = Buffer.from(buffer); // copy — never mutate the buffer passed in
+    for (let i = 0; i < sampleCount; i++) {
+      const offset = dataStart + i * 2;
+      const scaled = Math.round(output.readInt16LE(offset) * gain);
+      const clamped = Math.max(-32768, Math.min(32767, scaled));
+      output.writeInt16LE(clamped, offset);
+    }
+    return output;
+  } catch (error) {
+    return buffer; // any parsing surprise — fail safe to the original, unmodified clip
+  }
+}
 
 const IDENTIFY_SYSTEM_PROMPT =
   "You are Sabri, a warm knowledgeable tour guide. The user has pointed " +

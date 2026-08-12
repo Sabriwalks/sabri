@@ -209,7 +209,7 @@ async function fetchSpeechBlobUrl(text) {
   });
   if (!response.ok) throw new Error("TTS request failed");
   const arrayBuffer = await response.arrayBuffer();
-  return URL.createObjectURL(new Blob([arrayBuffer], { type: "audio/mpeg" }));
+  return URL.createObjectURL(new Blob([arrayBuffer], { type: "audio/wav" }));
 }
 
 function enqueueTtsSentence(text) {
@@ -1919,7 +1919,7 @@ async function playVoiceSample(voice) {
     if (!response.ok) return;
 
     const arrayBuffer = await response.arrayBuffer();
-    const blob = new Blob([arrayBuffer], { type: "audio/mpeg" });
+    const blob = new Blob([arrayBuffer], { type: "audio/wav" });
 
     if (currentAudioObjectUrl) {
       URL.revokeObjectURL(currentAudioObjectUrl);
@@ -2061,6 +2061,7 @@ if (preferencesSaveBtn) {
     if (archetypeChanged) {
       currentPersona = null;
       currentPersonaCity = null;
+      currentPersonaLanguage = null;
     }
 
     try {
@@ -4426,6 +4427,12 @@ function bearingToCompassWord(bearing) {
 // type in Edit Preferences (which clears the cache, see preferencesSaveBtn).
 let currentPersona = null;
 let currentPersonaCity = null;
+// Tracked alongside currentPersonaCity — a persona's generated name is now
+// gender-matched to the default TTS voice for the tour's language (see
+// VOICE_GENDER in server.js), so switching languages mid-session needs a
+// fresh persona fetch even if the city hasn't changed, the same as walking
+// into a new city does.
+let currentPersonaLanguage = null;
 let personaFetchPromise = null;
 let personaCityChangedForNextNarration = false;
 // True for exactly the one narration that should include a genuine
@@ -4444,13 +4451,13 @@ const PERSONA_INTRO_STORAGE_KEY = "sabri_persona_introductions";
 // same guest/signed-in split already used for profile/settings elsewhere
 // in this app. Both paths converge on the same guarantee: once ever per
 // city+archetype, not once per session.
-async function checkIsFirstPersonaMeeting(city, archetype) {
+async function checkIsFirstPersonaMeeting(city, archetype, language) {
   if (currentUser) {
     try {
       const response = await fetch("/api/check-persona-introduction", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: currentUser.id, city, archetype }),
+        body: JSON.stringify({ userId: currentUser.id, city, archetype, language }),
       });
       const data = await response.json();
       return response.ok ? !!data.isFirstMeeting : false;
@@ -4463,7 +4470,7 @@ async function checkIsFirstPersonaMeeting(city, archetype) {
 
   try {
     const seen = JSON.parse(localStorage.getItem(PERSONA_INTRO_STORAGE_KEY) || "[]");
-    const key = `${city}:${archetype}`;
+    const key = `${city}:${archetype}:${language}`;
     if (seen.includes(key)) return false;
     seen.push(key);
     localStorage.setItem(PERSONA_INTRO_STORAGE_KEY, JSON.stringify(seen));
@@ -4489,7 +4496,8 @@ function updatePersonaChip() {
 // cache-miss city+archetype combination on any later narration would
 // otherwise be an unexplained pause).
 async function ensurePersonaForCity(city, country) {
-  if (!city || city === currentPersonaCity) return;
+  const language = settings.language || "en";
+  if (!city || (city === currentPersonaCity && language === currentPersonaLanguage)) return;
   if (personaFetchPromise) return personaFetchPromise;
 
   advanceTourLoadingStage("meeting_guide");
@@ -4500,21 +4508,23 @@ async function ensurePersonaForCity(city, country) {
       const response = await fetch("/api/get-persona", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ city, country, archetype }),
+        body: JSON.stringify({ city, country, archetype, language }),
       });
       const data = await response.json();
       if (response.ok && data.persona) {
-        if (currentPersonaCity && currentPersonaCity !== city) {
-          // Walked into a new city mid-session — the next narration should
-          // narratively introduce the handoff rather than silently swapping
-          // the name (see buildPersonaGuidance's isCityChange branch).
+        if (currentPersonaCity && (currentPersonaCity !== city || currentPersonaLanguage !== language)) {
+          // Walked into a new city (or switched languages, which can mean a
+          // differently-gendered persona) mid-session — the next narration
+          // should narratively introduce the handoff rather than silently
+          // swapping the name (see buildPersonaGuidance's isCityChange branch).
           personaCityChangedForNextNarration = true;
         }
         currentPersona = data.persona;
         currentPersonaCity = city;
+        currentPersonaLanguage = language;
         updatePersonaChip();
-        logEvent("persona_selected", { archetype, city, cached: data.cached === true });
-        isFirstPersonaMeetingForNextNarration = await checkIsFirstPersonaMeeting(city, archetype);
+        logEvent("persona_selected", { archetype, city, language, cached: data.cached === true });
+        isFirstPersonaMeetingForNextNarration = await checkIsFirstPersonaMeeting(city, archetype, language);
       }
     } catch (error) {
       // Non-fatal — narration just proceeds as generic Sabri, no persona
@@ -5145,7 +5155,7 @@ async function speakNarration(text) {
     }
 
     const arrayBuffer = await response.arrayBuffer();
-    const blob = new Blob([arrayBuffer], { type: "audio/mpeg" });
+    const blob = new Blob([arrayBuffer], { type: "audio/wav" });
 
     if (currentAudioObjectUrl) {
       URL.revokeObjectURL(currentAudioObjectUrl);

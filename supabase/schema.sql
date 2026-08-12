@@ -94,6 +94,29 @@ create table if not exists guide_personas (
   unique (city, archetype)
 );
 
+-- language added after the fact — a persona's generated NAME is now
+-- matched to the gender of whichever OpenAI TTS voice is the default for
+-- that language (see VOICE_GENDER/resolveDefaultVoiceForLanguage in
+-- server.js), so the same city+archetype needs a different persona per
+-- language (an English tour and a Spanish tour of the same city can
+-- reasonably end up with a differently-gendered guide, since English's
+-- default voice is male and Spanish's is female). Existing rows default to
+-- 'en' — they were generated before this existed, when English was
+-- implicitly the only case that mattered for the very first cohort.
+alter table guide_personas add column if not exists language text not null default 'en';
+do $$
+begin
+  alter table guide_personas drop constraint guide_personas_city_archetype_key;
+exception
+  when undefined_object then null;
+end $$;
+do $$
+begin
+  alter table guide_personas add constraint guide_personas_city_archetype_language_key unique (city, archetype, language);
+exception
+  when duplicate_object then null;
+end $$;
+
 -- Per-user, unlike guide_personas above (which is a shared content cache
 -- with no notion of any individual user). Tracks whether THIS user has
 -- already had a full self-introduction from a given persona in a given
@@ -113,6 +136,27 @@ create table if not exists user_persona_introductions (
   introduced_at timestamptz not null default now(),
   unique (user_id, city, archetype)
 );
+
+-- language added for the same reason as guide_personas above — a
+-- differently-gendered/named persona per language is effectively a
+-- different persona from the user's perspective, so switching languages in
+-- the same city should trigger a fresh introduction rather than silently
+-- reusing the "already met" flag from a different-language persona.
+alter table user_persona_introductions add column if not exists language text not null default 'en';
+do $$
+begin
+  alter table user_persona_introductions drop constraint user_persona_introductions_user_id_city_archetype_key;
+exception
+  when undefined_object then null;
+end $$;
+do $$
+begin
+  alter table user_persona_introductions
+    add constraint user_persona_introductions_user_id_city_archetype_language_key
+    unique (user_id, city, archetype, language);
+exception
+  when duplicate_object then null;
+end $$;
 
 -- Same shared-cache pattern as guide_personas, for a different real
 -- problem: real-world multi-turn Q&A about one place produced three
@@ -190,6 +234,31 @@ create table if not exists api_usage (
   created_at timestamptz not null default now()
 );
 
+-- Curated, quality-gated cache of full narrations for popular places —
+-- distinct from place_facts (which caches a handful of structured
+-- historical facts for Q&A grounding, not a full narration). Only a place
+-- that's crossed POPULARITY_THRESHOLD_USERS distinct visitors in the last
+-- 30 days (see checkPlacePopularity in server.js) gets a canonical
+-- narration generated at all, and only an approved one (a human reviews
+-- every row via the admin dashboard's review queue, same
+-- pending/approved/rejected pattern as feedback_reports) is ever eligible
+-- to be served — see getApprovedCanonicalNarration/maybePromoteToReviewQueue
+-- in server.js. Never served verbatim: a cheap personalization wrapper call
+-- adapts it to the current listener at serve time (see
+-- streamPersonalizedFromCanonical), so this stores the substantive
+-- content — facts, structure, framing — not the final spoken text.
+create table if not exists canonical_narrations (
+  id uuid primary key default gen_random_uuid(),
+  place_id text not null unique,
+  place_name text not null,
+  city text,
+  country text,
+  narration_text text not null,
+  status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
+  generated_at timestamptz not null default now(),
+  reviewed_at timestamptz
+);
+
 create index if not exists visited_places_user_id_idx on visited_places (user_id, visited_at desc);
 create index if not exists walk_sessions_user_id_idx on walk_sessions (user_id, started_at desc);
 create index if not exists user_questions_user_id_idx on user_questions (user_id, asked_at desc);
@@ -201,6 +270,7 @@ create index if not exists place_facts_place_id_idx on place_facts (place_id);
 create index if not exists user_persona_introductions_user_id_idx on user_persona_introductions (user_id);
 create index if not exists api_usage_created_at_idx on api_usage (created_at desc);
 create index if not exists api_usage_provider_idx on api_usage (provider);
+create index if not exists canonical_narrations_status_idx on canonical_narrations (status);
 
 -- The backend always talks to Supabase with the service_role key (which
 -- bypasses RLS entirely), so these policies exist purely as defense in
@@ -216,6 +286,11 @@ alter table feedback_reports enable row level security;
 alter table place_facts enable row level security;
 alter table user_persona_introductions enable row level security;
 alter table api_usage enable row level security;
+alter table canonical_narrations enable row level security;
+-- No anon/authenticated policy for canonical_narrations, same reasoning as
+-- api_usage — the threshold-check/cache-serve logic and the admin review
+-- queue both only ever run through the server's service-role client, never
+-- queried directly by a browser.
 
 drop policy if exists "Users manage their own profile" on profiles;
 create policy "Users manage their own profile" on profiles
