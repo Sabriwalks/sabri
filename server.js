@@ -201,6 +201,49 @@ const TOURIST_ORIENTATION_GUIDANCE =
   "You are their trusted companion in an unfamiliar place. Make them feel " +
   "held, oriented, and excited. Never assume they know where anything is.";
 
+// Real-world testing: mid-conversation, Sabri casually claimed the user was
+// near the shuk when they were actually a 10-minute walk away — despite the
+// correct precise location being passed in the same request. The location
+// fields are present, but nothing told the model those offhand spatial
+// remarks are exactly as load-bearing as the main answer. Scoped to
+// /api/ask specifically (a deep Q&A conversation is where a passing
+// spatial aside is most likely to slip in unchecked; the main narration
+// prompt is built fresh from current location every time already).
+const LOCATION_GROUNDING_GUARDRAIL =
+  "LOCATION GROUNDING: The location/neighborhood/nearby-places given above " +
+  "is the ONLY location information you have — never state or imply a " +
+  "different location, distance, or nearby landmark relationship than what " +
+  "was actually given, even in a passing remark or aside unrelated to the " +
+  "main question. If you don't have a specific fact (e.g. exactly which " +
+  "market or landmark is nearby), don't guess a plausible-sounding one — " +
+  "either omit the spatial detail or speak about it in general terms " +
+  "instead of naming a specific place you're not actually given.";
+
+// Real-world testing: asked directly whether it was safe to visit a
+// specific area, Sabri's first answer was generic reassurance ("yes") and
+// only gave genuinely useful, calibrated guidance when pressed with "are
+// you sure?" — a real user who trusts the first answer never gets what
+// they actually needed. This applies broadly (safety, cultural sensitivity,
+// dress, or any other context-dependent factor), not just to one scenario,
+// and to route/place suggestions Sabri makes unprompted, not just direct
+// questions.
+const SAFETY_GUIDANCE =
+  "SAFETY AND CULTURAL SENSITIVITY: When a question touches personal " +
+  "safety, cultural sensitivity, appropriate dress, or similar " +
+  "context-dependent factors — or when you are the one suggesting the " +
+  "user go somewhere where these factors are genuinely relevant — give the " +
+  "same real, specific, locally-informed answer on the FIRST ask that a " +
+  "knowledgeable local friend would give, not a reflexively reassuring " +
+  "'yes it's fine' that only becomes honest under follow-up pressure. This " +
+  "does not mean being alarmist or generically cautious about everything — " +
+  "most places are simply fine, and treating them as risky when they " +
+  "aren't is its own failure. It means: if there is something a visitor " +
+  "genuinely would not know (time-of-day considerations, an area best " +
+  "visited with a specific awareness, dress that would be more " +
+  "appropriate, a neighborhood dynamic worth understanding), say so plainly " +
+  "and specifically as part of the answer or the suggestion itself, not as " +
+  "something the user has to know to ask about and then double-check.";
+
 // Makes the very first narration of a session feel like meeting a person,
 // not opening a guidebook. See buildFirstNarrationContext() for the
 // per-request firstVisitToCity/timeOfDay values this references.
@@ -945,7 +988,7 @@ app.get("/terms", (req, res) => {
 
 app.use(express.static(__dirname, { index: false }));
 
-// The 4 tables this app depends on (see supabase/schema.sql).
+// The tables this app depends on (see supabase/schema.sql).
 const REQUIRED_TABLES = [
   "profiles",
   "walk_sessions",
@@ -954,6 +997,7 @@ const REQUIRED_TABLES = [
   "guide_personas",
   "interaction_events",
   "feedback_reports",
+  "place_facts",
 ];
 
 // supabase-js has no API for running arbitrary DDL, so this can't actually
@@ -1298,6 +1342,156 @@ app.post("/api/get-persona", async (req, res) => {
     res.json({ persona: inserted, cached: false });
   } catch (error) {
     res.status(502).json({ error: "Failed to get a guide persona." });
+  }
+});
+
+// A quick, targeted web search for grounding place_facts generation in
+// something more reliable than Claude's raw parametric memory — the same
+// underlying risk (a specific date/style stated with full confidence but
+// no real source) is what produced three different construction dates in
+// one real conversation. Best-effort: returns null with no API key or no
+// useful result, and place-facts generation still proceeds (just leaning
+// more on the "hedge if uncertain" instruction below instead).
+async function fetchHistoricalFactsSearch(placeName, city, country) {
+  if (!SERPER_API_KEY || !placeName) return null;
+  try {
+    const query = [placeName, city, country, "history built architecture"].filter(Boolean).join(" ");
+    const response = await fetch("https://google.serper.dev/search", {
+      method: "POST",
+      headers: { "X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ q: query }),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const snippets = (data.organic || [])
+      .slice(0, 3)
+      .map((item) => item.snippet)
+      .filter(Boolean);
+    return snippets.length > 0 ? snippets.join("\n") : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+// Shared factual cache for deep Q&A about one place — see place_facts in
+// supabase/schema.sql for the full rationale. Called from app.js's
+// ensurePlaceFacts() the moment a place is narrated (fire-and-forget, well
+// before a user's first follow-up question in practice), and the result is
+// passed back into every subsequent /api/ask call for that place so Claude
+// grounds its answer in the same cached facts instead of regenerating
+// historical claims from scratch each time.
+app.post("/api/get-place-facts", async (req, res) => {
+  const { placeId, placeName, city, country } = req.body || {};
+  if (!placeId || !placeName) {
+    return res.status(400).json({ error: "placeId and placeName are required." });
+  }
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: "Supabase is not configured on the server." });
+  }
+
+  try {
+    const { data: existing, error: lookupError } = await supabaseAdmin
+      .from("place_facts")
+      .select("*")
+      .eq("place_id", placeId)
+      .maybeSingle();
+    if (lookupError) console.error("[supabase] place_facts select failed:", lookupError.message);
+
+    if (existing) {
+      return res.json({
+        facts: {
+          constructionPeriod: existing.construction_period,
+          architecturalStyle: existing.architectural_style,
+          notableHistory: existing.notable_history,
+        },
+        cached: true,
+      });
+    }
+
+    if (!ANTHROPIC_API_KEY) {
+      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
+    }
+
+    const searchContext = await fetchHistoricalFactsSearch(placeName, city, country);
+
+    const userMessage =
+      `Establish the core historical/architectural facts for "${placeName}"` +
+      `${city ? ` in ${city}` : ""}${country ? `, ${country}` : ""}, so a tour guide can state them ` +
+      `consistently across an entire conversation rather than re-deriving them each time.\n\n` +
+      (searchContext
+        ? `Web search results for reference (may be incomplete or off-topic — use judgment):\n${searchContext}\n\n`
+        : "") +
+      `Provide:\n` +
+      `1) constructionPeriod — when it was built. If you are not confident of an exact ` +
+      `year, use an appropriately hedged period instead of inventing false precision ` +
+      `(e.g. "likely late Ottoman period, 19th century" rather than a specific year you're ` +
+      `not sure of) — a consistent, honestly-hedged answer is far better than a confident ` +
+      `but potentially wrong one.\n` +
+      `2) architecturalStyle — the style(s), similarly hedged if uncertain.\n` +
+      `3) notableHistory — 1-2 sentences of the most notable, well-established history. ` +
+      `If genuinely nothing substantive is known, say so plainly rather than inventing detail.`;
+
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 512,
+      system:
+        "You are establishing factual reference material for a tour guide app. Precision and " +
+        "honesty about uncertainty matter far more than sounding confident — a specific wrong " +
+        "date stated confidently is a worse outcome than an honestly hedged period.",
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              constructionPeriod: { type: "string" },
+              architecturalStyle: { type: "string" },
+              notableHistory: { type: "string" },
+            },
+            required: ["constructionPeriod", "architecturalStyle", "notableHistory"],
+            additionalProperties: false,
+          },
+        },
+      },
+      messages: [{ role: "user", content: userMessage }],
+    });
+
+    const textBlock = message.content.find((block) => block.type === "text");
+    const generated = textBlock ? JSON.parse(textBlock.text) : null;
+    if (!generated) return res.status(502).json({ error: "Failed to establish place facts." });
+
+    const row = {
+      place_id: placeId,
+      place_name: placeName,
+      city: city || null,
+      construction_period: generated.constructionPeriod,
+      architectural_style: generated.architecturalStyle,
+      notable_history: generated.notableHistory,
+    };
+
+    // onConflict handles two users triggering this for the same brand-new
+    // place at almost the same moment — same race-safety reasoning as
+    // guide_personas above.
+    const { data: inserted, error } = await supabaseAdmin
+      .from("place_facts")
+      .upsert(row, { onConflict: "place_id" })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("[supabase] place_facts upsert failed:", error.message || error);
+      return res.status(502).json({ error: "Failed to save place facts." });
+    }
+    res.json({
+      facts: {
+        constructionPeriod: inserted.construction_period,
+        architecturalStyle: inserted.architectural_style,
+        notableHistory: inserted.notable_history,
+      },
+      cached: false,
+    });
+  } catch (error) {
+    res.status(502).json({ error: "Failed to get place facts." });
   }
 });
 
@@ -1723,6 +1917,47 @@ function buildLocationGuidance(neighborhood, city, country) {
   return `You are currently in ${parts.join(", ")}. Guide accordingly.`;
 }
 
+// Cached, shared-across-users facts for the specific place being asked
+// about right now (see place_facts in supabase/schema.sql and
+// /api/get-place-facts) — the fix for three different construction dates
+// showing up across one real conversation. Framed as authoritative and
+// already-stated so Claude treats these as settled, not as claims to
+// re-derive or second-guess this turn.
+function buildPlaceFactsGuidance(placeFacts, placeName) {
+  if (!placeFacts || typeof placeFacts !== "object") return null;
+  const { constructionPeriod, architecturalStyle, notableHistory } = placeFacts;
+  if (!constructionPeriod && !architecturalStyle && !notableHistory) return null;
+
+  const lines = [`Established facts about ${placeName || "this place"} — treat these as settled, already-stated facts:`];
+  if (constructionPeriod) lines.push(`- Built: ${constructionPeriod}`);
+  if (architecturalStyle) lines.push(`- Architectural style: ${architecturalStyle}`);
+  if (notableHistory) lines.push(`- Notable history: ${notableHistory}`);
+  lines.push(
+    "Stay consistent with these exact facts for the rest of this conversation — do not state a " +
+      "different date, style, or history than what's given here, even if your own general knowledge " +
+      "would suggest something slightly different."
+  );
+  return lines.join("\n");
+}
+
+// The accumulating Q&A for the CURRENT place specifically, distinct from
+// buildSessionLogGuidance's whole-walk summary (which truncates each entry
+// to ~150 characters and only keeps the last 5 across the entire walk —
+// nowhere near enough to reliably remember exactly what was said two
+// questions ago about the one place someone is drilling into right now).
+// This is what actually prevents contradicting yourself mid-conversation,
+// even before place_facts has anything cached for a brand-new place.
+function buildPlaceConversationGuidance(history, placeName) {
+  if (!Array.isArray(history) || history.length === 0) return null;
+  const lines = history.map((turn, index) => `${index + 1}. Asked: "${turn.question}"\n   You answered: "${turn.answer}"`);
+  return (
+    `Earlier in THIS conversation, still about ${placeName || "this place"}, you already said:\n\n` +
+    `${lines.join("\n\n")}\n\n` +
+    `Stay fully consistent with what you already said above — do not contradict any fact, date, or ` +
+    `claim from these earlier answers.`
+  );
+}
+
 // Fed by /api/ask's userStatedDestination/userStatedDirection extraction
 // (see the JSON schema there) — real-world testing showed Sabri kept
 // narrating a street the user had already told it they were leaving, so
@@ -1942,7 +2177,7 @@ app.post("/api/plan-tour", async (req, res) => {
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 2048,
-      system: SABRI_SYSTEM_PROMPT + "\n\n" + buildUserProfileGuidance(userProfile),
+      system: [SABRI_SYSTEM_PROMPT, buildUserProfileGuidance(userProfile), SAFETY_GUIDANCE].filter(Boolean).join("\n\n"),
       output_config: {
         format: {
           type: "json_schema",
@@ -2215,6 +2450,7 @@ app.post("/api/narrate", async (req, res) => {
     CONNECTIVE_NARRATION_GUIDANCE,
     buildProactiveCheckInGuidance(isGuidedTour),
     TRANSITION_GUIDANCE,
+    SAFETY_GUIDANCE,
     SPOKEN_LANGUAGE_RULES,
     buildPronunciationGuidance(languageName),
     buildLanguageGuidance(languageName),
@@ -2282,9 +2518,14 @@ function buildSpecificUserMessage(places, heading, directionOfTravel) {
   return (
     `${facingLine} Here are the nearest points of interest:\n${placeLines}\n\n` +
     `Based on this, determine what I am most likely looking at or experiencing ` +
-    `right now, and tell me about it in your signature style. In focusedPlaceId, ` +
-    `return the exact id of the place your narration centers on, copied exactly ` +
-    `from the list above, or null if none of them fit.`
+    `right now, and tell me about it in your signature style. When more than one ` +
+    `candidate is plausible, prefer the more historically/culturally significant ` +
+    `place (a landmark, historic site, or notable complex) over a small nearby ` +
+    `business just because it happens to be a few meters closer — being inside ` +
+    `or right next to something genuinely significant should win over a slightly ` +
+    `nearer cafe or shop. In focusedPlaceId, return the exact id of the place ` +
+    `your narration centers on, copied exactly from the list above, or null if ` +
+    `none of them fit.`
   );
 }
 
@@ -2308,6 +2549,8 @@ app.post("/api/ask", async (req, res) => {
     userStatedDestination,
     persona,
     sessionMood,
+    placeFacts,
+    placeConversationHistory,
   } = req.body || {};
 
   if (!question) {
@@ -2331,6 +2574,9 @@ app.post("/api/ask", async (req, res) => {
     TOURIST_ORIENTATION_GUIDANCE,
     buildUserProfileGuidance(userProfile),
     buildLocationGuidance(neighborhood, city, country),
+    LOCATION_GROUNDING_GUARDRAIL,
+    buildPlaceFactsGuidance(placeFacts, place),
+    buildPlaceConversationGuidance(placeConversationHistory, place),
     buildSessionLogGuidance(sessionLog, userProfile?.name),
     buildCrossSessionVisitedGuidance(crossSessionVisitedPlaces),
     buildWeatherGuidance(weather),
@@ -2338,6 +2584,7 @@ app.post("/api/ask", async (req, res) => {
     buildPersonaGuidance(persona, false, false),
     buildMoodGuidance(sessionMood),
     CONVERSATIONAL_PRESENCE_GUIDANCE,
+    SAFETY_GUIDANCE,
     SPOKEN_LANGUAGE_RULES,
   ].filter(Boolean);
 
@@ -3042,6 +3289,8 @@ const LOGGED_EVENT_TYPES = [
   "session_duration",
   "onboarding_path_chosen",
   "feedback_submitted",
+  "time_to_first_audio",
+  "tour_start_latency",
 ];
 
 // Fire-and-forget from the client (app.js's logEvent) — never something the
@@ -3362,6 +3611,20 @@ function pickNearestPlace(results, allowedTypes, lat, lng, maxDistanceMeters) {
 // Returns up to `limit` nearest matching places, each annotated with
 // distance, compass bearing, and — when heading is known — whether it's
 // roughly in front of, to the side of, or behind the user.
+// Real-world testing: standing inside a historically significant complex,
+// narration picked a coffee roaster 10m away instead — this ranked the
+// candidate pool by raw distance alone, so a slightly-closer small business
+// can crowd out a more significant place from the top `limit` results
+// entirely. SIGNIFICANCE_WEIGHT_METERS reuses ALLOWED_PLACE_TYPES' existing
+// "how interesting is this type" ordering (see its comment) as a distance
+// offset when ranking: a tourist_attraction/museum/etc. can outweigh being
+// somewhat farther away than a cafe/restaurant, but everything here is
+// already within CONTEXT_RADIUS_METERS by construction, so this only
+// re-ranks candidates that are genuinely close to each other — a landmark
+// meaningfully outside the search radius was never a candidate to begin
+// with.
+const SIGNIFICANCE_WEIGHT_METERS = 4;
+
 function pickNearestPlaces(results, allowedTypes, lat, lng, heading, limit) {
   const types = allowedTypes && allowedTypes.length ? allowedTypes : ALLOWED_PLACE_TYPES;
 
@@ -3371,16 +3634,20 @@ function pickNearestPlaces(results, allowedTypes, lat, lng, heading, limit) {
       const distance = distanceMeters(lat, lng, result.geometry.location.lat, result.geometry.location.lng);
       const bearing = bearingDegrees(lat, lng, result.geometry.location.lat, result.geometry.location.lng);
       const primaryType = types.find((type) => result.types?.includes(type)) || result.types?.[0];
+      const typeRank = types.indexOf(primaryType);
+      const significanceBonusMeters = (typeRank === -1 ? 0 : types.length - typeRank) * SIGNIFICANCE_WEIGHT_METERS;
 
       return {
         ...toPlaceResponse(result, primaryType),
         distanceMeters: Math.round(distance),
         bearingDegrees: Math.round(bearing),
         relativePosition: relativePositionFromHeading(heading, bearing),
+        _rankingScore: distance - significanceBonusMeters,
       };
     })
-    .sort((a, b) => a.distanceMeters - b.distanceMeters)
-    .slice(0, limit);
+    .sort((a, b) => a._rankingScore - b._rankingScore)
+    .slice(0, limit)
+    .map(({ _rankingScore, ...place }) => place);
 }
 
 function toPlaceResponse(result, primaryType) {

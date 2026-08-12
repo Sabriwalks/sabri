@@ -94,6 +94,29 @@ create table if not exists guide_personas (
   unique (city, archetype)
 );
 
+-- Same shared-cache pattern as guide_personas, for a different real
+-- problem: real-world multi-turn Q&A about one place produced three
+-- different construction dates and two different architectural styles in
+-- the same conversation, because Claude was regenerating historical claims
+-- fresh on every /api/ask call with no memory of what it already said. The
+-- first substantive question about a place generates and caches these
+-- facts once (see /api/get-place-facts); every question after that, from
+-- this user or anyone else, grounds its answer in the same cached facts
+-- instead of re-deriving them. Deliberately a small, fixed set of factual
+-- fields (not a free-form narration) — the goal is consistency on the
+-- specific claims that are easy to contradict yourself on (dates, style),
+-- not caching Sabri's whole personality/narration style for a place.
+create table if not exists place_facts (
+  id uuid primary key default gen_random_uuid(),
+  place_id text not null unique,
+  place_name text,
+  city text,
+  construction_period text,
+  architectural_style text,
+  notable_history text,
+  created_at timestamptz not null default now()
+);
+
 -- Behavioral event stream — every meaningful interaction signal (narration
 -- listened-to-completion vs skipped, pins tapped vs ignored, route
 -- deviations, camera usage, etc.), logged fire-and-forget via
@@ -133,6 +156,7 @@ create index if not exists interaction_events_user_id_idx on interaction_events 
 create index if not exists interaction_events_event_type_idx on interaction_events (event_type);
 create index if not exists interaction_events_created_at_idx on interaction_events (created_at desc);
 create index if not exists feedback_reports_status_created_at_idx on feedback_reports (status, created_at desc);
+create index if not exists place_facts_place_id_idx on place_facts (place_id);
 
 -- The backend always talks to Supabase with the service_role key (which
 -- bypasses RLS entirely), so these policies exist purely as defense in
@@ -145,6 +169,7 @@ alter table user_questions enable row level security;
 alter table guide_personas enable row level security;
 alter table interaction_events enable row level security;
 alter table feedback_reports enable row level security;
+alter table place_facts enable row level security;
 
 drop policy if exists "Users manage their own profile" on profiles;
 create policy "Users manage their own profile" on profiles
@@ -169,6 +194,12 @@ create policy "Users manage their own questions" on user_questions
 -- policy is needed here.
 drop policy if exists "Anyone can read guide personas" on guide_personas;
 create policy "Anyone can read guide personas" on guide_personas
+  for select using (true);
+
+-- Same reasoning as guide_personas above: shared, non-sensitive cached
+-- facts, only ever written server-side via /api/get-place-facts.
+drop policy if exists "Anyone can read place facts" on place_facts;
+create policy "Anyone can read place facts" on place_facts
   for select using (true);
 
 drop policy if exists "Users manage their own interaction events" on interaction_events;

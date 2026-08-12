@@ -689,6 +689,17 @@
   </section>
 
   <p id="ask-subtitle" class="ask-subtitle hidden"></p>
+  <!-- Shown only during the brief "confirm what was heard" window before
+       auto-send (see finishListening in app.js) — speech recognition still
+       isn't perfect, so a quick correction beats a full re-ask. -->
+  <button id="ask-edit-btn" class="ask-edit-btn hidden" aria-label="Edit what Sabri heard">✏️</button>
+  <input
+    id="ask-edit-input"
+    class="ask-edit-input hidden"
+    type="text"
+    inputmode="text"
+    aria-label="Edit what Sabri heard"
+  />
   <p id="listening-hint" class="listening-hint hidden">Tap to stop</p>
 
   <!-- Generic toast, currently only used by the camera placeholder button. -->

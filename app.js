@@ -52,6 +52,8 @@ const updateBannerCta = document.getElementById("update-banner-cta");
 const micBtn = document.getElementById("mic-btn");
 const cameraBtn = document.getElementById("camera-btn");
 const askSubtitle = document.getElementById("ask-subtitle");
+const askEditBtn = document.getElementById("ask-edit-btn");
+const askEditInput = document.getElementById("ask-edit-input");
 const listeningHint = document.getElementById("listening-hint");
 const toastEl = document.getElementById("toast");
 const settingsBtn = document.getElementById("settings-btn");
@@ -193,6 +195,11 @@ let ttsQueue = [];
 let ttsQueueGeneration = 0;
 let ttsQueueActive = false;
 let firstAudioPlaybackAt = null; // timestamp, for time-to-first-audio measurement
+// Wander Mode start-latency breakdown (see startTour) — tourStartPerfMark is
+// null once the first narration's audio has started and been logged, so
+// later narrations in the same session don't re-trigger this.
+let tourStartPerfMark = null;
+let tourStartStageTimestamps = {};
 
 async function fetchSpeechBlobUrl(text) {
   const response = await fetch("/api/speak", {
@@ -278,6 +285,19 @@ let currentCity = null;
 let currentCountry = null;
 let lastContextPlaces = [];
 let correctionContext = null;
+
+// Real-world testing: one conversation about a single place produced three
+// different construction dates and two different architectural styles —
+// Claude was regenerating historical claims fresh on every /api/ask call
+// with no memory of what it already said. currentPlaceConversation holds
+// this session's verbatim Q&A for the CURRENT place only (reset whenever
+// the focused place changes, see initFocusedPlaceUI), distinct from the
+// whole-walk sessionLog below (which truncates each entry to ~150 chars —
+// nowhere near enough to stay consistent within one deep back-and-forth).
+// placeFactsCache holds the shared, cross-session cached facts fetched via
+// ensurePlaceFacts() the moment a place is narrated — see /api/get-place-facts.
+let currentPlaceConversation = [];
+let placeFactsCache = {};
 
 // Extracted from user speech (see askSabri's userStatedDirection/
 // userStatedDestination handling) — persists for the rest of the session
@@ -2235,12 +2255,26 @@ if (feedbackSubmitBtn) {
 //
 // What's still missing is telling the ALREADY-OPEN page that new code is
 // available: activating a new worker doesn't retroactively update the
-// JavaScript already running in memory. Silently reloading the page the
-// moment an update lands would be jarring (someone could be mid-narration
-// on a real walk), so instead: show a small banner, and only reload if the
-// user actually taps it. If they never tap it, the next NATURAL cold open
-// of the app already gets the new worker (since it activated immediately),
-// so nothing is ever permanently stuck on the old version.
+// JavaScript already running in memory. That part used to rely entirely on
+// a fresh page load/navigation to even ASK the browser whether a new
+// service-worker.js exists — fine for a browser tab, but a standalone PWA
+// reopened from the home screen icon (especially on iOS Safari) very often
+// RESUMES a suspended process rather than performing a real navigation, so
+// that check might rarely or never run. A tester who deletes and
+// reinstalls the PWA is really just forcing the one code path (a genuine
+// fresh load) that was ever checking for updates at all. Fixed below by
+// also actively polling registration.update() on every foreground/resume,
+// not just on load — see checkForUpdateAndMaybeApply().
+//
+// Silently reloading the moment an update lands is jarring if someone's
+// mid-narration on a real walk, so the decision is: if nothing's actively
+// playing/listening/mid-sign-in right now, apply and reload immediately
+// (no banner, no tap needed) — deliberately more assertive than a
+// dismissible banner would be, since this is a fast-iterating beta where
+// testers giving feedback against stale code is a real cost. If something
+// IS active, fall back to the banner so the update doesn't interrupt them
+// — but the very next foreground gets another chance to auto-apply, so a
+// tester is never permanently stuck more than one open/close cycle behind.
 //
 // Skipped entirely inside the native Capacitor app: it bundles its own
 // assets locally and updates via the App Store, not live cache
@@ -2248,16 +2282,20 @@ if (feedbackSubmitBtn) {
 // overhead at best, and at worst an unknown interaction with the native
 // WebView's own lifecycle (backgrounding/foregrounding) that was never
 // designed for or tested. See CAPACITOR_NOTES.md.
+let swRegistration = null;
+
 if ("serviceWorker" in navigator && !isCapacitorNative()) {
   window.addEventListener("load", () => {
     navigator.serviceWorker
       .register("/service-worker.js")
       .then((registration) => {
+        swRegistration = registration;
+
         // A worker found here mid-install (rather than via the
         // "updatefound" event below) covers the case where an update was
         // already installing before this page finished loading.
         if (registration.waiting && navigator.serviceWorker.controller) {
-          showUpdateBanner(registration);
+          handleUpdateAvailable(registration);
         }
 
         registration.addEventListener("updatefound", () => {
@@ -2270,7 +2308,7 @@ if ("serviceWorker" in navigator && !isCapacitorNative()) {
             // through "installed" but has no existing controller yet and
             // needs no banner (there's nothing to update FROM).
             if (installingWorker.state === "installed" && navigator.serviceWorker.controller) {
-              showUpdateBanner(registration);
+              handleUpdateAvailable(registration);
             }
           });
         });
@@ -2278,8 +2316,31 @@ if ("serviceWorker" in navigator && !isCapacitorNative()) {
       .catch(() => {});
   });
 
-  // Reloads when the new worker actually takes control — but ONLY if the
-  // user actually tapped the update banner (userRequestedUpdate, set below).
+  // Actively re-checks for a new service-worker.js every time the app is
+  // foregrounded — not just relying on whatever infrequent automatic check
+  // the browser does on its own schedule (typically throttled to roughly
+  // once per 24h per spec, tied to navigation), which is exactly the gap
+  // that let a standalone home-screen PWA run stale JS indefinitely.
+  // "visible" fires both on a browser tab regaining focus and (per WebKit's
+  // own PWA lifecycle docs) when a standalone iOS PWA resumes from a
+  // suspended background state — the one signal available for "the app was
+  // just reopened" that doesn't depend on a real navigation happening.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    checkForUpdateAndMaybeApply();
+  });
+  // Belt-and-suspenders for the bfcache-restore case (event.persisted) —
+  // some browsers restore a page from the back-forward cache without a
+  // visibilitychange firing at all.
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) checkForUpdateAndMaybeApply();
+  });
+
+  // Reloads when the new worker actually takes control — either because
+  // the user tapped the update banner, or because handleUpdateAvailable()
+  // decided it was safe to auto-apply (userRequestedUpdate covers both;
+  // the name predates the auto-apply path but the guard's purpose is the
+  // same either way — see below).
   //
   // This guard is the fix for a real production bug: service-worker.js's
   // self.skipWaiting() (install) and self.clients.claim() (activate) are
@@ -2305,20 +2366,64 @@ if ("serviceWorker" in navigator && !isCapacitorNative()) {
 let hasReloadedForUpdate = false;
 let userRequestedUpdate = false;
 
+// Actively asks the browser to re-fetch service-worker.js and compare it
+// byte-for-byte against the currently installed one — this is the part
+// that was previously only ever triggered as a side effect of a fresh page
+// load. Safe/cheap to call often: it's a no-op if nothing's changed.
+async function checkForUpdateAndMaybeApply() {
+  if (!swRegistration) return;
+  try {
+    await swRegistration.update();
+  } catch (error) {
+    // Offline or a transient network hiccup — next foreground tries again.
+    return;
+  }
+  if (swRegistration.waiting && navigator.serviceWorker.controller) {
+    handleUpdateAvailable(swRegistration);
+  }
+}
+
+// Deliberately more assertive than a plain dismissible banner for this
+// beta/rapid-iteration phase specifically: if nothing that would be
+// disrupted by a reload is actually in progress right now, apply the
+// update immediately with no tap required. Otherwise, fall back to the
+// banner — and since checkForUpdateAndMaybeApply() re-runs on every
+// foreground, a tester who declined because they were mid-narration gets
+// re-offered (and likely auto-applied) the moment they're not.
+function handleUpdateAvailable(registration) {
+  const midAuthResume = (() => {
+    try {
+      return !!localStorage.getItem(ONBOARDING_DRAFT_KEY);
+    } catch (error) {
+      return false;
+    }
+  })();
+  const safeToApplyNow = !isNarrating && !isConversing && !midAuthResume;
+
+  if (safeToApplyNow) {
+    applyUpdate(registration);
+  } else {
+    showUpdateBanner(registration);
+  }
+}
+
+function applyUpdate(registration) {
+  userRequestedUpdate = true;
+  const waitingWorker = registration.waiting;
+  if (waitingWorker) {
+    waitingWorker.postMessage({ type: "SKIP_WAITING" });
+  }
+  // If there's genuinely nothing waiting (e.g. it already activated on its
+  // own before this ran), the controllerchange listener above simply never
+  // fires — harmless no-op, the update still applies on the next check.
+}
+
 function showUpdateBanner(registration) {
   if (!updateBanner || updateBanner.classList.contains("is-visible")) return;
   updateBanner.classList.add("is-visible");
   updateBannerCta.onclick = () => {
     updateBannerCta.disabled = true;
-    userRequestedUpdate = true;
-    const waitingWorker = registration.waiting;
-    if (waitingWorker) {
-      waitingWorker.postMessage({ type: "SKIP_WAITING" });
-    }
-    // If there's genuinely nothing waiting (e.g. it already activated on
-    // its own between the banner showing and the tap), the controllerchange
-    // listener above simply never fires and the tap is a harmless no-op —
-    // the update will still apply on the next cold open.
+    applyUpdate(registration);
   };
 }
 
@@ -4124,6 +4229,12 @@ async function startTour() {
   hasShownFastWelcome = false;
   lastPosition = null;
   tourStartedAt = Date.now();
+  // Real-world testing: Wander Mode start took 20-30s with no way to tell
+  // which stage actually ate the time. Stamped here and read at each stage
+  // below, then logged as one breakdown once the first narration's audio
+  // actually starts — not guessing at the bottleneck, measuring it.
+  tourStartPerfMark = performance.now();
+  tourStartStageTimestamps = {};
   isFirstNarrationOfSession = true;
   totalNarrationsThisSession = 0;
   totalQuestionsThisSession = 0;
@@ -4183,6 +4294,9 @@ function onLocation(position) {
   if (!gpsStabilized) {
     if (recentPositions.length === GPS_STABILIZATION_READINGS && isGpsStable(recentPositions)) {
       gpsStabilized = true;
+      if (tourStartPerfMark !== null) {
+        tourStartStageTimestamps.gpsLockedMs = Math.round(performance.now() - tourStartPerfMark);
+      }
       pulseEl.classList.add("is-locked");
       advanceTourLoadingStage("locking");
     } else {
@@ -4342,6 +4456,29 @@ async function ensurePersonaForCity(city, country) {
   return personaFetchPromise;
 }
 
+// Fire-and-forget, kicked off the moment a place is narrated (see
+// initFocusedPlaceUI) — not awaited by anything, since it only needs to
+// finish before the user's first FOLLOW-UP question, not before the
+// narration itself. See place_facts in supabase/schema.sql and
+// buildPlaceFactsGuidance in server.js for how the result gets used.
+async function ensurePlaceFacts(placeId, placeName) {
+  if (!placeId || placeFactsCache[placeId]) return;
+  try {
+    const response = await fetch("/api/get-place-facts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ placeId, placeName, city: currentCity, country: currentCountry }),
+    });
+    const data = await response.json();
+    if (response.ok && data.facts) {
+      placeFactsCache[placeId] = data.facts;
+    }
+  } catch (error) {
+    // Non-fatal — /api/ask just proceeds without cached facts this time,
+    // same as before this cache existed.
+  }
+}
+
 async function showFastWelcome(latitude, longitude) {
   try {
     const response = await fetch(`/api/geocode?lat=${latitude}&lng=${longitude}`);
@@ -4388,6 +4525,16 @@ async function reverseGeocode(latitude, longitude) {
       }
       currentCity = data.city || currentCity;
       currentCountry = data.country || currentCountry;
+      // Fire-and-forget, deliberately as early as possible: this used to
+      // only start once narrateAndSpeak() awaited it directly, which meant
+      // it only began AFTER the neighborhood place lookup had already
+      // finished — stacking a full extra Claude round-trip (on a persona
+      // cache miss) in front of narration generation instead of overlapping
+      // with it. ensurePersonaForCity no-ops if already resolved/in-flight
+      // for this city, so triggering it here is free when there's nothing
+      // to do, and narrateAndSpeak's own await just picks up whatever's
+      // left of this same in-flight request.
+      ensurePersonaForCity(currentCity, currentCountry);
     }
   } catch (error) {
     if (error.name === "AbortError") return;
@@ -4458,6 +4605,9 @@ async function runNeighborhoodOrientation(latitude, longitude) {
 
   const place = await fetchNearbyPlace(latitude, longitude, NEIGHBORHOOD_PLACE_TYPES, { strategy: "nearest" });
   isOriented = true;
+  if (tourStartPerfMark !== null) {
+    tourStartStageTimestamps.placeFoundMs = Math.round(performance.now() - tourStartPerfMark);
+  }
 
   if (!place || narratedPlaceIds.has(place.placeId) || visitedPlaceIds.has(place.placeId)) {
     statusText.textContent = "Keep walking, discovering...";
@@ -4572,6 +4722,9 @@ async function narrateAndSpeak({
   // advanceTourLoadingStage only ever moves forward, so meeting_guide has
   // to run first or its message never gets a chance to show.
   await ensurePersonaForCity(currentCity, currentCountry);
+  if (tourStartPerfMark !== null) {
+    tourStartStageTimestamps.personaResolvedMs = Math.round(performance.now() - tourStartPerfMark);
+  }
   const isCityChange = personaCityChangedForNextNarration;
   personaCityChangedForNextNarration = false;
 
@@ -4605,6 +4758,13 @@ async function narrateAndSpeak({
     uiInitialized = true;
     narratedPlaceIds.add(focusedPlace.placeId);
     hasActivePlace = true;
+    // New focused place — the previous place's Q&A no longer applies, and
+    // this is the trigger point for warming the shared place-facts cache
+    // well before the user could plausibly ask a follow-up question.
+    if (currentPlaceId !== focusedPlace.placeId) {
+      currentPlaceConversation = [];
+      ensurePlaceFacts(focusedPlace.placeId, focusedPlace.name);
+    }
     currentPlaceName = focusedPlace.name;
     currentPlaceId = focusedPlace.placeId;
     if (tier === "neighborhood") {
@@ -4717,6 +4877,22 @@ async function narrateAndSpeak({
       const latencyMs = Math.round(firstAudioPlaybackAt - triggerTime);
       console.log(`[latency] time-to-first-audio (streamed narration): ${latencyMs}ms`);
       logEvent("time_to_first_audio", { ms: latencyMs, tier, flow: "narrate" });
+    }
+
+    // Full Wander Mode start breakdown — only for the actual first
+    // narration of the session, and only once (tourStartPerfMark is nulled
+    // right after). Covers the whole tap-Start-Tour-to-first-word pipeline,
+    // not just the narration-generation slice time_to_first_audio measures
+    // above — see startTour/onLocation/runNeighborhoodOrientation for where
+    // each stage timestamp gets stamped.
+    if (tourStartPerfMark !== null && firstAudioPlaybackAt !== null) {
+      const breakdown = {
+        ...tourStartStageTimestamps,
+        firstAudioMs: Math.round(firstAudioPlaybackAt - tourStartPerfMark),
+      };
+      console.log("[latency] Wander Mode start breakdown:", breakdown);
+      logEvent("tour_start_latency", breakdown);
+      tourStartPerfMark = null;
     }
 
     // audioPlayer.ended is only true after a natural finish — interruptPlayback()
@@ -5027,7 +5203,17 @@ let isCancelledListening = false;
 let silenceTimer = null;
 
 const INITIAL_SILENCE_MS = 8000; // generous window before the user starts speaking
-const FOLLOWUP_SILENCE_MS = 3000; // stop 3s after the user stops speaking
+// Real-device testing (core tour Q&A flow): the mic reliably picks up
+// speech, but was cutting off the last 1-2s before the person actually
+// finished talking. This timer resets on every interim result, so the most
+// likely cause is real Web Speech API processing latency between someone
+// still actively speaking and the browser delivering the next interim
+// result — 3000ms wasn't quite enough buffer for that gap in practice.
+// Bumped modestly rather than aggressively, since this can't be verified
+// without real speech on real hardware (this sandboxed environment has no
+// real microphone) — re-check after this change on a real device before
+// tuning further in either direction.
+const FOLLOWUP_SILENCE_MS = 4000; // stop 4s after the last detected speech
 const MIN_QUESTION_LENGTH = 5; // shorter than this is almost always a mis-hear, not a real question
 const CONFIRM_DISPLAY_MS = 1000; // show the full captured text before sending it
 
@@ -5367,6 +5553,18 @@ listeningHint.addEventListener("click", () => {
   if (isListening) cancelListening();
 });
 
+// Enter sends the corrected text (see the confirm-window edit affordance
+// in finishListening above) — an empty edit is treated as "changed my mind,
+// don't send anything" rather than falling back to the original mishearing.
+if (askEditInput) {
+  askEditInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    const edited = askEditInput.value.trim();
+    askEditInput.classList.add("hidden");
+    if (edited) askSabri(edited);
+  });
+}
+
 function startListening() {
   if (isListening) return;
 
@@ -5381,6 +5579,8 @@ function startListening() {
   micBtn.classList.add("is-listening");
   askSubtitle.textContent = "";
   askSubtitle.classList.remove("hidden");
+  askEditBtn.classList.add("hidden");
+  askEditInput.classList.add("hidden");
   listeningHint.classList.remove("hidden");
   listeningHint.textContent = "Tap to cancel";
   statusText.textContent = "Listening...";
@@ -5413,11 +5613,29 @@ function startListening() {
       return;
     }
 
-    // Show the full captured text for a beat so the user can confirm what
-    // was actually heard before it's sent off to Claude.
+    // Show the full captured text for a beat so the user can confirm or
+    // quickly correct what was actually heard before it's sent off to
+    // Claude — speech recognition still isn't perfect, so a tap-to-edit
+    // beats forcing a full re-ask over one misheard word.
     askSubtitle.textContent = question;
+    askSubtitle.classList.remove("hidden");
+    askEditBtn.classList.remove("hidden");
     statusText.textContent = "Sabri is thinking...";
-    setTimeout(() => askSabri(question), CONFIRM_DISPLAY_MS);
+
+    const sendTimer = setTimeout(() => {
+      askEditBtn.classList.add("hidden");
+      askSabri(question);
+    }, CONFIRM_DISPLAY_MS);
+
+    askEditBtn.onclick = () => {
+      clearTimeout(sendTimer);
+      askEditBtn.classList.add("hidden");
+      askSubtitle.classList.add("hidden");
+      askEditInput.value = question;
+      askEditInput.classList.remove("hidden");
+      askEditInput.focus();
+      askEditInput.select();
+    };
   };
 
   SabriSpeechRecognition.start({
@@ -5509,6 +5727,8 @@ async function askSabri(question) {
         userStatedDestination,
         persona: currentPersona,
         sessionMood,
+        placeFacts: currentPlaceId ? placeFactsCache[currentPlaceId] || null : null,
+        placeConversationHistory: currentPlaceConversation,
       },
       {
         signal: streamAbortController.signal,
@@ -5559,6 +5779,11 @@ async function askSabri(question) {
     }
 
     recordQuestionLog(question, answerText, lastHeading);
+    // Deliberately more generous than sessionLog's 150-char truncation —
+    // this is what actually keeps a deep back-and-forth about ONE place
+    // consistent turn-to-turn (see buildPlaceConversationGuidance).
+    currentPlaceConversation.push({ question, answer: answerText.length > 500 ? `${answerText.slice(0, 500)}...` : answerText });
+    if (currentPlaceConversation.length > 6) currentPlaceConversation.shift();
     totalQuestionsThisSession += 1;
     saveQuestionToSupabase(question, answerText);
     logEvent("voice_question_asked", { placeId: currentPlaceId, questionLength: question.length });

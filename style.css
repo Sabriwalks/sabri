@@ -891,6 +891,43 @@ body {
   text-align: center;
 }
 
+/* Small pencil affordance shown only during the confirm-before-send window
+   — overlaps the top-right corner of .ask-subtitle's bubble. */
+.ask-edit-btn {
+  position: fixed;
+  right: 20px;
+  bottom: calc(env(safe-area-inset-bottom) + 300px + 34px);
+  z-index: 26;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--gold);
+  color: var(--bg);
+  font-size: 13px;
+  line-height: 1;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+/* Replaces .ask-subtitle's exact position/style while editing, so nothing
+   shifts on screen between "displaying" and "editing" the same text. */
+.ask-edit-input {
+  position: fixed;
+  left: 24px;
+  right: 24px;
+  bottom: calc(env(safe-area-inset-bottom) + 300px);
+  z-index: 25;
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: rgba(15, 27, 45, 0.92);
+  border: 1px solid var(--gold);
+  color: var(--white);
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: center;
+  font-family: inherit;
+}
+
 /* Doubles as the "Tap to cancel" control while listening — sits above the
    transcript bubble so the two never overlap. */
 .listening-hint {
