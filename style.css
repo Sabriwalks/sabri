@@ -75,7 +75,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg);
+  /* TEMP TEST — PWA update propagation check — REVERT AFTER CONFIRMING */
+  /* background: var(--bg); */
+  background: #00ff00;
 }
 
 .app-boot-cactus {
