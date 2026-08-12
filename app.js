@@ -772,6 +772,7 @@ async function openOnboardingChat() {
 }
 
 function closeOnboardingChatToQuickSetup() {
+  onboardingChatMic?.cancel();
   onboardingChatEl.classList.add("hidden");
   onboarding.classList.remove("hidden");
   logEvent("onboarding_path_chosen", { path: "quick_setup_after_chat_escape", turns: onboardingChatTurnCount });
@@ -872,52 +873,23 @@ if (onboardingChatInput) {
   });
 }
 
-// Lightweight, self-contained mic handler for the chat input — deliberately
-// does NOT touch isConversing/isNarrating (the tour Q&A flags) since
-// onboarding always happens before any tour starts; reuses the same
-// recognition instance/pickBestAlternative the tour's tap-to-talk uses.
+// Deliberately does NOT touch isConversing/isNarrating (the tour Q&A flags)
+// since onboarding always happens before any tour starts. Routed through
+// SabriSpeechRecognition/createChatMicController (defined further down,
+// alongside the core tour flow's own mic handling) rather than talking to
+// the shared `recognition` global directly — see the comment on
+// createChatMicController for why that direct-usage pattern was the actual
+// bug behind unreliable pickup and mistimed stop-listening in real-world
+// testing.
+const onboardingChatMic = onboardingChatMicBtn
+  ? createChatMicController({
+      micBtn: onboardingChatMicBtn,
+      inputEl: onboardingChatInput,
+      onFinalTranscript: (text) => sendOnboardingChatMessage(text),
+    })
+  : null;
 if (onboardingChatMicBtn) {
-  onboardingChatMicBtn.addEventListener("click", () => {
-    if (!recognition) {
-      showToast("Voice input isn't supported on this device");
-      return;
-    }
-    if (onboardingChatMicBtn.classList.contains("is-listening")) {
-      try {
-        recognition.stop();
-      } catch (error) {
-        // Already stopped — harmless.
-      }
-      return;
-    }
-
-    onboardingChatMicBtn.classList.add("is-listening");
-    recognition.lang = SPEECH_RECOGNITION_LANGS[settings.language] || "en-US";
-    let finalTranscript = "";
-
-    recognition.onresult = (event) => {
-      let interim = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const transcript = pickBestAlternative(event.results[i]).transcript;
-        if (event.results[i].isFinal) finalTranscript += transcript;
-        else interim += transcript;
-      }
-      onboardingChatInput.value = finalTranscript || interim;
-    };
-    recognition.onend = () => {
-      onboardingChatMicBtn.classList.remove("is-listening");
-      if (finalTranscript.trim()) sendOnboardingChatMessage(finalTranscript.trim());
-    };
-    recognition.onerror = () => {
-      onboardingChatMicBtn.classList.remove("is-listening");
-    };
-
-    try {
-      recognition.start();
-    } catch (error) {
-      onboardingChatMicBtn.classList.remove("is-listening");
-    }
-  });
+  onboardingChatMicBtn.addEventListener("click", () => onboardingChatMic.start());
 }
 
 // --- Conversational tour creation ("Just tell Sabri what you want") ---
@@ -959,6 +931,7 @@ async function openPlannerChat() {
 }
 
 function closePlannerChatToStepByStep() {
+  plannerChatMic?.cancel();
   plannerChatEl.classList.add("hidden");
   showPlannerStep(0);
 }
@@ -1038,50 +1011,17 @@ if (plannerChatInput) {
   });
 }
 
-// Same lightweight, self-contained mic handler pattern as the onboarding
-// chat's mic button — reuses the same recognition instance.
+// Same createChatMicController pattern as onboarding-chat's mic button —
+// see its comment above for why this replaced direct `recognition` usage.
+const plannerChatMic = plannerChatMicBtn
+  ? createChatMicController({
+      micBtn: plannerChatMicBtn,
+      inputEl: plannerChatInput,
+      onFinalTranscript: (text) => sendPlannerChatMessage(text),
+    })
+  : null;
 if (plannerChatMicBtn) {
-  plannerChatMicBtn.addEventListener("click", () => {
-    if (!recognition) {
-      showToast("Voice input isn't supported on this device");
-      return;
-    }
-    if (plannerChatMicBtn.classList.contains("is-listening")) {
-      try {
-        recognition.stop();
-      } catch (error) {
-        // Already stopped — harmless.
-      }
-      return;
-    }
-
-    plannerChatMicBtn.classList.add("is-listening");
-    recognition.lang = SPEECH_RECOGNITION_LANGS[settings.language] || "en-US";
-    let finalTranscript = "";
-
-    recognition.onresult = (event) => {
-      let interim = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const transcript = pickBestAlternative(event.results[i]).transcript;
-        if (event.results[i].isFinal) finalTranscript += transcript;
-        else interim += transcript;
-      }
-      plannerChatInput.value = finalTranscript || interim;
-    };
-    recognition.onend = () => {
-      plannerChatMicBtn.classList.remove("is-listening");
-      if (finalTranscript.trim()) sendPlannerChatMessage(finalTranscript.trim());
-    };
-    recognition.onerror = () => {
-      plannerChatMicBtn.classList.remove("is-listening");
-    };
-
-    try {
-      recognition.start();
-    } catch (error) {
-      plannerChatMicBtn.classList.remove("is-listening");
-    }
-  });
+  plannerChatMicBtn.addEventListener("click", () => plannerChatMic.start());
 }
 
 if (onboardingGuestBtn) {
@@ -5106,15 +5046,18 @@ if (recognition) {
 // every alternative, especially on interim results) — falls back to the
 // first alternative in that case, same as requesting just one.
 //
-// Still used directly by the onboarding-chat and planner-chat mic buttons
-// (see their handlers elsewhere in this file), which talk to `recognition`
-// directly and were NOT converted to SabriSpeechRecognition below — only
-// the core "Talk to Sabri" tour Q&A flow was, since that's the walking/
-// AirPods use case this pass is about. Those two other mic entry points
-// will need the same conversion later if/when they need to work natively
-// too; until then they'll simply have no mic button functionality inside
-// the native app (recognition stays null there), same as if the browser
-// never supported Web Speech at all.
+// Only ever called from inside SabriSpeechRecognition's web path below —
+// onboarding-chat and planner-chat used to call this directly too (talking
+// to the shared `recognition` global themselves), but both were converted
+// to go through SabriSpeechRecognition/createChatMicController instead
+// after real-world beta testing surfaced two bugs from that direct-usage
+// pattern: unreliable word pickup and mistimed stop-listening, caused by
+// (a) no silence-timer fallback in the old onboarding/planner handlers,
+// relying solely on the browser's own inconsistent end-of-speech
+// detection, and (b) both flows assigning onresult/onend/onerror directly
+// onto the same shared `recognition` object, silently stomping over
+// whichever flow's handlers were assigned most recently. All three mic
+// entry points now share one implementation, so this can't recur.
 function pickBestAlternative(result) {
   let best = result[0];
   for (let i = 1; i < result.length; i++) {
@@ -5302,11 +5245,22 @@ const SabriSpeechRecognition = (() => {
 })();
 
 SabriSpeechRecognition.ensureReady().then((ready) => {
-  if (!ready) micBtn.classList.add("hidden");
+  if (!ready) {
+    micBtn.classList.add("hidden");
+    onboardingChatMicBtn?.classList.add("hidden");
+    plannerChatMicBtn?.classList.add("hidden");
+  }
 });
 
-function showMicPermissionDenied() {
+// Which flow's mic to retry when the user taps "Try Again" — defaults to
+// the core tour flow's startListening, but any caller can pass its own
+// retry action to showMicPermissionDenied() (see createChatMicController
+// below, used by onboarding-chat/planner-chat).
+let micPermissionRetryAction = startListening;
+
+function showMicPermissionDenied(onRetry) {
   if (!micPermissionDenied) return;
+  micPermissionRetryAction = onRetry || startListening;
   micPermissionHint.classList.remove("hidden");
   micPermissionDenied.classList.remove("hidden");
 }
@@ -5317,8 +5271,83 @@ if (micPermissionCloseBtn) {
 if (micPermissionRetryBtn) {
   micPermissionRetryBtn.addEventListener("click", () => {
     micPermissionDenied.classList.add("hidden");
-    startListening();
+    micPermissionRetryAction();
   });
+}
+
+// Shared mic-button wiring for onboarding-chat and planner-chat — routes
+// through the exact same SabriSpeechRecognition interface and
+// silence-timer pattern the core "Talk to Sabri" flow above uses
+// (INITIAL_SILENCE_MS before any speech, FOLLOWUP_SILENCE_MS resetting on
+// every interim result), instead of relying solely on the browser's own
+// end-of-speech detection with no fallback timeout. That gap — no silence
+// timer at all, just whatever `recognition.onend` decided on its own — plus
+// both flows assigning handlers directly onto the same shared `recognition`
+// global (stomping over whichever flow's handlers were assigned last) were
+// the two real bugs behind "mic doesn't pick up words reliably" and
+// "doesn't stop listening at the right time" in real-world beta testing.
+// Routing everything through SabriSpeechRecognition means there is now
+// exactly one place that ever assigns recognition.onresult/onend/onerror,
+// regardless of which of the three mic buttons is in use.
+function createChatMicController({ micBtn, inputEl, onFinalTranscript }) {
+  let chatSilenceTimer = null;
+  let cancelled = false;
+
+  function resetSilenceTimer(duration) {
+    clearTimeout(chatSilenceTimer);
+    chatSilenceTimer = setTimeout(() => SabriSpeechRecognition.stop(), duration);
+  }
+
+  function start() {
+    if (micBtn.classList.contains("is-listening")) {
+      SabriSpeechRecognition.stop();
+      return;
+    }
+    cancelled = false;
+    micBtn.classList.add("is-listening");
+    resetSilenceTimer(INITIAL_SILENCE_MS);
+
+    SabriSpeechRecognition.start({
+      language: SPEECH_RECOGNITION_LANGS[settings.language] || "en-US",
+      onInterimResult: (text) => {
+        resetSilenceTimer(FOLLOWUP_SILENCE_MS);
+        inputEl.value = text;
+      },
+      onFinalResult: (text) => {
+        clearTimeout(chatSilenceTimer);
+        micBtn.classList.remove("is-listening");
+        if (cancelled) {
+          cancelled = false;
+          return;
+        }
+        const trimmed = text.trim();
+        if (trimmed) onFinalTranscript(trimmed);
+      },
+      onError: (info) => {
+        clearTimeout(chatSilenceTimer);
+        micBtn.classList.remove("is-listening");
+        cancelled = false;
+        if (info?.reason === "permission-denied") {
+          showMicPermissionDenied(start);
+        } else if (info?.reason === "unsupported") {
+          showToast("Voice input isn't supported on this device");
+        }
+        // Any other reason (e.g. genuinely no speech detected) just stops
+        // silently, same as the prior behavior of an empty finalTranscript.
+      },
+    });
+  }
+
+  // Discards whatever's been captured so far without sending it — for
+  // navigating away mid-listen (e.g. tapping "skip"), which previously left
+  // recognition running in the background with nothing to stop it.
+  function cancel() {
+    if (!micBtn.classList.contains("is-listening")) return;
+    cancelled = true;
+    SabriSpeechRecognition.stop();
+  }
+
+  return { start, cancel };
 }
 
 // Always tappable: a tap during an active narration interrupts it cleanly
