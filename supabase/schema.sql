@@ -296,9 +296,10 @@ alter default privileges in schema public grant all on sequences to service_role
 
 -- Simple daily-per-provider spend rollup, read by both the admin
 -- dashboard's spend section and the daily budget-check cron
--- (scripts/check-api-budget.js). Deliberately just a view, not a
--- materialized one — api_usage is nowhere near large enough yet for that
--- to matter, and a plain view never goes stale.
+-- (/api/cron/check-budget in server.js, see vercel.json's crons array).
+-- Deliberately just a view, not a materialized one — api_usage is nowhere
+-- near large enough yet for that to matter, and a plain view never goes
+-- stale.
 create or replace view api_usage_daily as
 select
   date_trunc('day', created_at) as day,
