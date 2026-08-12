@@ -19,5 +19,8 @@
     { "src": "/icon-192.png", "dest": "/icon-192.png" },
     { "src": "/icon-512.png", "dest": "/icon-512.png" },
     { "src": "/(.*)", "dest": "server.js" }
+  ],
+  "crons": [
+    { "path": "/api/cron/check-budget", "schedule": "0 9 * * *" }
   ]
 }

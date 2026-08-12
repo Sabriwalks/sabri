@@ -2365,6 +2365,7 @@ if ("serviceWorker" in navigator && !isCapacitorNative()) {
 
 let hasReloadedForUpdate = false;
 let userRequestedUpdate = false;
+let updateFallbackTimer = null;
 
 // Actively asks the browser to re-fetch service-worker.js and compare it
 // byte-for-byte against the currently installed one — this is the part
@@ -2407,24 +2408,49 @@ function handleUpdateAvailable(registration) {
   }
 }
 
+// Real bug found in device testing: tapping the banner showed a "pressed"
+// state and then just sat there forever — never reloading, never telling
+// the user anything, never going away. Root cause: registration.waiting
+// can legitimately already be empty by the time this runs (e.g. a
+// background auto-apply check from an earlier foreground already consumed
+// it seconds before the user got around to tapping the still-visible
+// banner) — in that case controllerchange never fires, and there was no
+// fallback at all. Fixed two ways: (1) an explicit "Updating..." state so
+// the tap always gives visible feedback, (2) a fallback timer that forces
+// the reload directly if controllerchange doesn't fire promptly, so a tap
+// always resolves to a reload one way or another instead of ever getting
+// stuck. Also the single function both the click handler AND the
+// background auto-apply path call, so if the banner happens to already be
+// showing when an auto-apply fires, it flips to the same "Updating..."
+// state instead of being silently reloaded out from under a stale-looking
+// "Update" button.
 function applyUpdate(registration) {
   userRequestedUpdate = true;
+  if (updateBannerCta) {
+    updateBannerCta.disabled = true;
+    updateBannerCta.textContent = "Updating...";
+  }
+
   const waitingWorker = registration.waiting;
   if (waitingWorker) {
     waitingWorker.postMessage({ type: "SKIP_WAITING" });
   }
-  // If there's genuinely nothing waiting (e.g. it already activated on its
-  // own before this ran), the controllerchange listener above simply never
-  // fires — harmless no-op, the update still applies on the next check.
+
+  clearTimeout(updateFallbackTimer);
+  updateFallbackTimer = setTimeout(() => {
+    if (!hasReloadedForUpdate) {
+      hasReloadedForUpdate = true;
+      window.location.reload();
+    }
+  }, 4000);
 }
 
 function showUpdateBanner(registration) {
   if (!updateBanner || updateBanner.classList.contains("is-visible")) return;
+  updateBannerCta.disabled = false;
+  updateBannerCta.textContent = "Update";
   updateBanner.classList.add("is-visible");
-  updateBannerCta.onclick = () => {
-    updateBannerCta.disabled = true;
-    applyUpdate(registration);
-  };
+  updateBannerCta.onclick = () => applyUpdate(registration);
 }
 
 // --- PWA install banner ---
@@ -4402,6 +4428,50 @@ let currentPersona = null;
 let currentPersonaCity = null;
 let personaFetchPromise = null;
 let personaCityChangedForNextNarration = false;
+// True for exactly the one narration that should include a genuine
+// self-introduction (see buildPersonaGuidance's isFirstPersonaMeeting
+// branch, server.js) — set by ensurePersonaForCity once it's confirmed
+// this user has never met this persona+city combo before, consumed and
+// reset to false the moment narrateAndSpeak() sends the next narration
+// request, so it never accidentally applies to a later one.
+let isFirstPersonaMeetingForNextNarration = false;
+
+const PERSONA_INTRO_STORAGE_KEY = "sabri_persona_introductions";
+
+// Signed-in users get this tracked server-side (user_persona_introductions
+// — persists across devices/reinstalls). Guests have no persistent
+// identity to key a Supabase row on, so this is the local equivalent —
+// same guest/signed-in split already used for profile/settings elsewhere
+// in this app. Both paths converge on the same guarantee: once ever per
+// city+archetype, not once per session.
+async function checkIsFirstPersonaMeeting(city, archetype) {
+  if (currentUser) {
+    try {
+      const response = await fetch("/api/check-persona-introduction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: currentUser.id, city, archetype }),
+      });
+      const data = await response.json();
+      return response.ok ? !!data.isFirstMeeting : false;
+    } catch (error) {
+      // Fail safe toward "no introduction" rather than risk repeating a
+      // multi-sentence intro every narration if this call keeps failing.
+      return false;
+    }
+  }
+
+  try {
+    const seen = JSON.parse(localStorage.getItem(PERSONA_INTRO_STORAGE_KEY) || "[]");
+    const key = `${city}:${archetype}`;
+    if (seen.includes(key)) return false;
+    seen.push(key);
+    localStorage.setItem(PERSONA_INTRO_STORAGE_KEY, JSON.stringify(seen));
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
 
 function updatePersonaChip() {
   if (!personaChipEl || !personaChipNameEl) return;
@@ -4444,6 +4514,7 @@ async function ensurePersonaForCity(city, country) {
         currentPersonaCity = city;
         updatePersonaChip();
         logEvent("persona_selected", { archetype, city, cached: data.cached === true });
+        isFirstPersonaMeetingForNextNarration = await checkIsFirstPersonaMeeting(city, archetype);
       }
     } catch (error) {
       // Non-fatal — narration just proceeds as generic Sabri, no persona
@@ -4727,6 +4798,8 @@ async function narrateAndSpeak({
   }
   const isCityChange = personaCityChangedForNextNarration;
   personaCityChangedForNextNarration = false;
+  const isFirstPersonaMeeting = isFirstPersonaMeetingForNextNarration;
+  isFirstPersonaMeetingForNextNarration = false;
 
   advanceTourLoadingStage("preparing");
   const bestGuessName = tier === "neighborhood" ? place?.name : choosePrimaryPlace(places)?.name;
@@ -4833,6 +4906,8 @@ async function narrateAndSpeak({
           isCityChange,
           sessionMood,
           isGuidedTour: plannedTourActive,
+          isFirstPersonaMeeting,
+          userId: currentUser ? currentUser.id : null,
         },
         {
           signal: streamAbortController.signal,
@@ -5729,6 +5804,7 @@ async function askSabri(question) {
         sessionMood,
         placeFacts: currentPlaceId ? placeFactsCache[currentPlaceId] || null : null,
         placeConversationHistory: currentPlaceConversation,
+        userId: currentUser ? currentUser.id : null,
       },
       {
         signal: streamAbortController.signal,

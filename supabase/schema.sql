@@ -94,6 +94,26 @@ create table if not exists guide_personas (
   unique (city, archetype)
 );
 
+-- Per-user, unlike guide_personas above (which is a shared content cache
+-- with no notion of any individual user). Tracks whether THIS user has
+-- already had a full self-introduction from a given persona in a given
+-- city, so it fires once ever per user+city+archetype rather than once per
+-- session — staying in Jerusalem a week with the same historian persona
+-- should mean one introduction, not one every session/day. See
+-- /api/check-persona-introduction and buildPersonaGuidance's
+-- isFirstPersonaMeeting branch in server.js. Guests (no account) get an
+-- equivalent client-side-only check via localStorage instead of a row
+-- here — same guest/signed-in split already used for profile/settings
+-- persistence elsewhere in this app.
+create table if not exists user_persona_introductions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles (id) on delete cascade,
+  city text not null,
+  archetype text not null,
+  introduced_at timestamptz not null default now(),
+  unique (user_id, city, archetype)
+);
+
 -- Same shared-cache pattern as guide_personas, for a different real
 -- problem: real-world multi-turn Q&A about one place produced three
 -- different construction dates and two different architectural styles in
@@ -149,6 +169,27 @@ create table if not exists feedback_reports (
   created_at timestamptz not null default now()
 );
 
+-- Centralized third-party API spend tracking (Anthropic, OpenAI, Google
+-- Maps/Places, Serper, OpenWeatherMap) — written via a single thin wrapper
+-- around each provider client (see logApiUsage/API_PRICING in server.js),
+-- not scattered logging calls per endpoint. Costs are approximate/
+-- illustrative (fixed per-provider rates, not a live pricing lookup) —
+-- good enough for trend/budget tracking at this stage, not meant to be
+-- exact accounting. on delete set null (not cascade) deliberately — a
+-- deleted user's past API spend already happened and is still real
+-- historical cost data worth keeping in aggregate, even once the user_id
+-- it was attributed to no longer resolves to anything.
+create table if not exists api_usage (
+  id uuid primary key default gen_random_uuid(),
+  provider text not null,
+  endpoint text not null,
+  units numeric,
+  cost_usd numeric not null default 0,
+  user_id uuid references profiles (id) on delete set null,
+  meta jsonb default '{}',
+  created_at timestamptz not null default now()
+);
+
 create index if not exists visited_places_user_id_idx on visited_places (user_id, visited_at desc);
 create index if not exists walk_sessions_user_id_idx on walk_sessions (user_id, started_at desc);
 create index if not exists user_questions_user_id_idx on user_questions (user_id, asked_at desc);
@@ -157,6 +198,9 @@ create index if not exists interaction_events_event_type_idx on interaction_even
 create index if not exists interaction_events_created_at_idx on interaction_events (created_at desc);
 create index if not exists feedback_reports_status_created_at_idx on feedback_reports (status, created_at desc);
 create index if not exists place_facts_place_id_idx on place_facts (place_id);
+create index if not exists user_persona_introductions_user_id_idx on user_persona_introductions (user_id);
+create index if not exists api_usage_created_at_idx on api_usage (created_at desc);
+create index if not exists api_usage_provider_idx on api_usage (provider);
 
 -- The backend always talks to Supabase with the service_role key (which
 -- bypasses RLS entirely), so these policies exist purely as defense in
@@ -170,6 +214,8 @@ alter table guide_personas enable row level security;
 alter table interaction_events enable row level security;
 alter table feedback_reports enable row level security;
 alter table place_facts enable row level security;
+alter table user_persona_introductions enable row level security;
+alter table api_usage enable row level security;
 
 drop policy if exists "Users manage their own profile" on profiles;
 create policy "Users manage their own profile" on profiles
@@ -185,6 +231,10 @@ create policy "Users manage their own visited places" on visited_places
 
 drop policy if exists "Users manage their own questions" on user_questions;
 create policy "Users manage their own questions" on user_questions
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists "Users manage their own persona introductions" on user_persona_introductions;
+create policy "Users manage their own persona introductions" on user_persona_introductions
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 -- guide_personas is shared, non-sensitive cached content (a generated
@@ -243,3 +293,18 @@ grant all on all tables in schema public to service_role;
 grant all on all sequences in schema public to service_role;
 alter default privileges in schema public grant all on tables to service_role;
 alter default privileges in schema public grant all on sequences to service_role;
+
+-- Simple daily-per-provider spend rollup, read by both the admin
+-- dashboard's spend section and the daily budget-check cron
+-- (scripts/check-api-budget.js). Deliberately just a view, not a
+-- materialized one — api_usage is nowhere near large enough yet for that
+-- to matter, and a plain view never goes stale.
+create or replace view api_usage_daily as
+select
+  date_trunc('day', created_at) as day,
+  provider,
+  count(*) as request_count,
+  sum(cost_usd) as total_cost_usd
+from api_usage
+group by 1, 2
+order by 1 desc, 2;

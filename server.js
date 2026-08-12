@@ -18,6 +18,13 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const OPENWEATHER_API_KEY = process.env.OPENWEATHER_API_KEY;
 const SERPER_API_KEY = process.env.SERPER_API_KEY;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+// Budget-alert config (see /api/cron/check-budget) — all optional, with
+// sane defaults/graceful no-ops so this works out of the box without
+// requiring the user to set anything up first.
+const MONTHLY_API_BUDGET_USD = parseFloat(process.env.MONTHLY_API_BUDGET_USD) || 100;
+const CRON_SECRET = process.env.CRON_SECRET;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const ADMIN_ALERT_EMAIL = process.env.ADMIN_ALERT_EMAIL;
 
 // Easy kill-switch for the camera "point and learn" feature — flip to false
 // if App Store review ever raises an issue with it, without needing a
@@ -55,6 +62,100 @@ const supabaseAdmin =
   SUPABASE_URL && SUPABASE_SERVICE_KEY
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } })
     : null;
+
+// --- Centralized API spend tracking (see api_usage in supabase/schema.sql) ---
+//
+// Approximate, illustrative per-provider rates — not pulled from a live
+// pricing API. Good enough for trend/budget tracking at this stage; revisit
+// if/when exact accounting actually matters. Update these if a provider's
+// published pricing changes materially.
+const API_PRICING = {
+  anthropic: { inputPerMTok: 3.0, outputPerMTok: 15.0 }, // Claude Sonnet, per million tokens
+  openaiTts: { per1kChars: 0.015 }, // tts-1
+  googleMaps: { perRequest: 0.017 }, // rough blended Places/Geocoding/Photo rate
+  serper: { perRequest: 0.001 },
+  openWeather: { perRequest: 0 }, // free tier at this app's volume
+};
+
+// Fire-and-forget, same non-blocking pattern as the client's logEvent() —
+// usage tracking must never be able to slow down or break the actual
+// user-facing request it's measuring.
+function logApiUsage({ provider, endpoint, units, costUsd, userId, meta }) {
+  if (!supabaseAdmin) return;
+  supabaseAdmin
+    .from("api_usage")
+    .insert({
+      provider,
+      endpoint: endpoint || "unknown",
+      units: typeof units === "number" ? units : null,
+      cost_usd: typeof costUsd === "number" ? costUsd : 0,
+      user_id: userId || null,
+      meta: meta || {},
+    })
+    .then(({ error }) => {
+      if (error) console.error("[supabase] api_usage insert failed:", error.message);
+    })
+    .catch((error) => {
+      console.error("[api_usage] logging threw:", error.message);
+    });
+}
+
+// Wraps anthropic.messages.create and openai.audio.speech.create ONCE here
+// — every existing call site elsewhere in this file (narrate, ask,
+// plan-tour, plan-tour-chat, get-persona, get-place-facts, infer-interests,
+// identify, speak) is automatically tracked without scattering a logging
+// call into each one. Call sites optionally pass a 3rd argument —
+// { endpoint, userId } — purely for attribution; it's never sent to the
+// real API, unlike the SDK's own 2nd `options` argument (request signal,
+// headers, etc.), which passes through untouched.
+const rawAnthropicCreate = anthropic.messages.create.bind(anthropic.messages);
+anthropic.messages.create = async function trackedAnthropicCreate(params, options, usageMeta) {
+  const result = await rawAnthropicCreate(params, options);
+  const inputTokens = result?.usage?.input_tokens || 0;
+  const outputTokens = result?.usage?.output_tokens || 0;
+  const costUsd =
+    (inputTokens / 1e6) * API_PRICING.anthropic.inputPerMTok + (outputTokens / 1e6) * API_PRICING.anthropic.outputPerMTok;
+  logApiUsage({
+    provider: "anthropic",
+    endpoint: usageMeta?.endpoint,
+    units: inputTokens + outputTokens,
+    costUsd,
+    userId: usageMeta?.userId,
+    meta: { inputTokens, outputTokens, model: params.model },
+  });
+  return result;
+};
+
+const rawOpenaiSpeechCreate = openai.audio.speech.create.bind(openai.audio.speech);
+openai.audio.speech.create = async function trackedOpenaiSpeechCreate(params, options, usageMeta) {
+  const result = await rawOpenaiSpeechCreate(params, options);
+  const charCount = typeof params.input === "string" ? params.input.length : 0;
+  const costUsd = (charCount / 1000) * API_PRICING.openaiTts.per1kChars;
+  logApiUsage({
+    provider: "openai_tts",
+    endpoint: usageMeta?.endpoint,
+    units: charCount,
+    costUsd,
+    userId: usageMeta?.userId,
+    meta: { voice: params.voice, model: params.model },
+  });
+  return result;
+};
+
+// For the raw-fetch-based providers (no SDK client to wrap once) — Google
+// Maps/Places, Serper, OpenWeatherMap. Thin wrapper around fetch() itself,
+// called explicitly at each of those call sites (see fetchNearbySearch,
+// /api/geocode, /api/photo, /api/search, fetchCurrentEventsContext,
+// fetchHistoricalFactsSearch, fetchWeather) rather than monkey-patched,
+// since there's no single shared client object for these the way there is
+// for anthropic/openai.
+async function trackedFetch(url, options, { provider, endpoint, userId } = {}) {
+  const response = await fetch(url, options);
+  const pricing = API_PRICING[provider];
+  const costUsd = pricing ? pricing.perRequest : 0;
+  logApiUsage({ provider: provider || "unknown", endpoint, units: 1, costUsd, userId, meta: {} });
+  return response;
+}
 
 // Default TTS identity — every /api/speak call is pinned to VOICE_CONFIG
 // unless the request explicitly (and validly) asks for a different voice
@@ -610,6 +711,7 @@ async function renderAdminDashboard() {
     recentSessionsResult,
     allSessionsForStatsResult,
     feedbackResult,
+    apiUsageDailyResult,
   ] = await Promise.all([
     supabaseAdmin.from("profiles").select("*", { count: "exact", head: true }),
     supabaseAdmin.from("walk_sessions").select("*", { count: "exact", head: true }),
@@ -628,6 +730,11 @@ async function renderAdminDashboard() {
       .limit(2000),
     // No pagination — beta-week volume is expected to stay well under 100.
     supabaseAdmin.from("feedback_reports").select("*").order("created_at", { ascending: false }).limit(100),
+    // api_usage_daily (see supabase/schema.sql) — last 14 days is plenty for
+    // an at-a-glance trend; real per-request tracking, not the rough
+    // per-narration estimate the "Est. cost (recent)" card above still uses
+    // (that one covers usage from before this tracking existed).
+    supabaseAdmin.from("api_usage_daily").select("*").order("day", { ascending: false }).limit(14 * 6),
   ]);
 
   const allSessions = allSessionsForStatsResult.data || [];
@@ -663,6 +770,25 @@ async function renderAdminDashboard() {
 
   const cityRows = topCities
     .map(([city, count]) => `<tr><td>${escapeHtml(city)}</td><td>${count}</td></tr>`)
+    .join("");
+
+  // Real per-provider spend from api_usage_daily (see supabase/schema.sql)
+  // — month-to-date total plus a per-provider breakdown over the loaded
+  // window, both computed here since the view itself is already grouped by
+  // day+provider, not further rolled up.
+  const apiUsageDaily = apiUsageDailyResult.data || [];
+  const now = new Date();
+  const monthStartStr = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+  const monthToDateUsd = apiUsageDaily
+    .filter((row) => row.day && row.day.slice(0, 10) >= monthStartStr)
+    .reduce((sum, row) => sum + (row.total_cost_usd || 0), 0);
+  const providerTotals = new Map();
+  for (const row of apiUsageDaily) {
+    providerTotals.set(row.provider, (providerTotals.get(row.provider) || 0) + (row.total_cost_usd || 0));
+  }
+  const providerRows = [...providerTotals.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([provider, cost]) => `<tr><td>${escapeHtml(provider)}</td><td>$${cost.toFixed(2)}</td></tr>`)
     .join("");
 
   // The feedback-screenshots bucket is private (see supabase/schema.sql) —
@@ -743,6 +869,17 @@ async function renderAdminDashboard() {
   </table>
 
   <p class="note">Estimated costs are approximations based on average usage (Claude narrations × $0.003, OpenAI TTS × $0.010, Google Places × $0.002 per narration), computed over the last ${allSessions.length} sessions.</p>
+
+  <h1 style="font-size:15px;">API spend (real, tracked per-request)</h1>
+  <div class="grid">
+    <div class="card"><div class="label">Month to date</div><div class="value">$${monthToDateUsd.toFixed(2)}</div></div>
+    <div class="card"><div class="label">Monthly budget</div><div class="value">$${MONTHLY_API_BUDGET_USD.toFixed(2)}</div></div>
+  </div>
+  <table>
+    <tr><th>Provider</th><th>Cost (last ${apiUsageDaily.length ? Math.min(14, new Set(apiUsageDaily.map((r) => r.day)).size) : 0} days)</th></tr>
+    ${providerRows || "<tr><td colspan='2'>No tracked API usage yet.</td></tr>"}
+  </table>
+  <p class="note">Real per-request tracking from api_usage (see supabase/schema.sql) — distinct from the rough estimate above, which is a fixed per-narration multiplier covering usage from before this tracking existed. A daily cron (/api/cron/check-budget) alerts if month-to-date spend exceeds or is trending to exceed the budget above.</p>
 
   <h1 style="font-size:15px;">Feedback reports (${feedbackReports.length} most recent)</h1>
   <table>
@@ -998,6 +1135,8 @@ const REQUIRED_TABLES = [
   "interaction_events",
   "feedback_reports",
   "place_facts",
+  "user_persona_introductions",
+  "api_usage",
 ];
 
 // supabase-js has no API for running arbitrary DDL, so this can't actually
@@ -1031,6 +1170,82 @@ async function checkDbSetup() {
 app.post("/api/setup-db", async (req, res) => {
   const status = await checkDbSetup();
   res.json(status);
+});
+
+// Best-effort email via Resend's REST API — no-op if not configured (no
+// existing email infrastructure in this app, and setting one up isn't part
+// of "keep this simple"). Alerting still works without it: the console.error
+// below is always written regardless, visible in Vercel's function logs,
+// and get-budget-status still surfaces the same over-budget state in the
+// admin dashboard. Configure RESEND_API_KEY + ADMIN_ALERT_EMAIL later to
+// upgrade to real email with no code changes needed.
+async function sendBudgetAlertEmail(subject, text) {
+  if (!RESEND_API_KEY || !ADMIN_ALERT_EMAIL) return;
+  try {
+    await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: "Sabri Budget Alerts <onboarding@resend.dev>",
+        to: [ADMIN_ALERT_EMAIL],
+        subject,
+        text,
+      }),
+    });
+  } catch (error) {
+    console.error("[budget-alert] failed to send email:", error.message);
+  }
+}
+
+// Daily budget check (see vercel.json's crons array — runs once a day).
+// Deliberately simple: month-to-date total spend vs MONTHLY_API_BUDGET_USD,
+// plus a basic "trending over" projection (today's daily average × 30) so
+// an alert can fire before the actual threshold is crossed, not just after.
+app.get("/api/cron/check-budget", async (req, res) => {
+  // Vercel Cron sends this header automatically when CRON_SECRET is set in
+  // the project's env vars — without it configured, this endpoint is open
+  // (same as every other GET endpoint here), which is fine for now but
+  // worth locking down before this matters more.
+  if (CRON_SECRET && req.headers.authorization !== `Bearer ${CRON_SECRET}`) {
+    return res.status(401).json({ error: "Unauthorized." });
+  }
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: "Supabase is not configured on the server." });
+  }
+
+  try {
+    const now = new Date();
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const dayOfMonth = now.getUTCDate();
+
+    const { data, error } = await supabaseAdmin
+      .from("api_usage")
+      .select("cost_usd")
+      .gte("created_at", monthStart.toISOString());
+    if (error) {
+      console.error("[supabase] api_usage select failed (budget check):", error.message);
+      return res.status(502).json({ error: "Failed to check budget." });
+    }
+
+    const monthToDateUsd = (data || []).reduce((sum, row) => sum + (row.cost_usd || 0), 0);
+    const dailyAverageUsd = dayOfMonth > 0 ? monthToDateUsd / dayOfMonth : 0;
+    const projectedMonthUsd = dailyAverageUsd * 30;
+    const isOverBudget = monthToDateUsd >= MONTHLY_API_BUDGET_USD;
+    const isTrendingOver = !isOverBudget && projectedMonthUsd >= MONTHLY_API_BUDGET_USD;
+
+    if (isOverBudget || isTrendingOver) {
+      const message = isOverBudget
+        ? `Sabri API spend is OVER budget: $${monthToDateUsd.toFixed(2)} spent this month, budget is $${MONTHLY_API_BUDGET_USD.toFixed(2)}.`
+        : `Sabri API spend is TRENDING over budget: $${monthToDateUsd.toFixed(2)} spent so far, projected to reach $${projectedMonthUsd.toFixed(2)} this month against a $${MONTHLY_API_BUDGET_USD.toFixed(2)} budget.`;
+      console.error(`[budget-alert] ${message}`);
+      await sendBudgetAlertEmail(isOverBudget ? "Sabri: API budget exceeded" : "Sabri: API spend trending over budget", message);
+    }
+
+    res.json({ monthToDateUsd, projectedMonthUsd, budgetUsd: MONTHLY_API_BUDGET_USD, isOverBudget, isTrendingOver });
+  } catch (error) {
+    console.error("[budget-alert] check threw:", error.message);
+    res.status(502).json({ error: "Failed to check budget." });
+  }
 });
 
 app.get("/api/places", async (req, res) => {
@@ -1115,7 +1330,7 @@ async function fetchNearbySearch(lat, lng, radius) {
   url.searchParams.set("radius", String(radius));
   url.searchParams.set("key", GOOGLE_MAPS_API_KEY);
 
-  const googleResponse = await fetch(url);
+  const googleResponse = await trackedFetch(url, undefined, { provider: "googleMaps", endpoint: "places-nearby-search" });
   const data = await googleResponse.json();
 
   if (data.status !== "OK" && data.status !== "ZERO_RESULTS") {
@@ -1142,7 +1357,7 @@ app.get("/api/geocode", async (req, res) => {
   url.searchParams.set("key", GOOGLE_MAPS_API_KEY);
 
   try {
-    const googleResponse = await fetch(url);
+    const googleResponse = await trackedFetch(url, undefined, { provider: "googleMaps", endpoint: "geocode" });
     const data = await googleResponse.json();
 
     if (data.status !== "OK" && data.status !== "ZERO_RESULTS") {
@@ -1177,7 +1392,7 @@ app.get("/api/photo", async (req, res) => {
   url.searchParams.set("key", GOOGLE_MAPS_API_KEY);
 
   try {
-    const googleResponse = await fetch(url);
+    const googleResponse = await trackedFetch(url, undefined, { provider: "googleMaps", endpoint: "photo" });
 
     if (!googleResponse.ok || !googleResponse.body) {
       return res.status(502).json({ error: "Failed to fetch place photo." });
@@ -1309,7 +1524,7 @@ app.post("/api/get-persona", async (req, res) => {
         },
       },
       messages: [{ role: "user", content: userMessage }],
-    });
+    }, undefined, { endpoint: "get-persona" });
 
     const textBlock = message.content.find((block) => block.type === "text");
     const generated = textBlock ? JSON.parse(textBlock.text) : null;
@@ -1345,6 +1560,53 @@ app.post("/api/get-persona", async (req, res) => {
   }
 });
 
+// Checks AND marks in one round trip — see user_persona_introductions in
+// supabase/schema.sql. Not perfectly race-safe against two truly
+// simultaneous requests for the same user+city+archetype (same tolerance
+// as guide_personas' onConflict race above), but that's a harmless
+// worst-case of one duplicate introduction, not worth the complexity of a
+// stricter atomic check for how rarely this fires. Guests (no userId)
+// never call this at all — see app.js, which handles that case entirely
+// client-side via localStorage.
+app.post("/api/check-persona-introduction", async (req, res) => {
+  const { userId, city, archetype } = req.body || {};
+  if (!userId || !city || !archetype) {
+    return res.status(400).json({ error: "userId, city, and archetype are required." });
+  }
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: "Supabase is not configured on the server." });
+  }
+
+  try {
+    const { data: existing, error: lookupError } = await supabaseAdmin
+      .from("user_persona_introductions")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("city", city)
+      .eq("archetype", archetype)
+      .maybeSingle();
+    if (lookupError) {
+      console.error("[supabase] user_persona_introductions select failed:", lookupError.message);
+      return res.json({ isFirstMeeting: false });
+    }
+    if (existing) return res.json({ isFirstMeeting: false });
+
+    const { error: insertError } = await supabaseAdmin
+      .from("user_persona_introductions")
+      .insert({ user_id: userId, city, archetype });
+    if (insertError) {
+      console.error("[supabase] user_persona_introductions insert failed:", insertError.message);
+      // Fail safe toward "don't force an introduction" rather than risk
+      // repeating one every narration if this table is having problems.
+      return res.json({ isFirstMeeting: false });
+    }
+
+    res.json({ isFirstMeeting: true });
+  } catch (error) {
+    res.json({ isFirstMeeting: false });
+  }
+});
+
 // A quick, targeted web search for grounding place_facts generation in
 // something more reliable than Claude's raw parametric memory — the same
 // underlying risk (a specific date/style stated with full confidence but
@@ -1356,11 +1618,15 @@ async function fetchHistoricalFactsSearch(placeName, city, country) {
   if (!SERPER_API_KEY || !placeName) return null;
   try {
     const query = [placeName, city, country, "history built architecture"].filter(Boolean).join(" ");
-    const response = await fetch("https://google.serper.dev/search", {
-      method: "POST",
-      headers: { "X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({ q: query }),
-    });
+    const response = await trackedFetch(
+      "https://google.serper.dev/search",
+      {
+        method: "POST",
+        headers: { "X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ q: query }),
+      },
+      { provider: "serper", endpoint: "place-facts-search" }
+    );
     if (!response.ok) return null;
     const data = await response.json();
     const snippets = (data.organic || [])
@@ -1454,7 +1720,7 @@ app.post("/api/get-place-facts", async (req, res) => {
         },
       },
       messages: [{ role: "user", content: userMessage }],
-    });
+    }, undefined, { endpoint: "get-place-facts" });
 
     const textBlock = message.content.find((block) => block.type === "text");
     const generated = textBlock ? JSON.parse(textBlock.text) : null;
@@ -1673,7 +1939,7 @@ async function scorePlaceRelevance(results, interests, specificFocus, inferredIn
         },
       },
       messages: [{ role: "user", content: userMessage }],
-    });
+    }, undefined, { endpoint: "map-pins-relevance" });
 
     const textBlock = message.content.find((block) => block.type === "text");
     const parsed = textBlock ? JSON.parse(textBlock.text) : { relevantPlaces: [] };
@@ -1783,7 +2049,7 @@ app.get("/api/weather", async (req, res) => {
     url.searchParams.set("units", "metric");
     url.searchParams.set("appid", OPENWEATHER_API_KEY);
 
-    const response = await fetch(url);
+    const response = await trackedFetch(url, undefined, { provider: "openWeather", endpoint: "weather" });
     if (!response.ok) {
       return res.json({ weather: null });
     }
@@ -1835,11 +2101,15 @@ app.post("/api/search", async (req, res) => {
   if (!SERPER_API_KEY) return res.json({ results: [] });
 
   try {
-    const response = await fetch("https://google.serper.dev/search", {
-      method: "POST",
-      headers: { "X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({ q: query }),
-    });
+    const response = await trackedFetch(
+      "https://google.serper.dev/search",
+      {
+        method: "POST",
+        headers: { "X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ q: query }),
+      },
+      { provider: "serper", endpoint: "search" }
+    );
     if (!response.ok) return res.json({ results: [] });
 
     const data = await response.json();
@@ -1861,11 +2131,15 @@ async function fetchCurrentEventsContext(placeName, city) {
     const monthYear = now.toLocaleString("en-US", { month: "long", year: "numeric" });
     const query = [placeName, city, monthYear].filter(Boolean).join(" ");
 
-    const response = await fetch("https://google.serper.dev/search", {
-      method: "POST",
-      headers: { "X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({ q: query }),
-    });
+    const response = await trackedFetch(
+      "https://google.serper.dev/search",
+      {
+        method: "POST",
+        headers: { "X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ q: query }),
+      },
+      { provider: "serper", endpoint: "current-events-search" }
+    );
     if (!response.ok) return null;
 
     const data = await response.json();
@@ -1983,14 +2257,32 @@ function buildUserStatedIntentGuidance(userStatedDirection, userStatedDestinatio
 // ensurePersonaForCity) and passed on every /api/narrate call rather than
 // looked up here — keeps this endpoint from needing its own Supabase round
 // trip on every single narration.
-function buildPersonaGuidance(persona, isFirstNarrationOfSession, isCityChange) {
+function buildPersonaGuidance(persona, isFirstNarrationOfSession, isCityChange, isFirstPersonaMeeting) {
   if (!persona || !persona.generated_name) return null;
   const parts = [
     `You are narrating as ${persona.generated_name}, a local guide. ${persona.generated_bio} ` +
       `Speaking style: ${persona.style_notes}. Stay in character as this specific guide throughout ` +
       `the narration while still following all other narration rules.`,
   ];
-  if (isFirstNarrationOfSession) {
+  // isFirstPersonaMeeting takes priority over the lighter session-scoped
+  // branches below — a real self-introduction already covers "mention your
+  // name," and this only fires once ever per user+city+archetype (see
+  // user_persona_introductions), not every session, so it needs to be a
+  // genuine moment, not routine.
+  if (isFirstPersonaMeeting) {
+    parts.push(
+      `IMPORTANT: This person has never met you before, in this city or any other — this is your very ` +
+        `first time narrating for them as ${persona.generated_name}. Before diving into the ` +
+        `place itself, take a real moment to properly introduce yourself the way an actual human local ` +
+        `guide would on meeting a new client for the first time: who you are, your background and how ` +
+        `you came to know this specific city so well, and a bit of what makes you the right person to ` +
+        `show them around here — grounded in ${persona.generated_bio} and your own style, not generic. ` +
+        `This should feel like meeting a real person, not reciting a bio. Keep it warm and natural, a ` +
+        `handful of sentences, not a monologue — then transition naturally into the actual narration. ` +
+        `This is a one-time moment; don't repeat this level of self-introduction in future narrations ` +
+        `with this person in this city.`
+    );
+  } else if (isFirstNarrationOfSession) {
     parts.push(
       `Since this is the first narration of the session, introduce yourself by name naturally as ` +
         `part of the warm greeting — not as a separate announcement, just weave "I'm ` +
@@ -2117,7 +2409,7 @@ async function findPlaceForQuery(query, biasLat, biasLng) {
   url.searchParams.set("key", GOOGLE_MAPS_API_KEY);
 
   try {
-    const response = await fetch(url);
+    const response = await trackedFetch(url, undefined, { provider: "googleMaps", endpoint: "find-place-from-text" });
     const data = await response.json();
     if (data.status !== "OK" || !Array.isArray(data.candidates) || data.candidates.length === 0) {
       console.log(`[debug] findPlaceForQuery("${query}") status=${data.status} error=${data.error_message || "none"}`);
@@ -2212,7 +2504,7 @@ app.post("/api/plan-tour", async (req, res) => {
         },
       },
       messages: [{ role: "user", content: userMessage }],
-    });
+    }, undefined, { endpoint: "plan-tour" });
 
     const textBlock = message.content.find((block) => block.type === "text");
     const plan = textBlock ? JSON.parse(textBlock.text) : null;
@@ -2262,7 +2554,7 @@ app.post("/api/plan-tour", async (req, res) => {
 // has already fully played anyway.
 async function streamSentencesSSE(
   res,
-  { system, userMessage, maxTokens = 2048, markerPrefix = null, markerPosition = "trailing" }
+  { system, userMessage, maxTokens = 2048, markerPrefix = null, markerPosition = "trailing", usageMeta = null }
 ) {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -2352,8 +2644,26 @@ async function streamSentencesSSE(
       flush(false);
     });
 
-    await stream.finalMessage();
+    const finalMessage = await stream.finalMessage();
     flush(true);
+
+    // Not routed through the anthropic.messages.create wrapper above —
+    // .stream() is a different SDK method with its own usage reporting
+    // (only available once finalMessage() resolves), so this is handled
+    // directly here instead, the one shared place both /api/narrate and
+    // /api/ask's streaming actually flows through.
+    const inputTokens = finalMessage?.usage?.input_tokens || 0;
+    const outputTokens = finalMessage?.usage?.output_tokens || 0;
+    const costUsd =
+      (inputTokens / 1e6) * API_PRICING.anthropic.inputPerMTok + (outputTokens / 1e6) * API_PRICING.anthropic.outputPerMTok;
+    logApiUsage({
+      provider: "anthropic",
+      endpoint: usageMeta?.endpoint,
+      units: inputTokens + outputTokens,
+      costUsd,
+      userId: usageMeta?.userId,
+      meta: { inputTokens, outputTokens, model: "claude-sonnet-4-6", streamed: true },
+    });
 
     if (markerPrefix && markerPosition === "trailing" && markerContent === null) {
       const escapedPrefix = markerPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -2403,6 +2713,8 @@ app.post("/api/narrate", async (req, res) => {
     isCityChange,
     sessionMood,
     isGuidedTour,
+    isFirstPersonaMeeting,
+    userId,
   } = req.body || {};
   const resolvedTier = tier === "neighborhood" ? "neighborhood" : "specific";
 
@@ -2445,7 +2757,7 @@ app.post("/api/narrate", async (req, res) => {
     buildUserStatedIntentGuidance(userStatedDirection, userStatedDestination),
     currentEventsGuidance,
     buildNearbyInterestGuidance(nearbyInterestPlace),
-    buildPersonaGuidance(persona, isFirstNarrationOfSession, isCityChange),
+    buildPersonaGuidance(persona, isFirstNarrationOfSession, isCityChange, isFirstPersonaMeeting),
     buildMoodGuidance(sessionMood),
     CONNECTIVE_NARRATION_GUIDANCE,
     buildProactiveCheckInGuidance(isGuidedTour),
@@ -2477,6 +2789,7 @@ app.post("/api/narrate", async (req, res) => {
     return streamSentencesSSE(res, {
       system: systemPrompt,
       userMessage: `I am standing near ${place.name}, a ${typeLabel} in ${vicinity}. Tell me about this place in your signature style.`,
+      usageMeta: { endpoint: "narrate", userId },
     });
   }
 
@@ -2495,7 +2808,13 @@ app.post("/api/narrate", async (req, res) => {
     `starting on the next line, give your narration.\n\n` +
     buildSpecificUserMessage(places, heading, directionOfTravel);
 
-  streamSentencesSSE(res, { system: systemPrompt, userMessage, markerPrefix: "[[FOCUS", markerPosition: "leading" });
+  streamSentencesSSE(res, {
+    system: systemPrompt,
+    userMessage,
+    markerPrefix: "[[FOCUS",
+    markerPosition: "leading",
+    usageMeta: { endpoint: "narrate", userId },
+  });
 });
 
 function buildSpecificUserMessage(places, heading, directionOfTravel) {
@@ -2551,6 +2870,7 @@ app.post("/api/ask", async (req, res) => {
     sessionMood,
     placeFacts,
     placeConversationHistory,
+    userId,
   } = req.body || {};
 
   if (!question) {
@@ -2653,7 +2973,13 @@ app.post("/api/ask", async (req, res) => {
 
   const systemPrompt = systemPromptParts.join("\n\n");
 
-  streamSentencesSSE(res, { system: systemPrompt, userMessage: questionWithMetaInstruction, maxTokens: 1024, markerPrefix: "[[META" });
+  streamSentencesSSE(res, {
+    system: systemPrompt,
+    userMessage: questionWithMetaInstruction,
+    maxTokens: 1024,
+    markerPrefix: "[[META",
+    usageMeta: { endpoint: "ask", userId },
+  });
 });
 
 // Weaves the onboarding profile into the prompt so every narration/answer
@@ -2804,12 +3130,16 @@ app.post("/api/speak", async (req, res) => {
   const resolvedText = text.length > 4096 ? text.slice(0, 4096) : text;
 
   try {
-    const speech = await openai.audio.speech.create({
-      model: VOICE_CONFIG.model,
-      voice: resolvedVoice,
-      input: resolvedText,
-      speed: resolvedSpeed,
-    });
+    const speech = await openai.audio.speech.create(
+      {
+        model: VOICE_CONFIG.model,
+        voice: resolvedVoice,
+        input: resolvedText,
+        speed: resolvedSpeed,
+      },
+      undefined,
+      { endpoint: "speak" }
+    );
 
     res.setHeader("Content-Type", "audio/mpeg");
     Readable.fromWeb(speech.body).pipe(res);
@@ -2874,7 +3204,7 @@ app.post("/api/identify", async (req, res) => {
           ],
         },
       ],
-    });
+    }, undefined, { endpoint: "identify" });
 
     const narration = message.content.find((block) => block.type === "text")?.text || "";
     res.json({ narration });
@@ -2956,7 +3286,7 @@ app.post("/api/onboarding-chat", async (req, res) => {
         role: entry.role === "assistant" ? "assistant" : "user",
         content: String(entry.content || ""),
       })),
-    });
+    }, undefined, { endpoint: "onboarding-chat" });
 
     const textBlock = message.content.find((block) => block.type === "text");
     const parsed = textBlock
@@ -3057,7 +3387,7 @@ app.post("/api/plan-tour-chat", async (req, res) => {
         role: entry.role === "assistant" ? "assistant" : "user",
         content: String(entry.content || ""),
       })),
-    });
+    }, undefined, { endpoint: "plan-tour-chat" });
 
     const textBlock = message.content.find((block) => block.type === "text");
     const parsed = textBlock
@@ -3461,7 +3791,7 @@ app.post("/api/infer-interests", async (req, res) => {
         },
       },
       messages: [{ role: "user", content: userMessage }],
-    });
+    }, undefined, { endpoint: "infer-interests", userId });
 
     const textBlock = message.content.find((block) => block.type === "text");
     const parsed = textBlock ? JSON.parse(textBlock.text) : { inferredInterests: [] };
