@@ -9,3 +9,7 @@ www/
 
 .vercel
 .env*
+
+# Generated audio from scripts/tts-comparison.js — a one-off voice-quality
+# test, never meant to be committed.
+/tts-comparison-output/
