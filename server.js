@@ -17,6 +17,10 @@ const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const OPENWEATHER_API_KEY = process.env.OPENWEATHER_API_KEY;
 const SERPER_API_KEY = process.env.SERPER_API_KEY;
+// A pre-encoded HTTP Basic Auth credential (base64 of key:secret) from the
+// Inworld Portal — used directly as-is in the Authorization header, never
+// re-encoded. See speakWithInworld below.
+const INWORLD_API_KEY = process.env.INWORLD_API_KEY;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 // Budget-alert config (see /api/cron/check-budget) — all optional, with
 // sane defaults/graceful no-ops so this works out of the box without
@@ -44,6 +48,7 @@ console.log(
   "[env check] GOOGLE_MAPS_API_KEY:", !!GOOGLE_MAPS_API_KEY,
   "| ANTHROPIC_API_KEY:", !!ANTHROPIC_API_KEY,
   "| OPENAI_API_KEY:", !!OPENAI_API_KEY,
+  "| INWORLD_API_KEY:", !!INWORLD_API_KEY,
   "| SUPABASE_URL:", !!SUPABASE_URL,
   "| SUPABASE_ANON_KEY:", !!SUPABASE_ANON_KEY,
   "| SUPABASE_SERVICE_KEY:", !!SUPABASE_SERVICE_KEY
@@ -178,6 +183,15 @@ async function trackedFetch(url, options, { provider, endpoint, userId } = {}) {
   return response;
 }
 
+// --- TTS provider switch ---
+// Single config point deciding which provider /api/speak actually calls —
+// see speakWithOpenAI/speakWithInworld below, and TTS_PROVIDER's own
+// comment for why Inworld is now the default. Flipping this back to
+// "openai" (here, or via the env var) is the entire rollback path if
+// Inworld has any real-world issues — the OpenAI code path below is
+// untouched, not just left in place.
+const TTS_PROVIDER = process.env.TTS_PROVIDER || "inworld";
+
 // Default TTS identity — every /api/speak call is pinned to VOICE_CONFIG
 // unless the request explicitly (and validly) asks for a different voice
 // from the settings panel. `model` never varies; `voice` must be one of
@@ -199,18 +213,12 @@ const LANGUAGE_VOICE_MAP = {
 // Language correctness wins over the user's stored voice preference for
 // non-English tours (an "Onyx" preference doesn't matter if Onyx mangles
 // Hebrew) — English is the only language where the user's own choice applies.
+// Only ever called from speakWithOpenAI — Inworld has its own resolver
+// below, since its voice IDs share nothing with OpenAI's.
 function resolveSpeakVoice(language, preferredVoice) {
   const languageVoice = LANGUAGE_VOICE_MAP[language];
   if (languageVoice) return languageVoice;
   return VALID_VOICES.includes(preferredVoice) ? preferredVoice : VOICE_CONFIG.voice;
-}
-
-// Same per-language default a first-time listener actually hears (before
-// they've ever touched Settings), used only to decide what gender name to
-// generate for a NEW persona — not involved in resolveSpeakVoice's runtime
-// voice selection at all, and never overrides a user's own Settings choice.
-function resolveDefaultVoiceForLanguage(language) {
-  return LANGUAGE_VOICE_MAP[language] || VOICE_CONFIG.voice;
 }
 
 // Real-world testing: the first narration greeted "Miriam" by name in a
@@ -222,6 +230,43 @@ function resolveDefaultVoiceForLanguage(language) {
 // override the voice entirely in Settings afterward — this only fixes the
 // untouched default.
 const VOICE_GENDER = { onyx: "male", echo: "male", nova: "female", shimmer: "female" };
+
+// Inworld's voice catalog uses completely different voice IDs than
+// OpenAI's — confirmed directly against Inworld's real /tts/v1/voices
+// endpoint, not guessed. Hebrew and Arabic each only have 2 voices total on
+// Inworld (one male, one female), so these aren't arbitrary picks. Unlike
+// LANGUAGE_VOICE_MAP, English gets an explicit entry here too — there's no
+// Inworld equivalent of VOICE_CONFIG.voice to fall back to, and the
+// Settings panel's voice picker (Onyx/Nova/Shimmer/Echo) has no meaning
+// for Inworld voice IDs, so every language uses this map's default
+// unconditionally while Inworld is active — no per-user override, unlike
+// the OpenAI path where English respects the user's Settings choice. See
+// speakWithInworld below.
+const INWORLD_LANGUAGE_VOICE_MAP = {
+  en: "Graham", // "Profound, authoritative British male voice, perfect for historical documentaries... educational content"
+  he: "Yael", // the only female Hebrew voice Inworld offers
+  ar: "Nour", // the only female Arabic voice Inworld offers
+  es: "Marta", // Castilian Spanish female, "ideal for education, narration, and business"
+  fr: "Hélène", // the only female-coded voice among Inworld's 4 French options
+  ru: "Nikolai", // "Deep, resonant male voice... clear, theatrical, and narrative quality"
+};
+const INWORLD_VOICE_GENDER = { Graham: "male", Yael: "female", Nour: "female", Marta: "female", Hélène: "female", Nikolai: "male" };
+
+function resolveInworldVoice(language) {
+  return INWORLD_LANGUAGE_VOICE_MAP[language] || INWORLD_LANGUAGE_VOICE_MAP.en;
+}
+
+// Provider-aware — used by persona generation (see /api/get-persona) to
+// match a newly generated name's gender to whichever voice the user will
+// ACTUALLY hear, not hardcoded to OpenAI's map regardless of TTS_PROVIDER.
+function resolveDefaultVoiceForLanguage(language) {
+  if (TTS_PROVIDER === "inworld") return resolveInworldVoice(language);
+  return LANGUAGE_VOICE_MAP[language] || VOICE_CONFIG.voice;
+}
+function resolveDefaultVoiceGender(language) {
+  const voice = resolveDefaultVoiceForLanguage(language);
+  return (TTS_PROVIDER === "inworld" ? INWORLD_VOICE_GENDER[voice] : VOICE_GENDER[voice]) || "female";
+}
 
 const HEBREW_PRONUNCIATION_GUIDE = {
   Nachlaot: "Nakh-lah-OHT",
@@ -1610,8 +1655,7 @@ app.post("/api/get-persona", async (req, res) => {
     // (a male name is just as "authentically local" as a female one
     // anywhere) — purely about matching the generated name to the gender of
     // the TTS voice this language defaults to.
-    const defaultVoice = resolveDefaultVoiceForLanguage(resolvedLanguage);
-    const defaultVoiceGender = VOICE_GENDER[defaultVoice] || "female";
+    const defaultVoiceGender = resolveDefaultVoiceGender(resolvedLanguage);
     const userMessage =
       `You are creating a local tour guide persona for ${city}${country ? `, ${country}` : ""}. ` +
       `This guide's core personality and focus area is: ${archetypeDef.focus}. Their tone is ${archetypeDef.tone}.\n\n` +
@@ -3442,15 +3486,15 @@ function buildCrossSessionVisitedGuidance(placeNames) {
   );
 }
 
-app.post("/api/speak", async (req, res) => {
-  const { text, speed, voice, language } = req.body || {};
-
-  if (!text) {
-    return res.status(400).json({ error: "text is required." });
-  }
-
+// Unchanged from before the Inworld work — same request shape, same
+// OpenAI call, same normalization call. Wrapped into its own function
+// purely so /api/speak can route to it, not modified otherwise. This is
+// the entire rollback path if Inworld has real-world issues: flip
+// TTS_PROVIDER back to "openai" and every call goes through this exact,
+// already-proven code again.
+async function speakWithOpenAI({ text, speed, voice, language }) {
   if (!OPENAI_API_KEY) {
-    return res.status(500).json({ error: "OPENAI_API_KEY is not configured on the server." });
+    throw Object.assign(new Error("OPENAI_API_KEY is not configured on the server."), { statusCode: 500 });
   }
 
   // Model never varies. Voice is resolved per-language first (see
@@ -3466,34 +3510,116 @@ app.post("/api/speak", async (req, res) => {
   // exceed that, so clamp rather than let the whole request fail.
   const resolvedText = text.length > 4096 ? text.slice(0, 4096) : text;
 
-  try {
-    // response_format: "wav" (not the default mp3) specifically so the
-    // per-clip loudness normalization below can operate on raw PCM samples
-    // directly — see normalizeWavPeak's comment for why this fixes the
-    // real inter-clip volume inconsistency reported over AirPods without
-    // touching timing/cadence at all. Trade-off, stated plainly: WAV is
-    // uncompressed, so each clip is a larger download than the mp3 this
-    // replaced — acceptable for single-sentence clips, but a real cost if
-    // narrations move to much longer per-request audio later.
-    const speech = await openai.audio.speech.create(
-      {
-        model: VOICE_CONFIG.model,
-        voice: resolvedVoice,
-        input: resolvedText,
-        speed: resolvedSpeed,
-        response_format: "wav",
-      },
-      undefined,
-      { endpoint: "speak" }
-    );
+  // response_format: "wav" (not the default mp3) specifically so the
+  // per-clip loudness normalization below can operate on raw PCM samples
+  // directly — see normalizeWavPeak's comment for why this fixes the real
+  // inter-clip volume inconsistency reported over AirPods without touching
+  // timing/cadence at all. Trade-off, stated plainly: WAV is uncompressed,
+  // so each clip is a larger download than the mp3 this replaced —
+  // acceptable for single-sentence clips, but a real cost if narrations
+  // move to much longer per-request audio later.
+  const speech = await openai.audio.speech.create(
+    {
+      model: VOICE_CONFIG.model,
+      voice: resolvedVoice,
+      input: resolvedText,
+      speed: resolvedSpeed,
+      response_format: "wav",
+    },
+    undefined,
+    { endpoint: "speak" }
+  );
 
-    const arrayBuffer = await speech.arrayBuffer();
-    const normalized = normalizeWavPeak(Buffer.from(arrayBuffer));
+  const arrayBuffer = await speech.arrayBuffer();
+  return normalizeWavPeak(Buffer.from(arrayBuffer));
+}
+
+// Confirmed directly against Inworld's real API (not guessed from docs):
+// POST https://api.inworld.ai/tts/v1/voice, Authorization: Basic
+// <INWORLD_API_KEY> (the key from the Inworld Portal is already the
+// base64(key:secret) Basic Auth credential — used as-is, never re-encoded).
+// Response is {audioContent: base64, usage: {...}} — audioContent decodes
+// straight to a standard 44-byte-header WAV file when audioConfig.
+// audioEncoding: "LINEAR16" is requested (defaults to MP3 otherwise, per a
+// live test) — requesting WAV directly like this was the cleanest option,
+// no conversion step needed for normalizeWavPeak to work on Inworld's
+// output exactly the same way it does on OpenAI's.
+//
+// Voice/model: inworld-tts-1.5-max (their top-quality model, per real-world
+// side-by-side testing not meaningfully slower than OpenAI's tts-1 for a
+// single-sentence request — see the self-review notes in the commit this
+// shipped in). Voice IDs come from INWORLD_LANGUAGE_VOICE_MAP, confirmed
+// against Inworld's live /tts/v1/voices catalog for all 6 languages Sabri
+// supports — no per-user Settings override for now (see
+// INWORLD_LANGUAGE_VOICE_MAP's own comment for why), and no speed/rate
+// control wired up — Inworld's request schema wasn't found to expose an
+// equivalent parameter, so this uses each voice's natural pace rather than
+// guess at an unverified field name.
+async function speakWithInworld({ text, language }) {
+  if (!INWORLD_API_KEY) {
+    throw Object.assign(new Error("INWORLD_API_KEY is not configured on the server."), { statusCode: 500 });
+  }
+
+  const voiceId = resolveInworldVoice(language);
+  // Same 4096-char safety clamp as the OpenAI path — Inworld's own limit
+  // wasn't confirmed, but there's no reason a single narration sentence
+  // should ever approach this regardless of provider.
+  const resolvedText = text.length > 4096 ? text.slice(0, 4096) : text;
+
+  const response = await fetch("https://api.inworld.ai/tts/v1/voice", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${INWORLD_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      text: resolvedText,
+      voiceId,
+      modelId: "inworld-tts-1.5-max",
+      audioConfig: { audioEncoding: "LINEAR16" },
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw Object.assign(new Error(`Inworld TTS API error ${response.status}: ${errorText.slice(0, 300)}`), {
+      statusCode: 502,
+    });
+  }
+
+  const data = await response.json();
+  if (!data.audioContent) {
+    throw Object.assign(new Error("Inworld TTS response had no audioContent."), { statusCode: 502 });
+  }
+
+  logApiUsage({
+    provider: "inworld",
+    endpoint: "speak",
+    units: data.usage?.processedCharactersCount ?? resolvedText.length,
+    costUsd: 0, // no confirmed Inworld pricing to compute this against yet — tracked as a real request either way
+    meta: { voiceId, modelId: data.usage?.modelId || "inworld-tts-1.5-max" },
+  });
+
+  return normalizeWavPeak(Buffer.from(data.audioContent, "base64"));
+}
+
+app.post("/api/speak", async (req, res) => {
+  const { text, speed, voice, language } = req.body || {};
+
+  if (!text) {
+    return res.status(400).json({ error: "text is required." });
+  }
+
+  try {
+    const normalized =
+      TTS_PROVIDER === "inworld"
+        ? await speakWithInworld({ text, speed, voice, language })
+        : await speakWithOpenAI({ text, speed, voice, language });
 
     res.setHeader("Content-Type", "audio/wav");
     res.send(normalized);
   } catch (error) {
-    res.status(502).json({ error: "Failed to generate speech." });
+    res.status(error.statusCode || 502).json({ error: error.statusCode === 500 ? error.message : "Failed to generate speech." });
   }
 });
 
