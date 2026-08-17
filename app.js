@@ -74,6 +74,12 @@ const preferencesClose = document.getElementById("preferences-close");
 const editPreferencesBtn = document.getElementById("edit-preferences-btn");
 const preferencesNameInput = document.getElementById("preferences-name");
 const preferencesInterestsContainer = document.getElementById("preferences-interests");
+// Pillar 3 (ENABLE_NEEDS_ROUTING) — dietary restrictions for food/place
+// ranking (see applyNeedsRoutingSettingsUI in app.js and buildDietaryFilter-
+// Note in server.js). Section stays hidden (see index.html) unless the
+// flag is on.
+const preferencesDietarySection = document.getElementById("preferences-dietary-section");
+const preferencesDietaryContainer = document.getElementById("preferences-dietary");
 const preferencesArchetypeContainer = document.getElementById("preferences-archetype");
 const preferencesVoiceCards = document.querySelectorAll("#preferences-drawer .voice-card");
 const preferencesDepthPills = document.querySelectorAll("#preferences-drawer .depth-pill");
@@ -126,6 +132,14 @@ const plannedTourMetaEl = document.getElementById("planned-tour-meta");
 const plannedTourStartBtn = document.getElementById("planned-tour-start-btn");
 const plannedTourDiscardBtn = document.getElementById("planned-tour-discard-btn");
 const resetOnboardingBtn = document.getElementById("reset-onboarding-btn");
+// Pillar 3 (ENABLE_NEEDS_ROUTING) — see checkNeedsAndMaybeSuggest below.
+const needsSuggestionBanner = document.getElementById("needs-suggestion-banner");
+const needsSuggestionTextEl = document.getElementById("needs-suggestion-text");
+const needsSuggestionClarifyEl = document.getElementById("needs-suggestion-clarify");
+const needsSuggestionYesBtn = document.getElementById("needs-suggestion-yes");
+const needsSuggestionNoBtn = document.getElementById("needs-suggestion-no");
+const settingsNeedsSuggestionsSection = document.getElementById("settings-needs-suggestions-section");
+const needsSuggestionsToggle = document.getElementById("needs-suggestions-toggle");
 const accountSignedIn = document.getElementById("account-signed-in");
 const accountGuest = document.getElementById("account-guest");
 const accountNameEl = document.getElementById("account-name");
@@ -1403,6 +1417,7 @@ function applyProfileFromSupabase(profile) {
     name: profile.name || "",
     reason: profile.reason || "",
     interests: Array.isArray(profile.interests) ? profile.interests : [],
+    dietaryRestrictions: Array.isArray(profile.dietary_restrictions) ? profile.dietary_restrictions : [],
     companions: profile.companions || "",
     language: profile.language || "en",
     depth: profile.depth || "standard",
@@ -1513,7 +1528,23 @@ async function bootstrapApp() {
   initializeAuthState();
 }
 
-bootstrapApp();
+// Real production regression, root-caused after the fact: a visibilitychange
+// firing while bootstrapApp()'s async session check was still in flight
+// (very plausible right after a fresh deploy, when an update is most likely
+// to be pending) could trigger the PWA update banner's auto-apply path,
+// which sets userRequestedUpdate and reloads on the next controllerchange —
+// aborting the in-flight sign-in check mid-request. This is the same CLASS
+// of bug as the original Sign-In Saga (an under-guarded reload colliding
+// with in-progress auth work), just via a new trigger path the original
+// userRequestedUpdate guard was never built to anticipate, since it assumed
+// a reload could only ever be requested by an explicit banner tap. See
+// appBootComplete's use in handleUpdateAvailable below — auto-apply now
+// cannot fire until this is true, regardless of which specific async path
+// (persistent session, OAuth redirect, guest) bootstrapApp took.
+let appBootComplete = false;
+bootstrapApp().finally(() => {
+  appBootComplete = true;
+});
 
 // --- Auth state (Supabase session, cross-session history) ---
 
@@ -1718,6 +1749,7 @@ function maybeTriggerInterestInference() {
 function saveSessionToSupabase() {
   if (!currentUser) return;
   maybeTriggerInterestInference();
+  maybeTriggerRegionMemoryExtraction(); // Pillar 2, no-op unless ENABLE_RELATIONSHIP_CONTINUITY
   const payload = JSON.stringify({
     userId: currentUser.id,
     neighborhood: currentNeighborhoodName,
@@ -1881,6 +1913,52 @@ function applySettingsToUI() {
   voiceCards.forEach((card) => card.classList.toggle("is-active", card.dataset.voice === settings.voice));
   depthPills.forEach((pill) => pill.classList.toggle("is-active", pill.dataset.depth === settings.depth));
   if (languageSelect) languageSelect.value = settings.language;
+  applyActiveVoiceProviderUI();
+}
+
+// Real bug this fixes: after the Inworld TTS switch, Settings and Edit
+// Preferences kept showing the OpenAI voice picker (Onyx/Nova/Shimmer/Echo)
+// even though settings.voice has no effect at all under Inworld — it picks
+// one fixed voice per language (see INWORLD_LANGUAGE_VOICE_MAP in
+// server.js), so the picker was actively lying about what the guide would
+// sound like. window.TTS_PROVIDER / window.INWORLD_LANGUAGE_VOICE_MAP are
+// injected by renderIndexHtml in server.js. Written to read the active
+// provider rather than assume Inworld, so this keeps working correctly if
+// TTS_PROVIDER is ever switched back to "openai" (the picker reappears
+// automatically, no hardcoding either provider's names as "the" names).
+// preferencesLanguage lets the Edit Preferences drawer preview the readonly
+// note against its own draft language selection (not yet saved to
+// settings.language — see populatePreferencesForm/preferencesSaveBtn) so
+// switching language there updates the note live without mutating global
+// settings before Save Changes is actually clicked.
+function applyActiveVoiceProviderUI(preferencesLanguage) {
+  const provider = window.TTS_PROVIDER || "openai";
+  const isInworld = provider === "inworld";
+
+  const settingsOptions = document.getElementById("settings-voice-options");
+  const settingsReadonly = document.getElementById("settings-voice-readonly");
+  const preferencesOptions = document.getElementById("preferences-voice");
+  const preferencesReadonly = document.getElementById("preferences-voice-readonly");
+
+  const voiceMap = window.INWORLD_LANGUAGE_VOICE_MAP || {};
+  const noVoiceText = "Voice selection isn't available for the current guide voice provider.";
+  const textFor = (language) => {
+    const activeVoiceName = voiceMap[language] || voiceMap.en;
+    return activeVoiceName
+      ? `Your guide speaks with the "${activeVoiceName}" voice for the selected language. Voice choice isn't available for this provider — it's tied to language.`
+      : noVoiceText;
+  };
+
+  if (settingsOptions) settingsOptions.classList.toggle("hidden", isInworld);
+  if (settingsReadonly) {
+    settingsReadonly.classList.toggle("hidden", !isInworld);
+    if (isInworld) settingsReadonly.textContent = textFor(settings.language);
+  }
+  if (preferencesOptions) preferencesOptions.classList.toggle("hidden", isInworld);
+  if (preferencesReadonly) {
+    preferencesReadonly.classList.toggle("hidden", !isInworld);
+    if (isInworld) preferencesReadonly.textContent = textFor(preferencesLanguage || settings.language);
+  }
 }
 
 voiceCards.forEach((card) => {
@@ -1906,6 +1984,7 @@ if (languageSelect) {
   languageSelect.addEventListener("change", () => {
     settings.language = languageSelect.value;
     saveSettings();
+    applyActiveVoiceProviderUI();
   });
 }
 
@@ -1938,6 +2017,9 @@ settingsOverlay.addEventListener("click", closeSettings);
 
 function openSettings() {
   updateAccountSettingsUI();
+  // Pillar 3 (ENABLE_NEEDS_ROUTING) — the toggle only makes sense once the
+  // server has the feature enabled at all.
+  if (settingsNeedsSuggestionsSection) settingsNeedsSuggestionsSection.classList.toggle("hidden", !ENABLE_NEEDS_ROUTING);
   settingsDrawer.classList.add("is-open");
   settingsDrawer.setAttribute("aria-hidden", "false");
   settingsOverlay.classList.remove("hidden");
@@ -1984,10 +2066,18 @@ function populatePreferencesForm() {
   preferencesInterestsContainer.querySelectorAll(".onboarding-pill").forEach((pill) => {
     pill.classList.toggle("is-selected", currentInterests.has(pill.dataset.value));
   });
+  if (preferencesDietarySection) preferencesDietarySection.classList.toggle("hidden", !ENABLE_NEEDS_ROUTING);
+  if (preferencesDietaryContainer) {
+    const currentDietary = new Set(userProfile?.dietaryRestrictions || []);
+    preferencesDietaryContainer.querySelectorAll(".onboarding-pill").forEach((pill) => {
+      pill.classList.toggle("is-selected", currentDietary.has(pill.dataset.value));
+    });
+  }
   preferencesVoiceCards.forEach((card) => card.classList.toggle("is-active", card.dataset.voice === settings.voice));
   const currentDepth = userProfile?.depth || settings.depth;
   preferencesDepthPills.forEach((pill) => pill.classList.toggle("is-active", pill.dataset.depth === currentDepth));
   if (preferencesLanguageSelect) preferencesLanguageSelect.value = settings.language;
+  applyActiveVoiceProviderUI();
   const currentArchetype = userProfile?.preferredArchetype || "local_friend";
   if (preferencesArchetypeContainer) {
     preferencesArchetypeContainer.querySelectorAll(".onboarding-pace-option").forEach((option) => {
@@ -2011,12 +2101,24 @@ preferencesInterestsContainer.querySelectorAll(".onboarding-pill").forEach((pill
   pill.addEventListener("click", () => pill.classList.toggle("is-selected"));
 });
 
+if (preferencesDietaryContainer) {
+  preferencesDietaryContainer.querySelectorAll(".onboarding-pill").forEach((pill) => {
+    pill.addEventListener("click", () => pill.classList.toggle("is-selected"));
+  });
+}
+
 preferencesVoiceCards.forEach((card) => {
   card.addEventListener("click", () => {
     preferencesVoiceCards.forEach((c) => c.classList.remove("is-active"));
     card.classList.add("is-active");
   });
 });
+
+if (preferencesLanguageSelect) {
+  preferencesLanguageSelect.addEventListener("change", () => {
+    applyActiveVoiceProviderUI(preferencesLanguageSelect.value);
+  });
+}
 
 preferencesDepthPills.forEach((pill) => {
   pill.addEventListener("click", () => {
@@ -2035,6 +2137,9 @@ if (preferencesSaveBtn) {
     const interests = Array.from(preferencesInterestsContainer.querySelectorAll(".onboarding-pill.is-selected")).map(
       (pill) => pill.dataset.value
     );
+    const dietaryRestrictions = preferencesDietaryContainer
+      ? Array.from(preferencesDietaryContainer.querySelectorAll(".onboarding-pill.is-selected")).map((pill) => pill.dataset.value)
+      : userProfile?.dietaryRestrictions || [];
     const activeVoiceCard = Array.from(preferencesVoiceCards).find((card) => card.classList.contains("is-active"));
     const activeDepthPill = Array.from(preferencesDepthPills).find((pill) => pill.classList.contains("is-active"));
     const voice = activeVoiceCard ? activeVoiceCard.dataset.voice : settings.voice;
@@ -2050,7 +2155,7 @@ if (preferencesSaveBtn) {
     // Commit the draft to live app state (affects the very next narration,
     // no restart needed) at the same time as the Supabase write below.
     const archetypeChanged = preferredArchetype !== userProfile?.preferredArchetype;
-    userProfile = { ...userProfile, name, interests, depth, language, preferredArchetype };
+    userProfile = { ...userProfile, name, interests, dietaryRestrictions, depth, language, preferredArchetype };
     settings.voice = voice;
     settings.depth = depth;
     settings.language = language;
@@ -2400,7 +2505,11 @@ function handleUpdateAvailable(registration) {
       return false;
     }
   })();
-  const safeToApplyNow = !isNarrating && !isConversing && !midAuthResume;
+  // appBootComplete is the fix for a real regression: without it, this
+  // could auto-apply (and reload) while bootstrapApp()'s async session
+  // check was still resolving, silently losing an in-progress sign-in. See
+  // appBootComplete's own comment at the bootstrapApp() call site.
+  const safeToApplyNow = appBootComplete && !isNarrating && !isConversing && !midAuthResume;
 
   if (safeToApplyNow) {
     applyUpdate(registration);
@@ -3019,6 +3128,424 @@ async function triggerNarrationForPlace(place) {
     heading: lastHeading,
     triggerPosition: lastPosition || { latitude: place.latitude, longitude: place.longitude },
   });
+}
+
+// --- Pillar 1: proactive mid-walk depth (ENABLE_PROACTIVE_DEPTH) ---
+// Entirely new, self-contained logic that runs ALONGSIDE onLocation ->
+// checkForNarration -> narrateAndSpeak via its own setInterval (mirroring
+// the pinIgnoredSampleInterval pattern above) — nothing here is inserted
+// into those functions' bodies. It only ever READS the `lastPosition`
+// global that onLocation already maintains, and reuses the same
+// isNarrating flag those functions already guard on, so this pipeline can
+// never talk over real narration or a tap-to-talk conversation, and real
+// narration/the PWA auto-updater (see handleUpdateAvailable) can never
+// interrupt an in-progress proactive interjection either.
+const ENABLE_PROACTIVE_DEPTH = window.ENABLE_PROACTIVE_DEPTH === true;
+const DWELL_THRESHOLD_MS = (window.DWELL_THRESHOLD_MINUTES || 2.5) * 60 * 1000;
+const DWELL_STILL_RADIUS_METERS = 20; // small movement (looking around) still counts as "dwelling"
+const PROACTIVE_CALLBACKS_PER_WALK = window.PROACTIVE_CALLBACKS_PER_WALK || 2;
+const PROACTIVE_INTERJECTIONS_PER_HOUR = window.PROACTIVE_INTERJECTIONS_PER_HOUR || 3;
+const PROACTIVE_INTERJECTION_WINDOW_MS = 60 * 60 * 1000;
+const PROACTIVE_SUPPRESS_AFTER_QUESTION_MS =
+  (window.PROACTIVE_SUPPRESS_AFTER_QUESTION_MINUTES || 5) * 60 * 1000;
+const DWELL_CHECK_INTERVAL_MS = 20000;
+
+let dwellCheckInterval = null;
+let dwellAnchorPosition = null;
+let dwellAnchorTime = null;
+let dwellInterjectedForAnchor = false;
+let proactiveCallbacksUsedThisWalk = 0;
+let proactiveInterjectionTimestamps = []; // sliding 1-hour window for the per-hour cap
+let lastQuestionAskedAt = 0; // stamped by recordQuestionLog
+
+function resetProactiveDepthState() {
+  dwellAnchorPosition = null;
+  dwellAnchorTime = null;
+  dwellInterjectedForAnchor = false;
+  proactiveCallbacksUsedThisWalk = 0;
+  proactiveInterjectionTimestamps = [];
+  lastQuestionAskedAt = 0;
+}
+
+async function checkDwellAndMaybeInterject() {
+  try {
+    if (!ENABLE_PROACTIVE_DEPTH) return;
+    if (isNarrating || isConversing) return;
+    if (!lastPosition) return;
+    if (Date.now() - lastQuestionAskedAt < PROACTIVE_SUPPRESS_AFTER_QUESTION_MS) return;
+
+    proactiveInterjectionTimestamps = proactiveInterjectionTimestamps.filter(
+      (ts) => Date.now() - ts < PROACTIVE_INTERJECTION_WINDOW_MS
+    );
+    if (proactiveInterjectionTimestamps.length >= PROACTIVE_INTERJECTIONS_PER_HOUR) return;
+
+    if (!dwellAnchorPosition || distanceInMeters(dwellAnchorPosition, lastPosition) > DWELL_STILL_RADIUS_METERS) {
+      dwellAnchorPosition = lastPosition;
+      dwellAnchorTime = Date.now();
+      dwellInterjectedForAnchor = false;
+      return;
+    }
+    if (dwellInterjectedForAnchor) return;
+    if (Date.now() - dwellAnchorTime < DWELL_THRESHOLD_MS) return;
+    dwellInterjectedForAnchor = true;
+
+    const earlierNarrations = sessionLog.filter((entry) => entry.type === "narration" && entry.placeName !== currentPlaceName);
+    const canCallback = proactiveCallbacksUsedThisWalk < PROACTIVE_CALLBACKS_PER_WALK && earlierNarrations.length > 0;
+
+    if (canCallback && Math.random() < 0.5) {
+      const entry = earlierNarrations[Math.floor(Math.random() * earlierNarrations.length)];
+      proactiveCallbacksUsedThisWalk += 1;
+      await offerProactiveInterjection({ type: "callback", callbackTopic: entry.summary });
+    } else if (currentPlaceName) {
+      await offerProactiveInterjection({ type: "dwell", place: { name: currentPlaceName } });
+    }
+  } catch (error) {
+    // Fail silently — a missed or broken proactive interjection must never
+    // interrupt or block the core narration pipeline. Logged server-side
+    // isn't possible here (no request was made), so this is the client-side
+    // equivalent: console-only, never surfaced to the user.
+    console.log("[proactive] dwell check failed, skipping:", error?.message || error);
+  }
+}
+
+async function offerProactiveInterjection({ type, place, callbackTopic }) {
+  if (isNarrating || isConversing) return; // re-check — time may have passed since the caller checked
+  isNarrating = true;
+  proactiveInterjectionTimestamps.push(Date.now());
+  try {
+    await streamSSE(
+      "/api/narrate-proactive",
+      {
+        type,
+        place,
+        callbackTopic,
+        sessionLog,
+        userProfile,
+        language: settings.language,
+        persona: currentPersona,
+        city: currentCity,
+        country: currentCountry,
+        userId: currentUser ? currentUser.id : null,
+      },
+      {
+        onSentence: (sentenceText) => enqueueTtsSentence(sentenceText),
+      }
+    );
+    await waitForTtsQueueDrain();
+    logEvent("proactive_interjection_delivered", { type, placeId: currentPlaceId || null });
+  } catch (error) {
+    console.log("[proactive] interjection failed, skipping:", error?.message || error);
+    logEvent("proactive_interjection_failed", { type, message: error?.message || String(error) });
+  } finally {
+    isNarrating = false;
+  }
+}
+
+// --- Pillar 3: needs-aware proactive routing (ENABLE_NEEDS_ROUTING) ---
+// Entirely new, self-contained logic — its own setInterval (mirroring
+// pinIgnoredSampleInterval/dwellCheckInterval above), its own cooldown
+// state (separate from narration's and Pillar 1's), and it never modifies
+// checkForNarration/narrateAndSpeak. It DOES touch two other existing,
+// non-protected pieces of state directly: plannedTour.stops (Guided Tour
+// Mode's stop list) via a plain array splice from OUTSIDE
+// checkGuidedTourProgress — so that function's own unchanged arrival/
+// narrate/advance logic picks up the inserted stop and auto-resumes the
+// original itinerary afterward for free — and upsertPlaceMarker (Wander
+// Mode's existing marker-rendering helper) to surface a suggested detour
+// on the live map.
+const ENABLE_NEEDS_ROUTING = window.ENABLE_NEEDS_ROUTING === true;
+const NEEDS_MEAL_TRIGGER_MS = (window.NEEDS_MEAL_TRIGGER_MINUTES || 30) * 60 * 1000;
+const NEEDS_WEATHER_TEMP_THRESHOLD_C = window.NEEDS_WEATHER_TEMP_THRESHOLD_C || 32;
+const NEEDS_WEATHER_RAIN_PROB_THRESHOLD = window.NEEDS_WEATHER_RAIN_PROB_THRESHOLD || 0.5;
+const NEEDS_SUGGESTION_COOLDOWN_MS = (window.NEEDS_SUGGESTION_COOLDOWN_MINUTES || 20) * 60 * 1000;
+const NEEDS_CHECK_INTERVAL_MS = 60000;
+const NEEDS_SUGGESTIONS_SETTING_KEY = "sabri_needs_suggestions_enabled";
+const NEEDS_SUGGESTION_AUTO_DISMISS_MS = 6000;
+
+let needsCheckInterval = null;
+let lastNeedsSuggestionAt = 0;
+let needsSuggestionCategoriesUsedThisWalk = new Set();
+// { category, stage: "confirm" | "clarifying" | "resolved" } while the
+// banner is open — non-null is itself the guard against a second
+// suggestion firing on top of an unresolved one.
+let needsSuggestionPending = null;
+let activeDetourPlace = null; // Wander Mode's current suggested-detour marker, if any
+
+function needsSuggestionsEnabledSetting() {
+  if (!settingsNeedsSuggestionsSection) return true;
+  try {
+    const stored = localStorage.getItem(NEEDS_SUGGESTIONS_SETTING_KEY);
+    return stored === null ? true : stored === "true"; // on by default per spec, once the server flag is on
+  } catch (error) {
+    return true;
+  }
+}
+
+if (needsSuggestionsToggle) {
+  needsSuggestionsToggle.checked = needsSuggestionsEnabledSetting();
+  needsSuggestionsToggle.addEventListener("change", () => {
+    try {
+      localStorage.setItem(NEEDS_SUGGESTIONS_SETTING_KEY, String(needsSuggestionsToggle.checked));
+    } catch (error) {
+      // Non-fatal — the toggle just won't persist across reloads this run.
+    }
+  });
+}
+
+function resetNeedsRoutingState() {
+  lastNeedsSuggestionAt = 0;
+  needsSuggestionCategoriesUsedThisWalk = new Set();
+  needsSuggestionPending = null;
+  activeDetourPlace = null;
+  hideNeedsSuggestionBanner();
+}
+
+function hideNeedsSuggestionBanner() {
+  if (needsSuggestionBanner) needsSuggestionBanner.classList.add("hidden");
+  if (needsSuggestionClarifyEl) {
+    needsSuggestionClarifyEl.classList.add("hidden");
+    needsSuggestionClarifyEl.innerHTML = "";
+  }
+}
+
+async function checkNeedsAndMaybeSuggest() {
+  try {
+    if (!ENABLE_NEEDS_ROUTING || !needsSuggestionsEnabledSetting()) return;
+    if (isNarrating || isConversing) return;
+    if (needsSuggestionPending) return;
+    if (Date.now() - lastNeedsSuggestionAt < NEEDS_SUGGESTION_COOLDOWN_MS) return;
+    if (!lastPosition || !tourStartedAt) return;
+
+    if (!needsSuggestionCategoriesUsedThisWalk.has("meal") && Date.now() - tourStartedAt >= NEEDS_MEAL_TRIGGER_MS) {
+      await offerNeedsSuggestion("meal");
+      return;
+    }
+    if (currentWeather) {
+      if (
+        !needsSuggestionCategoriesUsedThisWalk.has("weather_shade") &&
+        typeof currentWeather.temperatureC === "number" &&
+        currentWeather.temperatureC >= NEEDS_WEATHER_TEMP_THRESHOLD_C
+      ) {
+        await offerNeedsSuggestion("weather_shade");
+        return;
+      }
+      if (
+        !needsSuggestionCategoriesUsedThisWalk.has("weather_shelter") &&
+        typeof currentWeather.rainProbabilitySoon === "number" &&
+        currentWeather.rainProbabilitySoon >= NEEDS_WEATHER_RAIN_PROB_THRESHOLD
+      ) {
+        await offerNeedsSuggestion("weather_shelter");
+      }
+    }
+  } catch (error) {
+    // Fail silently — a missed needs-suggestion check must never interrupt
+    // or block core narration.
+    console.log("[needs] check failed, skipping:", error?.message || error);
+  }
+}
+
+function defaultNeedsSuggestionText(category) {
+  if (category === "meal") return "It's coming up on a good time to eat — want me to find a well-rated spot nearby?";
+  if (category === "weather_shade") return "It's quite warm out — want to route toward some shade or a nearby park?";
+  return "Rain looks likely soon — want to head toward some shelter before it starts?";
+}
+
+async function offerNeedsSuggestion(category) {
+  needsSuggestionCategoriesUsedThisWalk.add(category);
+  lastNeedsSuggestionAt = Date.now();
+  needsSuggestionPending = { category, stage: "confirm" };
+  isNarrating = true;
+  try {
+    let questionText = "";
+    await streamSSE(
+      "/api/needs-suggestion",
+      {
+        category,
+        place: currentPlaceId ? { name: currentPlaceName } : null,
+        weather: currentWeather,
+        language: settings.language,
+        persona: currentPersona,
+        userId: currentUser ? currentUser.id : null,
+      },
+      { onSentence: (text) => { questionText = questionText ? `${questionText} ${text}` : text; enqueueTtsSentence(text); } }
+    );
+    await waitForTtsQueueDrain();
+    showNeedsSuggestionBanner(questionText || defaultNeedsSuggestionText(category));
+    logEvent("needs_suggestion_offered", { category });
+  } catch (error) {
+    console.log("[needs] suggestion generation failed, skipping:", error?.message || error);
+    needsSuggestionPending = null;
+  } finally {
+    isNarrating = false;
+  }
+}
+
+function showNeedsSuggestionBanner(text) {
+  if (!needsSuggestionBanner || !needsSuggestionTextEl) return;
+  needsSuggestionTextEl.textContent = text;
+  if (needsSuggestionClarifyEl) {
+    needsSuggestionClarifyEl.classList.add("hidden");
+    needsSuggestionClarifyEl.innerHTML = "";
+  }
+  if (needsSuggestionYesBtn) needsSuggestionYesBtn.textContent = "Yes, take me";
+  needsSuggestionBanner.classList.remove("hidden");
+}
+
+const MEAL_CLARIFY_OPTIONS = ["Quick bite", "Sit-down meal", "Local favorite", "Date spot"];
+
+function showMealClarifyPills() {
+  if (!needsSuggestionClarifyEl || !needsSuggestionTextEl) return;
+  needsSuggestionTextEl.textContent = "What are you in the mood for?";
+  needsSuggestionClarifyEl.innerHTML = "";
+  MEAL_CLARIFY_OPTIONS.forEach((label) => {
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "onboarding-pill";
+    pill.dataset.value = label;
+    pill.textContent = label;
+    pill.addEventListener("click", () => pill.classList.toggle("is-selected"));
+    needsSuggestionClarifyEl.appendChild(pill);
+  });
+  needsSuggestionClarifyEl.classList.remove("hidden");
+  if (needsSuggestionYesBtn) needsSuggestionYesBtn.textContent = "Find it";
+}
+
+if (needsSuggestionYesBtn) {
+  needsSuggestionYesBtn.addEventListener("click", async () => {
+    if (!needsSuggestionPending) return;
+    const { category, stage } = needsSuggestionPending;
+
+    if (category === "meal" && stage === "confirm") {
+      needsSuggestionPending.stage = "clarifying";
+      showMealClarifyPills();
+      return;
+    }
+
+    needsSuggestionYesBtn.disabled = true;
+    try {
+      const preferenceLabels = needsSuggestionClarifyEl
+        ? Array.from(needsSuggestionClarifyEl.querySelectorAll(".is-selected")).map((pill) => pill.dataset.value)
+        : [];
+      await resolveNeedsSuggestionAccepted(category, preferenceLabels);
+    } finally {
+      needsSuggestionYesBtn.disabled = false;
+    }
+  });
+}
+
+if (needsSuggestionNoBtn) {
+  needsSuggestionNoBtn.addEventListener("click", () => {
+    if (!needsSuggestionPending) return;
+    logEvent("needs_suggestion_declined", { category: needsSuggestionPending.category });
+    needsSuggestionPending = null;
+    hideNeedsSuggestionBanner();
+  });
+}
+
+async function resolveNeedsSuggestionAccepted(category, preferenceLabels) {
+  try {
+    let options = [];
+    if (category === "meal") {
+      const preferenceText = preferenceLabels.join(" ");
+      const params = new URLSearchParams({
+        lat: String(lastPosition.latitude),
+        lng: String(lastPosition.longitude),
+        dietary: (userProfile?.dietaryRestrictions || []).join(","),
+        preferenceText,
+      });
+      const response = await fetch(`/api/find-meal-options?${params.toString()}`);
+      const data = await response.json();
+      options = data.options || [];
+      logEvent("needs_suggestion_accepted", { category, preferenceLabels });
+    } else {
+      const kind = category === "weather_shelter" ? "shelter" : "shade";
+      const params = new URLSearchParams({ lat: String(lastPosition.latitude), lng: String(lastPosition.longitude), kind });
+      const response = await fetch(`/api/find-nearby-refuge?${params.toString()}`);
+      const data = await response.json();
+      options = data.options || [];
+      logEvent("needs_suggestion_accepted", { category });
+    }
+
+    const chosen = options[0];
+    if (!chosen) {
+      needsSuggestionTextEl.textContent = "Couldn't find a good option nearby right now — let's keep walking.";
+      needsSuggestionPending = null;
+      setTimeout(hideNeedsSuggestionBanner, NEEDS_SUGGESTION_AUTO_DISMISS_MS);
+      return;
+    }
+
+    if (plannedTourActive && plannedTour) {
+      await insertGuidedTourDetour(chosen, category);
+    } else {
+      insertWanderDetour(chosen, category);
+    }
+
+    needsSuggestionTextEl.textContent = `Heading toward ${chosen.name} — I'll pick your walk back up once you're ready.`;
+    needsSuggestionPending = null;
+    setTimeout(hideNeedsSuggestionBanner, NEEDS_SUGGESTION_AUTO_DISMISS_MS);
+  } catch (error) {
+    console.log("[needs] resolving accepted suggestion failed:", error?.message || error);
+    needsSuggestionTextEl.textContent = "Something went wrong finding a spot — let's keep walking.";
+    needsSuggestionPending = null;
+    setTimeout(hideNeedsSuggestionBanner, NEEDS_SUGGESTION_AUTO_DISMISS_MS);
+  }
+}
+
+// Wander Mode has no fixed route to insert into (checkForNarration is
+// purely GPS-driven, see its own comments) — so "insert a waypoint and
+// auto-resume" here just means surfacing the suggested place prominently
+// on the live map. Once the user physically walks there, the existing,
+// completely unmodified checkForNarration/narrateAndSpeak chain picks it
+// up like any other place — nothing to explicitly "resume" since Wander
+// Mode never had a fixed path to begin with.
+function insertWanderDetour(place, reason) {
+  activeDetourPlace = place;
+  upsertPlaceMarker(place);
+  if (map && typeof place.latitude === "number" && typeof place.longitude === "number") {
+    map.panTo({ lat: place.latitude, lng: place.longitude });
+  }
+  logEvent("needs_detour_started", { reason, mode: "wander" });
+}
+
+function buildDetourStopFromPlace(place, reason) {
+  return {
+    stopNumber: -1, // synthetic — not part of the original numbered itinerary
+    placeName: place.name,
+    placeType: place.primaryType || "restaurant",
+    searchQuery: place.name,
+    whyThisStop: reason === "meal" ? "A quick suggested stop to eat." : "A suggested stop to wait out the weather.",
+    estimatedTimeHere: reason === "meal" ? "30-45 min" : "10-15 min",
+    place,
+    isDetourStop: true,
+  };
+}
+
+// Splices a synthetic stop into plannedTour.stops at the current index —
+// checkGuidedTourProgress (entirely unmodified) then arrives at, narrates,
+// and advances past it exactly like any planned stop, which is what makes
+// "auto-resume the original itinerary afterward" work for free: advancing
+// past the inserted stop lands right back on the next ORIGINAL stop.
+async function insertGuidedTourDetour(place, reason) {
+  if (!plannedTour || !plannedTourActive) return;
+
+  // Persisted BEFORE mutating the array, so a reload mid-detour has
+  // something to recover the original remaining itinerary from — see
+  // tour_detour_cache in schema.sql. (Note: plannedTour itself isn't
+  // currently restored across a reload at all, with or without this
+  // pillar — see the final report's honest scope note on this.)
+  fetch("/api/save-tour-detour", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId: currentSessionId,
+      userId: currentUser ? currentUser.id : null,
+      remainingStops: plannedTour.stops.slice(plannedTourStopIndex),
+      detourReason: reason,
+    }),
+  }).catch(() => {});
+
+  plannedTour.stops.splice(plannedTourStopIndex, 0, buildDetourStopFromPlace(place, reason));
+  logEvent("needs_detour_started", { reason, mode: "guided" });
 }
 
 // --- Tour mode selector + guided tour planner ---
@@ -4269,6 +4796,16 @@ async function startTour() {
   currentSessionId = generateSessionId();
   clearInterval(pinIgnoredSampleInterval);
   pinIgnoredSampleInterval = setInterval(samplePinIgnoredEvents, 60000);
+  // Pillar 1 (ENABLE_PROACTIVE_DEPTH) — same start/clear pattern as
+  // pinIgnoredSampleInterval just above; harmless no-op interval when the
+  // flag is off (checkDwellAndMaybeInterject returns immediately).
+  resetProactiveDepthState();
+  clearInterval(dwellCheckInterval);
+  dwellCheckInterval = setInterval(checkDwellAndMaybeInterject, DWELL_CHECK_INTERVAL_MS);
+  // Pillar 3 (ENABLE_NEEDS_ROUTING) — same start/clear pattern again.
+  resetNeedsRoutingState();
+  clearInterval(needsCheckInterval);
+  needsCheckInterval = setInterval(checkNeedsAndMaybeSuggest, NEEDS_CHECK_INTERVAL_MS);
   pulseEl.classList.remove("is-locked");
   micBtn.classList.add("is-available");
 
@@ -4786,6 +5323,49 @@ function choosePrimaryPlace(places) {
   return pool.reduce((best, place) => (!best || place.distanceMeters < best.distanceMeters ? place : best), null);
 }
 
+// --- Pillar 2: relationship continuity (ENABLE_RELATIONSHIP_CONTINUITY) ---
+// Entirely new functions. The only touch-point inside narrateAndSpeak
+// itself is two single-line, purely additive changes (see below): one new
+// function call alongside the existing ensurePersonaForCity call (same
+// "fetch once per city, reuse across narrations" shape that call already
+// has), and one new optional field in the /api/narrate request body that's
+// null and inert whenever the flag is off. Nothing about narrateAndSpeak's
+// control flow, decision logic, or behavior changes when the flag is off.
+const ENABLE_RELATIONSHIP_CONTINUITY = window.ENABLE_RELATIONSHIP_CONTINUITY === true;
+let regionMemoryEntries = [];
+let regionMemoryFetchedForCity = null;
+
+async function ensureRegionMemoryForCity(city) {
+  if (!ENABLE_RELATIONSHIP_CONTINUITY || !currentUser || !city) return;
+  if (regionMemoryFetchedForCity === city) return;
+  regionMemoryFetchedForCity = city;
+  try {
+    const response = await fetch(
+      `/api/get-region-memory?userId=${encodeURIComponent(currentUser.id)}&city=${encodeURIComponent(city)}`
+    );
+    if (!response.ok) throw new Error(`responded ${response.status}`);
+    const data = await response.json();
+    regionMemoryEntries = Array.isArray(data.entries) ? data.entries : [];
+  } catch (error) {
+    // Fail silently — missing region memory just means narration proceeds
+    // without a personal callback this time, never a blocked narration.
+    console.log("[region-memory] fetch failed, skipping:", error?.message || error);
+    regionMemoryEntries = [];
+  }
+}
+
+// Called alongside maybeTriggerInterestInference (see saveSessionToSupabase)
+// on the same every-3rd-session cadence — a new function call added next to
+// an existing one, not a change to it.
+function maybeTriggerRegionMemoryExtraction() {
+  if (!ENABLE_RELATIONSHIP_CONTINUITY || !currentUser || !currentCity) return;
+  fetch("/api/extract-region-memory", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId: currentUser.id, city: currentCity }),
+  }).catch(() => {});
+}
+
 async function narrateAndSpeak({
   tier,
   place,
@@ -4803,6 +5383,7 @@ async function narrateAndSpeak({
   // advanceTourLoadingStage only ever moves forward, so meeting_guide has
   // to run first or its message never gets a chance to show.
   await ensurePersonaForCity(currentCity, currentCountry);
+  await ensureRegionMemoryForCity(currentCity); // Pillar 2, no-op unless ENABLE_RELATIONSHIP_CONTINUITY
   if (tourStartPerfMark !== null) {
     tourStartStageTimestamps.personaResolvedMs = Math.round(performance.now() - tourStartPerfMark);
   }
@@ -4918,6 +5499,7 @@ async function narrateAndSpeak({
           isGuidedTour: plannedTourActive,
           isFirstPersonaMeeting,
           userId: currentUser ? currentUser.id : null,
+          regionMemory: ENABLE_RELATIONSHIP_CONTINUITY ? regionMemoryEntries : null,
         },
         {
           signal: streamAbortController.signal,
@@ -5074,6 +5656,10 @@ function recordNarrationLog(place, narrationText, heading, wasInFront) {
 }
 
 function recordQuestionLog(question, answer, heading) {
+  // Read by checkDwellAndMaybeInterject (Pillar 1, ENABLE_PROACTIVE_DEPTH)
+  // to suppress proactive interjections for a short window after active
+  // Q&A — a question was just asked, so this isn't dead air to fill.
+  lastQuestionAskedAt = Date.now();
   sessionLog.push({
     type: "question",
     placeName: currentPlaceName,

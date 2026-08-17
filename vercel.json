@@ -21,6 +21,7 @@
     { "src": "/(.*)", "dest": "server.js" }
   ],
   "crons": [
-    { "path": "/api/cron/check-budget", "schedule": "0 9 * * *" }
+    { "path": "/api/cron/check-budget", "schedule": "0 9 * * *" },
+    { "path": "/api/cron/cleanup-detour-cache", "schedule": "0 4 * * *" }
   ]
 }

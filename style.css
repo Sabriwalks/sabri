@@ -1021,6 +1021,92 @@ body {
   cursor: default;
 }
 
+/* Pillar 3: needs-aware proactive routing (ENABLE_NEEDS_ROUTING) — meal/
+   weather suggestion prompt. Uses the shared .hidden utility (not
+   update-banner's opacity/is-visible transition) since this needs to hold
+   dynamically-populated clarifying-question content, not just fade in. */
+.needs-suggestion-banner {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom) + 96px);
+  transform: translateX(-50%);
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border-radius: 20px;
+  background: rgba(15, 27, 45, 0.97);
+  border: 1px solid var(--border);
+  color: var(--white);
+  font-size: 14px;
+  box-shadow: 0 8px 24px var(--warm-shadow);
+  max-width: calc(100% - 32px);
+  width: 360px;
+}
+
+.needs-suggestion-text {
+  margin: 0;
+  line-height: 1.4;
+}
+
+.needs-suggestion-clarify {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.needs-suggestion-clarify .onboarding-pill {
+  padding: 8px 12px;
+  font-size: 12px;
+}
+
+.needs-suggestion-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.needs-suggestion-yes {
+  flex: 1;
+  border: none;
+  background: var(--gold);
+  color: #0f1b2d;
+  font-weight: 700;
+  font-size: 13px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.needs-suggestion-no {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.settings-toggle-checkbox {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  accent-color: var(--gold);
+  cursor: pointer;
+}
+
 /* Settings drawer — slides in from the right. */
 
 .settings-overlay {
@@ -1111,6 +1197,19 @@ body {
 .voice-card-desc {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+/* Shown instead of .voice-options while a provider (e.g. Inworld) doesn't
+   support picking a voice independent of language — see
+   applyActiveVoiceProviderUI in app.js. */
+.voice-readonly-note {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .voice-card.is-active {

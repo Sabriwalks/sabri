@@ -192,6 +192,36 @@ async function trackedFetch(url, options, { provider, endpoint, userId } = {}) {
 // untouched, not just left in place.
 const TTS_PROVIDER = process.env.TTS_PROVIDER || "inworld";
 
+// --- 3-pillar conversational guide system: proactive depth, relationship
+// continuity, needs-aware routing ---
+// All three default OFF. Each pillar's new code is called ALONGSIDE the
+// existing onLocation -> checkForNarration -> narrateAndSpeak chain (see
+// app.js), never inserted into those functions' internals — with all three
+// flags off, the golden path is structurally unchanged. Permanent flags (not
+// a temporary rollout switch to delete later), unlike CAMERA_ENABLED above:
+// these gate genuinely optional behavior a deployment may want to tune or
+// disable indefinitely, not a one-time migration.
+const ENABLE_PROACTIVE_DEPTH = process.env.ENABLE_PROACTIVE_DEPTH === "true";
+const ENABLE_RELATIONSHIP_CONTINUITY = process.env.ENABLE_RELATIONSHIP_CONTINUITY === "true";
+const ENABLE_NEEDS_ROUTING = process.env.ENABLE_NEEDS_ROUTING === "true";
+
+// Pillar 1 (proactive depth) tunables. app.js has no process.env access (it's
+// browser code) — these are read here with defaults and injected into the
+// page alongside the flags above (see renderIndexHtml), the same mechanism
+// TTS_PROVIDER already uses to reach the client.
+const DWELL_THRESHOLD_MINUTES = parseFloat(process.env.DWELL_THRESHOLD_MINUTES) || 2.5;
+const PROACTIVE_CALLBACKS_PER_WALK = parseInt(process.env.PROACTIVE_CALLBACKS_PER_WALK, 10) || 2;
+const PROACTIVE_INTERJECTIONS_PER_HOUR = parseInt(process.env.PROACTIVE_INTERJECTIONS_PER_HOUR, 10) || 3;
+// How long after the user asks a question to suppress proactive
+// interjections — avoids talking over/immediately after active Q&A.
+const PROACTIVE_SUPPRESS_AFTER_QUESTION_MINUTES = parseFloat(process.env.PROACTIVE_SUPPRESS_AFTER_QUESTION_MINUTES) || 5;
+
+// Pillar 3 (needs-aware routing) tunables.
+const NEEDS_MEAL_TRIGGER_MINUTES = parseFloat(process.env.NEEDS_MEAL_TRIGGER_MINUTES) || 30;
+const NEEDS_WEATHER_TEMP_THRESHOLD_C = parseFloat(process.env.NEEDS_WEATHER_TEMP_THRESHOLD_C) || 32;
+const NEEDS_WEATHER_RAIN_PROB_THRESHOLD = parseFloat(process.env.NEEDS_WEATHER_RAIN_PROB_THRESHOLD) || 0.5;
+const NEEDS_SUGGESTION_COOLDOWN_MINUTES = parseFloat(process.env.NEEDS_SUGGESTION_COOLDOWN_MINUTES) || 20;
+
 // Default TTS identity — every /api/speak call is pinned to VOICE_CONFIG
 // unless the request explicitly (and validly) asks for a different voice
 // from the settings panel. `model` never varies; `voice` must be one of
@@ -682,10 +712,33 @@ function renderIndexHtml() {
     safeAnonKey = "";
   }
 
+  // Real bug this fixes: Settings kept showing the OpenAI voice picker
+  // (Onyx/Nova/Shimmer/Echo) after the Inworld TTS switch, even though
+  // Inworld ignores that preference entirely and picks its own voice per
+  // language — a stale, actively misleading UI. TTS_PROVIDER and the
+  // Inworld voice map are non-secret (no key material, just which
+  // provider/voice names are active) — safe to inject the same way
+  // SUPABASE_URL/ANON_KEY are. See applyActiveVoiceProviderUI in app.js.
   const envScript =
     "<script>\n" +
     `  window.SUPABASE_URL = ${JSON.stringify(safeUrl)};\n` +
     `  window.SUPABASE_ANON_KEY = ${JSON.stringify(safeAnonKey)};\n` +
+    `  window.TTS_PROVIDER = ${JSON.stringify(TTS_PROVIDER)};\n` +
+    `  window.INWORLD_LANGUAGE_VOICE_MAP = ${JSON.stringify(INWORLD_LANGUAGE_VOICE_MAP)};\n` +
+    // 3-pillar system flags + tunables — see their declarations above for
+    // why these are real env vars read here rather than hardcoded, and why
+    // app.js (browser code, no process.env) needs them injected this way.
+    `  window.ENABLE_PROACTIVE_DEPTH = ${JSON.stringify(ENABLE_PROACTIVE_DEPTH)};\n` +
+    `  window.ENABLE_RELATIONSHIP_CONTINUITY = ${JSON.stringify(ENABLE_RELATIONSHIP_CONTINUITY)};\n` +
+    `  window.ENABLE_NEEDS_ROUTING = ${JSON.stringify(ENABLE_NEEDS_ROUTING)};\n` +
+    `  window.DWELL_THRESHOLD_MINUTES = ${JSON.stringify(DWELL_THRESHOLD_MINUTES)};\n` +
+    `  window.PROACTIVE_CALLBACKS_PER_WALK = ${JSON.stringify(PROACTIVE_CALLBACKS_PER_WALK)};\n` +
+    `  window.PROACTIVE_INTERJECTIONS_PER_HOUR = ${JSON.stringify(PROACTIVE_INTERJECTIONS_PER_HOUR)};\n` +
+    `  window.PROACTIVE_SUPPRESS_AFTER_QUESTION_MINUTES = ${JSON.stringify(PROACTIVE_SUPPRESS_AFTER_QUESTION_MINUTES)};\n` +
+    `  window.NEEDS_MEAL_TRIGGER_MINUTES = ${JSON.stringify(NEEDS_MEAL_TRIGGER_MINUTES)};\n` +
+    `  window.NEEDS_WEATHER_TEMP_THRESHOLD_C = ${JSON.stringify(NEEDS_WEATHER_TEMP_THRESHOLD_C)};\n` +
+    `  window.NEEDS_WEATHER_RAIN_PROB_THRESHOLD = ${JSON.stringify(NEEDS_WEATHER_RAIN_PROB_THRESHOLD)};\n` +
+    `  window.NEEDS_SUGGESTION_COOLDOWN_MINUTES = ${JSON.stringify(NEEDS_SUGGESTION_COOLDOWN_MINUTES)};\n` +
     "</script>";
 
   // Unlike the Places/Geocoding/Photo proxies elsewhere in this file, the
@@ -1401,6 +1454,35 @@ app.get("/api/cron/check-budget", async (req, res) => {
   }
 });
 
+// Pillar 3 (ENABLE_NEEDS_ROUTING) — daily cleanup of tour_detour_cache rows
+// older than ~1 day (see schema.sql for why a daily cron sweep was chosen
+// over a TTL/pg_cron extension: this is the one background-job mechanism
+// this codebase already has, via vercel.json's crons array, same pattern
+// as check-budget just above).
+app.get("/api/cron/cleanup-detour-cache", async (req, res) => {
+  if (CRON_SECRET && req.headers.authorization !== `Bearer ${CRON_SECRET}`) {
+    return res.status(401).json({ error: "Unauthorized." });
+  }
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: "Supabase is not configured on the server." });
+  }
+  try {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { error, count } = await supabaseAdmin
+      .from("tour_detour_cache")
+      .delete({ count: "exact" })
+      .lt("created_at", cutoff);
+    if (error) {
+      console.error("[supabase] tour_detour_cache cleanup failed:", error.message);
+      return res.status(502).json({ error: "Failed to clean up detour cache." });
+    }
+    res.json({ deleted: count || 0 });
+  } catch (error) {
+    console.error("[debug] cleanup-detour-cache threw:", error.message || error);
+    res.status(502).json({ error: "Failed to clean up detour cache." });
+  }
+});
+
 app.get("/api/places", async (req, res) => {
   const lat = parseFloat(req.query.lat);
   const lng = parseFloat(req.query.lng);
@@ -1492,6 +1574,235 @@ async function fetchNearbySearch(lat, lng, radius) {
 
   return data.results || [];
 }
+
+// --- Pillar 3: needs-aware proactive routing (ENABLE_NEEDS_ROUTING) ---
+const MEAL_PLACE_TYPES = ["restaurant", "cafe", "bakery", "meal_takeaway", "bar"];
+const MEAL_SEARCH_RADIUS_METERS = 800; // wider than narration's radii — worth a short walk for a meal
+
+// Ranks nearby food places by proximity + rating + price-level fit +
+// dietary-restriction/preference keyword match. Uses the SAME
+// fetchNearbySearch/toPlaceResponse helpers /api/places and /api/context
+// already use (not a parallel Places integration), so priceLevel/rating are
+// real Google data, never guessed. preferenceText (optional) is the user's
+// free-text answer to the post-confirmation clarifying question — a soft
+// scoring boost, not a hard filter, since it's unstructured spoken/typed
+// text, not a controlled field.
+app.get("/api/find-meal-options", async (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+  const dietaryRestrictions = req.query.dietary
+    ? req.query.dietary.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
+    : [];
+  const preferenceText = (req.query.preferenceText || "").toLowerCase();
+
+  if (Number.isNaN(lat) || Number.isNaN(lng)) {
+    return res.status(400).json({ error: "lat and lng query params are required." });
+  }
+  if (!ENABLE_NEEDS_ROUTING) {
+    return res.status(403).json({ error: "Needs routing is disabled on this server." });
+  }
+  if (!GOOGLE_MAPS_API_KEY) {
+    return res.status(500).json({ error: "GOOGLE_MAPS_API_KEY is not configured on the server." });
+  }
+
+  try {
+    const results = await fetchNearbySearch(lat, lng, MEAL_SEARCH_RADIUS_METERS);
+    const candidates = results
+      .filter((r) => r.geometry?.location && (r.types || []).some((t) => MEAL_PLACE_TYPES.includes(t)))
+      .map((r) => {
+        const primaryType = MEAL_PLACE_TYPES.find((t) => (r.types || []).includes(t));
+        const distance = distanceMeters(lat, lng, r.geometry.location.lat, r.geometry.location.lng);
+        return { ...toPlaceResponse(r, primaryType), distanceMeters: Math.round(distance) };
+      });
+
+    const scored = candidates.map((place) => {
+      let score = 0;
+      score += (1 - Math.min(place.distanceMeters, MEAL_SEARCH_RADIUS_METERS) / MEAL_SEARCH_RADIUS_METERS) * 40;
+      if (typeof place.rating === "number") score += (place.rating / 5) * 30;
+      if (typeof place.priceLevel === "number") {
+        const wantsUpscale = /date|nice|sit.?down|upscale/.test(preferenceText);
+        score += wantsUpscale ? place.priceLevel * 5 : (4 - place.priceLevel) * 5;
+      }
+      // Dietary fit is a heuristic (Google's Places API has no structured
+      // dietary-accommodation field), so this only ever boosts a score,
+      // never filters a place out — a real match could still exist even if
+      // it doesn't happen to say so in its name/types.
+      const haystack = `${place.name} ${(place.types || []).join(" ")}`.toLowerCase();
+      dietaryRestrictions.forEach((restriction) => {
+        if (haystack.includes(restriction)) score += 15;
+      });
+      if (preferenceText) {
+        const words = preferenceText.split(/\s+/).filter((w) => w.length > 3);
+        if (words.some((w) => haystack.includes(w))) score += 10;
+      }
+      return { ...place, _score: score };
+    });
+
+    scored.sort((a, b) => b._score - a._score);
+    res.json({ options: scored.slice(0, 5).map(({ _score, ...place }) => place) });
+  } catch (error) {
+    console.log("[debug] /api/find-meal-options failed:", error?.message || error);
+    res.status(502).json({ error: "Failed to find meal options." });
+  }
+});
+
+// Weather-detour candidates — shade/park for the heat trigger, a nearby
+// cafe (indoor, waitable) for the rain trigger. Simpler than
+// /api/find-meal-options (no dietary/price scoring needed here) — ranked
+// by proximity + rating only.
+const SHADE_PLACE_TYPES = ["park", "natural_feature"];
+const SHELTER_PLACE_TYPES = ["cafe"];
+const REFUGE_SEARCH_RADIUS_METERS = 600;
+
+app.get("/api/find-nearby-refuge", async (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+  const kind = req.query.kind === "shelter" ? "shelter" : "shade";
+
+  if (Number.isNaN(lat) || Number.isNaN(lng)) {
+    return res.status(400).json({ error: "lat and lng query params are required." });
+  }
+  if (!ENABLE_NEEDS_ROUTING) {
+    return res.status(403).json({ error: "Needs routing is disabled on this server." });
+  }
+  if (!GOOGLE_MAPS_API_KEY) {
+    return res.status(500).json({ error: "GOOGLE_MAPS_API_KEY is not configured on the server." });
+  }
+
+  try {
+    const types = kind === "shelter" ? SHELTER_PLACE_TYPES : SHADE_PLACE_TYPES;
+    const results = await fetchNearbySearch(lat, lng, REFUGE_SEARCH_RADIUS_METERS);
+    const candidates = results
+      .filter((r) => r.geometry?.location && (r.types || []).some((t) => types.includes(t)))
+      .map((r) => {
+        const primaryType = types.find((t) => (r.types || []).includes(t));
+        const distance = distanceMeters(lat, lng, r.geometry.location.lat, r.geometry.location.lng);
+        return { ...toPlaceResponse(r, primaryType), distanceMeters: Math.round(distance) };
+      })
+      .sort((a, b) => {
+        const scoreA = a.distanceMeters - (a.rating || 0) * 100;
+        const scoreB = b.distanceMeters - (b.rating || 0) * 100;
+        return scoreA - scoreB;
+      });
+
+    res.json({ options: candidates.slice(0, 5) });
+  } catch (error) {
+    console.log("[debug] /api/find-nearby-refuge failed:", error?.message || error);
+    res.status(502).json({ error: "Failed to find nearby refuge." });
+  }
+});
+
+// Generates the spoken suggestion itself — phrased as a genuine question
+// the walker can say yes or no to, per spec never a statement that assumes
+// consent. Reuses streamSentencesSSE, same as Pillar 1's
+// /api/narrate-proactive and /api/narrate/api/ask above.
+app.post("/api/needs-suggestion", async (req, res) => {
+  const { category, place, weather, language, persona, userId } = req.body || {};
+
+  if (!ENABLE_NEEDS_ROUTING) {
+    return res.status(403).json({ error: "Needs routing is disabled on this server." });
+  }
+  if (!ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
+  }
+  if (!["meal", "weather_shade", "weather_shelter"].includes(category)) {
+    return res.status(400).json({ error: "category must be meal, weather_shade, or weather_shelter." });
+  }
+
+  const languageName = LANGUAGE_NAMES[language];
+  const systemPromptParts = [
+    `You are Sabri, a warm knowledgeable personal tour guide. You are about to offer the walker a genuine, ` +
+      `entirely optional suggestion — phrase it as a real QUESTION they can say yes or no to, never a ` +
+      `statement that assumes they want it or that you're already doing it. Keep it to one short sentence, ` +
+      `in your own natural voice.`,
+    buildPersonaGuidance(persona, false, false),
+    SPOKEN_LANGUAGE_RULES,
+  ].filter(Boolean);
+  const languageGuidance = buildLanguageGuidance(languageName);
+  if (languageGuidance) systemPromptParts.push(languageGuidance);
+
+  let userMessage;
+  if (category === "meal") {
+    userMessage =
+      `You've been walking together for a while and it's coming up on a natural time to eat. Ask, as ` +
+      `forward planning tied to the actual time of day (NOT "are you hungry?" — frame it around noticing ` +
+      `it's coming up on lunchtime/dinnertime), whether they'd like you to find a well-rated spot nearby` +
+      `${place?.name ? ` — you're currently near ${place.name}` : ""}.`;
+  } else if (category === "weather_shade") {
+    userMessage =
+      `It's quite hot right now${typeof weather?.temperatureC === "number" ? ` (${weather.temperatureC}°C)` : ""}. ` +
+      `Ask if they'd like to route toward some shade or a nearby park to cool off for a bit.`;
+  } else {
+    userMessage =
+      `Rain looks likely soon. Ask if they'd like to head toward some shelter nearby before it starts, ` +
+      `timed ahead of the rain rather than waiting until it's already falling.`;
+  }
+
+  streamSentencesSSE(res, {
+    system: systemPromptParts.join("\n\n"),
+    userMessage,
+    maxTokens: 128,
+    usageMeta: { endpoint: "needs-suggestion", userId },
+  });
+});
+
+// --- Guided Tour detour-and-resume cache (see tour_detour_cache in
+// schema.sql, and /api/cron/cleanup-detour-cache above for cleanup). Saved
+// the moment a detour is confirmed, read back to reconnect to the next
+// planned stop afterward — persisted (not just kept in the client's
+// in-memory plannedTour state) specifically so a reload mid-detour (the
+// same class of risk as the Sign-In Saga: in-flight state lost to a reload)
+// doesn't strand the user's guided tour.
+app.post("/api/save-tour-detour", async (req, res) => {
+  const { sessionId, userId, remainingStops, detourReason } = req.body || {};
+  if (!ENABLE_NEEDS_ROUTING) return res.json({ success: false });
+  if (!sessionId || !Array.isArray(remainingStops)) {
+    return res.status(400).json({ error: "sessionId and remainingStops are required." });
+  }
+  if (!supabaseAdmin) return res.json({ success: false });
+
+  try {
+    const { error } = await supabaseAdmin.from("tour_detour_cache").upsert(
+      {
+        session_id: sessionId,
+        user_id: userId || null,
+        remaining_stops: remainingStops,
+        detour_reason: detourReason || null,
+      },
+      { onConflict: "session_id" }
+    );
+    if (error) {
+      console.error("[supabase] tour_detour_cache upsert failed:", error.message);
+      return res.json({ success: false });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.log("[debug] /api/save-tour-detour failed:", error?.message || error);
+    res.json({ success: false });
+  }
+});
+
+app.get("/api/get-tour-detour", async (req, res) => {
+  const { sessionId } = req.query;
+  if (!ENABLE_NEEDS_ROUTING) return res.json({ remainingStops: null });
+  if (!sessionId) return res.status(400).json({ error: "sessionId query param is required." });
+  if (!supabaseAdmin) return res.json({ remainingStops: null });
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("tour_detour_cache")
+      .select("remaining_stops, detour_reason")
+      .eq("session_id", sessionId)
+      .maybeSingle();
+    if (error) {
+      console.error("[supabase] tour_detour_cache select failed:", error.message);
+      return res.json({ remainingStops: null });
+    }
+    res.json({ remainingStops: data?.remaining_stops || null, detourReason: data?.detour_reason || null });
+  } catch (error) {
+    res.json({ remainingStops: null });
+  }
+});
 
 app.get("/api/geocode", async (req, res) => {
   const lat = parseFloat(req.query.lat);
@@ -2232,6 +2543,13 @@ app.get("/api/weather", async (req, res) => {
       feelsLikeC: typeof data.main?.feels_like === "number" ? Math.round(data.main.feels_like) : null,
       humidity: data.main?.humidity ?? null,
       windSpeed: data.wind?.speed ?? null,
+      // Pillar 3 (ENABLE_NEEDS_ROUTING) weather trigger — only fetched when
+      // that pillar is actually on, to avoid burning extra free-tier calls
+      // for deployments not using it. OpenWeatherMap's free tier has no UV
+      // index endpoint anymore (deprecated in favor of the paid One Call
+      // API), so the heat trigger uses temperatureC alone — see
+      // checkNeedsAndMaybeSuggest in app.js.
+      rainProbabilitySoon: ENABLE_NEEDS_ROUTING ? await fetchRainProbabilitySoon(lat, lng) : null,
     };
 
     weatherCache.set(cacheKey, { weather, timestamp: Date.now() });
@@ -2240,6 +2558,28 @@ app.get("/api/weather", async (req, res) => {
     res.json({ weather: null });
   }
 });
+
+// Pillar 3 (ENABLE_NEEDS_ROUTING) rain-shelter trigger — max probability of
+// precipitation (0-1) across the next few 3-hour forecast blocks, using the
+// free-tier /forecast endpoint (distinct from /weather above, which only
+// covers right now). Fails soft to null like every other weather path here.
+async function fetchRainProbabilitySoon(lat, lng) {
+  try {
+    const url = new URL("https://api.openweathermap.org/data/2.5/forecast");
+    url.searchParams.set("lat", String(lat));
+    url.searchParams.set("lon", String(lng));
+    url.searchParams.set("appid", OPENWEATHER_API_KEY);
+    url.searchParams.set("cnt", "3"); // next ~9 hours — "timed ahead of rain" needs near-term blocks, not next week
+
+    const response = await trackedFetch(url, undefined, { provider: "openWeather", endpoint: "forecast" });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const probabilities = (data.list || []).map((block) => (typeof block.pop === "number" ? block.pop : 0));
+    return probabilities.length ? Math.max(...probabilities) : null;
+  } catch (error) {
+    return null;
+  }
+}
 
 // Weaves current weather into the prompt only when it adds something —
 // Claude decides when it's worth mentioning, this just makes the facts
@@ -3074,6 +3414,7 @@ app.post("/api/narrate", async (req, res) => {
     isGuidedTour,
     isFirstPersonaMeeting,
     userId,
+    regionMemory,
   } = req.body || {};
   const resolvedTier = tier === "neighborhood" ? "neighborhood" : "specific";
 
@@ -3134,6 +3475,7 @@ app.post("/api/narrate", async (req, res) => {
     buildSessionLogGuidance(sessionLog, userProfile?.name),
     isFirstNarrationOfSession ? buildReturningUserGuidance(returningUserContext, userProfile?.name) : null,
     buildCrossSessionVisitedGuidance(crossSessionVisitedPlaces),
+    ENABLE_RELATIONSHIP_CONTINUITY ? buildRegionMemoryGuidance(regionMemory, userProfile?.name) : null,
     buildWeatherGuidance(weather),
     buildUserStatedIntentGuidance(userStatedDirection, userStatedDestination),
     currentEventsGuidance,
@@ -3228,6 +3570,70 @@ function buildSpecificUserMessage(places, heading, directionOfTravel) {
     `none of them fit.`
   );
 }
+
+// --- Pillar 1: proactive mid-walk depth (ENABLE_PROACTIVE_DEPTH) ---
+// A new, self-contained endpoint — NOT a change to /api/narrate. Called by
+// app.js's dwell-timer and callback logic (see maybeOfferDwellDepth /
+// maybeOfferProactiveCallback in app.js), which run alongside
+// checkForNarration/narrateAndSpeak, not inside them. Reuses the same
+// system-prompt-builder + streamSentencesSSE machinery as /api/narrate and
+// /api/ask so this gets the same gapless sentence-by-sentence TTS streaming
+// "for free" rather than inventing a parallel response shape.
+app.post("/api/narrate-proactive", async (req, res) => {
+  const { type, place, callbackTopic, sessionLog, userProfile, language, persona, city, country, userId } =
+    req.body || {};
+
+  if (!ENABLE_PROACTIVE_DEPTH) {
+    return res.status(403).json({ error: "Proactive depth is disabled on this server." });
+  }
+  if (!ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
+  }
+  if (type !== "dwell" && type !== "callback") {
+    return res.status(400).json({ error: 'type must be "dwell" or "callback".' });
+  }
+  if (type === "callback" && !callbackTopic) {
+    return res.status(400).json({ error: "callbackTopic is required for type \"callback\"." });
+  }
+
+  const languageName = LANGUAGE_NAMES[language];
+
+  const systemPromptParts = [
+    `You are Sabri, a warm knowledgeable personal tour guide, currently offering a brief, unprompted extra ` +
+      `bit of commentary to someone who has paused during their walk — they have NOT asked a question, this ` +
+      `is proactive, not a reply to anything.`,
+    buildUserProfileGuidance(userProfile),
+    buildLocationGuidance(null, city, country),
+    buildSessionLogGuidance(sessionLog, userProfile?.name),
+    buildPersonaGuidance(persona, false, false),
+    SAFETY_GUIDANCE,
+    SPOKEN_LANGUAGE_RULES,
+  ].filter(Boolean);
+
+  const languageGuidance = buildLanguageGuidance(languageName);
+  if (languageGuidance) systemPromptParts.push(languageGuidance);
+  const pronunciationGuidance = buildPronunciationGuidance(languageName);
+  if (pronunciationGuidance) systemPromptParts.push(pronunciationGuidance);
+
+  const userMessage =
+    type === "dwell"
+      ? `The user has paused near ${place?.name || "where they are"} for a little while without asking ` +
+        `anything — offer one short, genuinely additional piece of commentary about this spot (something you ` +
+        `haven't already told them), as if you noticed them lingering and had one more thing worth sharing. ` +
+        `Keep it to 1-2 sentences — this is a small aside, not a new narration. Do not ask if they want to ` +
+        `know more or invite a response; just offer it naturally and let the moment be theirs to sit in.`
+      : `Earlier on this walk, this came up: "${callbackTopic}". Weave in one short, natural, unprompted ` +
+        `callback to it now — connect it to something relevant nearby if you can, or just circle back to it ` +
+        `because it's genuinely worth revisiting. Keep it to 1-2 sentences. Do not ask a question or wait for ` +
+        `a reply — this is a passing remark, not the start of a conversation.`;
+
+  streamSentencesSSE(res, {
+    system: systemPromptParts.join("\n\n"),
+    userMessage,
+    maxTokens: 256,
+    usageMeta: { endpoint: "narrate-proactive", userId },
+  });
+});
 
 app.post("/api/ask", async (req, res) => {
   const {
@@ -3362,6 +3768,27 @@ app.post("/api/ask", async (req, res) => {
     usageMeta: { endpoint: "ask", userId },
   });
 });
+
+// --- Pillar 2: relationship continuity (ENABLE_RELATIONSHIP_CONTINUITY) ---
+// Turns a user's region_memory rows (see schema.sql) into guidance so
+// Sabri can reference things this specific person told it earlier in this
+// city — general narration, not just direct follow-up answers — but only
+// when genuinely relevant, never fabricated. Mirrors buildSessionLogGuidance
+// immediately below in shape/tone (both turn a list of past-tense facts
+// into "use this when it fits, don't force it" guidance).
+function buildRegionMemoryGuidance(entries, name) {
+  if (!Array.isArray(entries) || entries.length === 0) return null;
+  const addressee = name || "this person";
+  const lines = entries.slice(0, 8).map((entry) => `- ${entry.memory_text || entry}`);
+  return (
+    `Things ${addressee} has told you or shown you earlier in this city (from a previous walk or earlier ` +
+      `today):\n${lines.join("\n")}\n\nReference one of these naturally in your narration ONLY when it is ` +
+      `genuinely relevant to what you're describing right now (e.g. they mentioned loving street art and ` +
+      `you're passing a mural, or they said they're vegetarian and the story touches on a local food ` +
+      `tradition). Never force a reference in, never fabricate or embellish beyond what's listed here, and ` +
+      `it's completely fine to not mention any of this if nothing fits.`
+  );
+}
 
 // Weaves the onboarding profile into the prompt so every narration/answer
 // feels made for this specific person.
@@ -3989,6 +4416,7 @@ app.post("/api/auth/save-profile", async (req, res) => {
     name: profile.name || null,
     reason: profile.reason || null,
     interests: Array.isArray(profile.interests) ? profile.interests : [],
+    dietary_restrictions: Array.isArray(profile.dietaryRestrictions) ? profile.dietaryRestrictions : [],
     companions: profile.companions || null,
     depth: profile.depth || null,
     home_city: profile.homeCity || null,
@@ -4159,6 +4587,16 @@ const LOGGED_EVENT_TYPES = [
   "feedback_submitted",
   "time_to_first_audio",
   "tour_start_latency",
+  // 3-pillar system (ENABLE_PROACTIVE_DEPTH / ENABLE_RELATIONSHIP_CONTINUITY
+  // / ENABLE_NEEDS_ROUTING) — see app.js for where each of these fires.
+  "proactive_interjection_delivered",
+  "proactive_interjection_failed",
+  "region_memory_referenced",
+  "needs_suggestion_offered",
+  "needs_suggestion_accepted",
+  "needs_suggestion_declined",
+  "needs_detour_started",
+  "needs_detour_resumed",
 ];
 
 // Fire-and-forget from the client (app.js's logEvent) — never something the
@@ -4347,6 +4785,141 @@ app.post("/api/infer-interests", async (req, res) => {
   }
 });
 
+// --- Pillar 2: relationship continuity (ENABLE_RELATIONSHIP_CONTINUITY) ---
+// Read side — fetched once per city by app.js's ensureRegionMemoryForCity
+// (called alongside ensurePersonaForCity, itself already called at the top
+// of narrateAndSpeak), not on every narration request.
+app.get("/api/get-region-memory", async (req, res) => {
+  const { userId, city } = req.query;
+  if (!ENABLE_RELATIONSHIP_CONTINUITY) return res.json({ entries: [] });
+  if (!userId || !city) return res.status(400).json({ error: "userId and city query params are required." });
+  if (!supabaseAdmin) return res.json({ entries: [] });
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("region_memory")
+      .select("memory_text, source_type, created_at")
+      .eq("user_id", userId)
+      .eq("region_key", city)
+      .order("created_at", { ascending: false })
+      .limit(8);
+    if (error) {
+      console.error("[supabase] region_memory select failed:", error.message);
+      return res.json({ entries: [] });
+    }
+    res.json({ entries: data || [] });
+  } catch (error) {
+    console.log("[debug] /api/get-region-memory failed:", error?.message || error);
+    res.json({ entries: [] });
+  }
+});
+
+// Write side — extracts 1-3 short natural-language facts from a user's
+// recent conversation/event history for the given city and appends them to
+// region_memory. Triggered on the same every-3rd-session cadence as
+// /api/infer-interests (see maybeTriggerRegionMemoryExtraction in app.js,
+// called alongside maybeTriggerInterestInference, not a change to it) — a
+// new endpoint, not a rewrite of infer-interests, since the two produce
+// different kinds of data (interest labels vs. free-text remembered facts)
+// even though the trigger cadence and Claude-extraction shape are the same.
+app.post("/api/extract-region-memory", async (req, res) => {
+  const { userId, city } = req.body || {};
+  if (!ENABLE_RELATIONSHIP_CONTINUITY) return res.json({ saved: [], skipped: true });
+  if (!userId || !city) return res.status(400).json({ error: "userId and city are required." });
+  if (!supabaseAdmin) return res.status(500).json({ error: "Supabase is not configured on the server." });
+  if (!ANTHROPIC_API_KEY) return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
+
+  try {
+    // user_questions (see schema.sql) has no city column — only place_id —
+    // so it can't be reliably filtered to just this city without an extra
+    // join this codebase doesn't otherwise do. interaction_events DOES have
+    // a city column already (used elsewhere, e.g. infer-interests-style
+    // queries), so that's the only source used here, to avoid the real risk
+    // of pulling in a fact from a different city and mis-tagging it.
+    const [eventsResult, existingResult] = await Promise.all([
+      supabaseAdmin
+        .from("interaction_events")
+        .select("event_type, event_data, city, created_at")
+        .eq("user_id", userId)
+        .eq("city", city)
+        .order("created_at", { ascending: false })
+        .limit(50),
+      supabaseAdmin.from("region_memory").select("memory_text").eq("user_id", userId).eq("region_key", city),
+    ]);
+
+    const events = eventsResult.data || [];
+    if (events.length < 8) {
+      // Not enough signal yet in this city to extract anything meaningful.
+      return res.json({ saved: [], skipped: true });
+    }
+
+    const alreadyKnown = (existingResult.data || []).map((row) => row.memory_text);
+    const historySummary = events.map((e) => `${e.event_type}: ${JSON.stringify(e.event_data).slice(0, 150)}`).join("\n");
+
+    const userMessage =
+      `Below is a user's recent questions and behavior while visiting ${city}. Extract up to 3 short, ` +
+      `concrete, first-hand facts worth remembering about THIS PERSON specifically — a stated preference, a ` +
+      `reaction, or an answer they gave — that a good local guide could naturally reference later in this ` +
+      `same city (e.g. "mentioned they're vegetarian", "loved the street art near the old market", "said ` +
+      `they're traveling with their kids"). Only extract things clearly grounded in what's below — never ` +
+      `invent or infer beyond it. Skip anything already known` +
+      `${alreadyKnown.length ? ` (already known: ${alreadyKnown.join("; ")})` : ""}. If nothing new and ` +
+      `concrete stands out, return an empty list.\n\nRecent activity in ${city}:\n${historySummary}`;
+
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 512,
+      system: "You are extracting short, concrete, first-hand facts about a specific person from their own activity. Return only what's asked for.",
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              memories: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    text: { type: "string" },
+                    sourceType: { type: "string", enum: ["stated_preference", "reaction", "answer"] },
+                  },
+                  required: ["text", "sourceType"],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ["memories"],
+            additionalProperties: false,
+          },
+        },
+      },
+      messages: [{ role: "user", content: userMessage }],
+    }, undefined, { endpoint: "extract-region-memory", userId });
+
+    const textBlock = message.content.find((block) => block.type === "text");
+    const parsed = textBlock ? JSON.parse(textBlock.text) : { memories: [] };
+    const memories = (parsed.memories || []).slice(0, 3);
+
+    if (memories.length > 0) {
+      const { error: insertError } = await supabaseAdmin.from("region_memory").insert(
+        memories.map((m) => ({
+          user_id: userId,
+          region_key: city,
+          memory_text: m.text,
+          source_type: m.sourceType || null,
+        }))
+      );
+      if (insertError) console.error("[supabase] region_memory insert failed:", insertError.message);
+    }
+
+    res.json({ saved: memories });
+  } catch (error) {
+    console.error("[debug] /api/extract-region-memory failed:", error.message || error);
+    res.status(502).json({ error: "Failed to extract region memory." });
+  }
+});
+
 // Permanently deletes a user's profile, walk history, and auth account.
 // Irreversible — the frontend requires an explicit confirmation tap before
 // ever calling this (see settings' "Delete my account").
@@ -4525,6 +5098,11 @@ function toPlaceResponse(result, primaryType) {
     types: result.types || [],
     primaryType,
     rating: result.rating ?? null,
+    // 0 (free/very cheap) to 4 ($$$$) per Google's Nearby Search response —
+    // returned automatically when Google has it, no extra request needed.
+    // Used by Pillar 3's food ranking (ENABLE_NEEDS_ROUTING) — real data,
+    // not guessed.
+    priceLevel: typeof result.price_level === "number" ? result.price_level : null,
     placeId: result.place_id,
     photoReference: result.photos?.[0]?.photo_reference || null,
     // Was missing entirely before — every place response silently had no

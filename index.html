@@ -716,7 +716,11 @@
     <div class="settings-drawer-body">
       <section class="settings-section">
         <h3 class="settings-section-title">Guide Voice</h3>
-        <div class="voice-options">
+        <!-- Only meaningful while TTS_PROVIDER=openai (this picker's voices
+             are OpenAI-specific and stop reflecting reality otherwise) —
+             see applyActiveVoiceProviderUI in app.js, which shows this OR
+             #settings-voice-readonly depending on window.TTS_PROVIDER. -->
+        <div id="settings-voice-options" class="voice-options">
           <button class="voice-card is-active" data-voice="onyx">
             <span class="voice-card-name">Onyx</span>
             <span class="voice-card-desc">Deep &amp; Warm</span>
@@ -734,6 +738,7 @@
             <span class="voice-card-desc">Rich &amp; Rounded</span>
           </button>
         </div>
+        <p id="settings-voice-readonly" class="voice-readonly-note hidden"></p>
       </section>
 
       <section class="settings-section">
@@ -764,6 +769,19 @@
           <option value="fr">French</option>
           <option value="ru">Russian</option>
         </select>
+      </section>
+
+      <!-- Pillar 3 (ENABLE_NEEDS_ROUTING) — a single toggle for both smart-
+           suggestion types (meal timing + weather shade/shelter), on by
+           default whenever the server has the feature enabled at all. See
+           needsSuggestionsEnabledSetting in app.js. Only meaningful (and
+           only shown) when window.ENABLE_NEEDS_ROUTING is true. -->
+      <section id="settings-needs-suggestions-section" class="settings-section hidden">
+        <h3 class="settings-section-title">Smart Suggestions</h3>
+        <label class="settings-toggle-row">
+          <span>Suggest meal &amp; weather stops along the way</span>
+          <input type="checkbox" id="needs-suggestions-toggle" class="settings-toggle-checkbox" checked />
+        </label>
       </section>
 
       <section class="settings-section">
@@ -878,6 +896,22 @@
         </div>
       </section>
 
+      <!-- Pillar 3 (ENABLE_NEEDS_ROUTING) food/place ranking — see
+           buildDietaryFilterNote in server.js. Only shown/meaningful when
+           window.ENABLE_NEEDS_ROUTING is true; otherwise this data is
+           simply unused, never fabricated into a suggestion. -->
+      <section id="preferences-dietary-section" class="settings-section hidden">
+        <h3 class="settings-section-title">Dietary Preferences</h3>
+        <div id="preferences-dietary" class="onboarding-pills">
+          <button class="onboarding-pill" data-value="Vegetarian">Vegetarian</button>
+          <button class="onboarding-pill" data-value="Vegan">Vegan</button>
+          <button class="onboarding-pill" data-value="Halal">Halal</button>
+          <button class="onboarding-pill" data-value="Kosher">Kosher</button>
+          <button class="onboarding-pill" data-value="Gluten-free">Gluten-free</button>
+          <button class="onboarding-pill" data-value="Nut allergy">Nut allergy</button>
+        </div>
+      </section>
+
       <section class="settings-section">
         <h3 class="settings-section-title">Your Guide</h3>
         <div id="preferences-archetype" class="onboarding-pace">
@@ -920,6 +954,7 @@
             <span class="voice-card-desc">Rich &amp; Rounded</span>
           </button>
         </div>
+        <p id="preferences-voice-readonly" class="voice-readonly-note hidden"></p>
       </section>
 
       <section class="settings-section">
@@ -970,6 +1005,20 @@
   <div id="update-banner" class="update-banner" role="status" aria-live="polite">
     <span class="update-banner-text">A new version of Sabri is ready</span>
     <button id="update-banner-cta" class="update-banner-cta">Update</button>
+  </div>
+
+  <!-- Pillar 3: needs-aware proactive routing (ENABLE_NEEDS_ROUTING) — the
+       meal/weather suggestion prompt. Mirrors update-banner's shape (a
+       fixed status banner) but always requires an explicit Yes/No tap —
+       per spec, a suggestion must NEVER auto-apply. See
+       offerNeedsSuggestion/respondToNeedsSuggestion in app.js. -->
+  <div id="needs-suggestion-banner" class="needs-suggestion-banner hidden" role="dialog" aria-live="polite">
+    <p id="needs-suggestion-text" class="needs-suggestion-text"></p>
+    <div id="needs-suggestion-clarify" class="needs-suggestion-clarify hidden"></div>
+    <div class="needs-suggestion-actions">
+      <button id="needs-suggestion-yes" class="needs-suggestion-yes">Yes, take me</button>
+      <button id="needs-suggestion-no" class="needs-suggestion-no">No thanks</button>
+    </div>
   </div>
 
   <!-- PWA install banner. iOS Safari has no beforeinstallprompt event, so it

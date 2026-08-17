@@ -44,6 +44,12 @@ alter table profiles add column if not exists preferred_archetype text not null 
 -- subtly weight, never override, stated interests.
 alter table profiles add column if not exists inferred_interests jsonb;
 
+-- Pillar 3 (ENABLE_NEEDS_ROUTING) food/place ranking — stated dietary needs
+-- (vegetarian, vegan, halal, kosher, allergies, etc.), same shape/pattern
+-- as `interests` above (a controlled-vocabulary-flavored text array, not a
+-- single enum, since a person can have more than one).
+alter table profiles add column if not exists dietary_restrictions text[] default '{}';
+
 create table if not exists walk_sessions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references profiles (id) on delete cascade,
@@ -259,6 +265,45 @@ create table if not exists canonical_narrations (
   reviewed_at timestamptz
 );
 
+-- Pillar 2 (ENABLE_RELATIONSHIP_CONTINUITY) — region-scoped "trip memory".
+-- Scoped to `region_key` (city — the only geographic tier already used
+-- consistently elsewhere, e.g. interaction_events.city, walk_sessions.city;
+-- there is no established neighborhood-tier concept to reuse), not
+-- per-session and not cross-trip. Populated opportunistically by extracting
+-- 1-3 short natural-language facts from a user's recent conversation/event
+-- history on the same cadence as inferred_interests (see
+-- maybeTriggerRegionMemoryExtraction in app.js and /api/extract-region-
+-- memory in server.js) — a new function called alongside the existing
+-- inference job, not a change to it. Read back into narration via
+-- buildRegionMemoryGuidance (server.js), only when ENABLE_RELATIONSHIP_
+-- CONTINUITY is on.
+create table if not exists region_memory (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles (id) on delete cascade,
+  region_key text not null,
+  memory_text text not null,
+  source_type text, -- 'stated_preference' | 'reaction' | 'answer'
+  created_at timestamptz not null default now()
+);
+
+-- Pillar 3 (ENABLE_NEEDS_ROUTING) — Guided Tour detour-and-resume cache.
+-- Holds a snapshot of a planned tour's remaining stops at the moment the
+-- user accepts a meal/weather detour suggestion, so the app can reconnect
+-- to the next planned stop afterward without regenerating the tour. Rows
+-- are cleaned up by a daily Vercel Cron job (see /api/cron/cleanup-detour-
+-- cache in server.js, mirroring the existing /api/cron/check-budget
+-- pattern) roughly 1 day after creation — this codebase has no pg_cron/TTL
+-- extension in use, so a daily cron sweep (the one background-job mechanism
+-- that already exists here) was chosen over a new piece of infrastructure.
+create table if not exists tour_detour_cache (
+  id uuid primary key default gen_random_uuid(),
+  session_id text not null unique,
+  user_id uuid references profiles (id) on delete set null,
+  remaining_stops jsonb not null,
+  detour_reason text, -- 'meal' | 'weather_shade' | 'weather_shelter'
+  created_at timestamptz not null default now()
+);
+
 create index if not exists visited_places_user_id_idx on visited_places (user_id, visited_at desc);
 create index if not exists walk_sessions_user_id_idx on walk_sessions (user_id, started_at desc);
 create index if not exists user_questions_user_id_idx on user_questions (user_id, asked_at desc);
@@ -271,6 +316,8 @@ create index if not exists user_persona_introductions_user_id_idx on user_person
 create index if not exists api_usage_created_at_idx on api_usage (created_at desc);
 create index if not exists api_usage_provider_idx on api_usage (provider);
 create index if not exists canonical_narrations_status_idx on canonical_narrations (status);
+create index if not exists region_memory_user_region_idx on region_memory (user_id, region_key);
+create index if not exists tour_detour_cache_created_at_idx on tour_detour_cache (created_at);
 
 -- The backend always talks to Supabase with the service_role key (which
 -- bypasses RLS entirely), so these policies exist purely as defense in
@@ -287,6 +334,12 @@ alter table place_facts enable row level security;
 alter table user_persona_introductions enable row level security;
 alter table api_usage enable row level security;
 alter table canonical_narrations enable row level security;
+alter table region_memory enable row level security;
+alter table tour_detour_cache enable row level security;
+-- No anon/authenticated policy for tour_detour_cache — like api_usage and
+-- canonical_narrations, this is purely a server-side implementation detail
+-- (detour/resume bookkeeping keyed by session_id), never queried directly
+-- by a browser with the anon key.
 -- No anon/authenticated policy for canonical_narrations, same reasoning as
 -- api_usage — the threshold-check/cache-serve logic and the admin review
 -- queue both only ever run through the server's service-role client, never
@@ -310,6 +363,10 @@ create policy "Users manage their own questions" on user_questions
 
 drop policy if exists "Users manage their own persona introductions" on user_persona_introductions;
 create policy "Users manage their own persona introductions" on user_persona_introductions
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists "Users manage their own region memory" on region_memory;
+create policy "Users manage their own region memory" on region_memory
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 -- guide_personas is shared, non-sensitive cached content (a generated
