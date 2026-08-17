@@ -1746,6 +1746,113 @@ app.post("/api/needs-suggestion", async (req, res) => {
   });
 });
 
+// Same 4 labels app.js's MEAL_CLARIFY_OPTIONS pills use (kept as an
+// independently-declared array on each side, matching how e.g.
+// LANGUAGE_NAMES-style lists already work in this codebase — client and
+// server don't share a module system, so duplication here is the existing
+// convention, not a new one).
+const MEAL_CLARIFY_LABELS = ["Quick bite", "Sit-down meal", "Local favorite", "Date spot"];
+
+// Voice-first consent for Pillar 3 (ENABLE_NEEDS_ROUTING). Interprets a
+// spoken transcript as either a yes/no/unclear intent (stage: "confirm")
+// or a food-type preference (stage: "clarify"). No dedicated lightweight
+// intent-classifier already existed in this codebase to reuse as-is, so
+// this reuses the same structured-JSON-output Claude pattern
+// /api/infer-interests and /api/extract-region-memory already use, rather
+// than inventing a new one. "unclear" is a real, first-class outcome (not
+// squeezed into yes/no) — per spec, an ambiguous answer must fall back to
+// the buttons, never guess.
+app.post("/api/interpret-needs-response", async (req, res) => {
+  const { transcript, stage, userId } = req.body || {};
+
+  if (!ENABLE_NEEDS_ROUTING) {
+    return res.status(403).json({ error: "Needs routing is disabled on this server." });
+  }
+  if (!transcript || !transcript.trim()) {
+    return res.status(400).json({ error: "transcript is required." });
+  }
+  if (stage !== "confirm" && stage !== "clarify") {
+    return res.status(400).json({ error: 'stage must be "confirm" or "clarify".' });
+  }
+  if (!ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
+  }
+
+  try {
+    if (stage === "confirm") {
+      const message = await anthropic.messages.create(
+        {
+          model: "claude-sonnet-4-6",
+          max_tokens: 64,
+          system:
+            "You are classifying a spoken reply to a yes/no question as exactly one of yes, no, or unclear. " +
+            "Casual phrasing counts (\"yeah\", \"sure, why not\", \"nah I'm good\", \"maybe later\" -> unclear). " +
+            "Return only what's asked for.",
+          output_config: {
+            format: {
+              type: "json_schema",
+              schema: {
+                type: "object",
+                properties: { intent: { type: "string", enum: ["yes", "no", "unclear"] } },
+                required: ["intent"],
+                additionalProperties: false,
+              },
+            },
+          },
+          messages: [{ role: "user", content: `The reply was: "${transcript}"` }],
+        },
+        undefined,
+        { endpoint: "interpret-needs-response", userId }
+      );
+      const textBlock = message.content.find((block) => block.type === "text");
+      const parsed = textBlock ? JSON.parse(textBlock.text) : { intent: "unclear" };
+      return res.json({ intent: ["yes", "no", "unclear"].includes(parsed.intent) ? parsed.intent : "unclear" });
+    }
+
+    // stage === "clarify"
+    const message = await anthropic.messages.create(
+      {
+        model: "claude-sonnet-4-6",
+        max_tokens: 128,
+        system:
+          `You are extracting a food preference from a spoken reply to "What are you in the mood for?" Map ` +
+          `it onto zero or more of these labels when they clearly fit: ${MEAL_CLARIFY_LABELS.join(", ")}. Also ` +
+          `return a short clean rewrite of what they said (preferenceText), suitable for searching nearby ` +
+          `restaurants — e.g. "something quick and casual" or "a nice place for a date". If the reply is ` +
+          `inaudible, empty, or doesn't express any food preference at all, set unclear to true.`,
+        output_config: {
+          format: {
+            type: "json_schema",
+            schema: {
+              type: "object",
+              properties: {
+                matchedLabels: { type: "array", items: { type: "string" } },
+                preferenceText: { type: "string" },
+                unclear: { type: "boolean" },
+              },
+              required: ["matchedLabels", "preferenceText", "unclear"],
+              additionalProperties: false,
+            },
+          },
+        },
+        messages: [{ role: "user", content: `The reply was: "${transcript}"` }],
+      },
+      undefined,
+      { endpoint: "interpret-needs-response", userId }
+    );
+    const textBlock = message.content.find((block) => block.type === "text");
+    const parsed = textBlock ? JSON.parse(textBlock.text) : { matchedLabels: [], preferenceText: transcript, unclear: false };
+    res.json({
+      matchedLabels: Array.isArray(parsed.matchedLabels) ? parsed.matchedLabels.filter((l) => MEAL_CLARIFY_LABELS.includes(l)) : [],
+      preferenceText: parsed.preferenceText || transcript,
+      unclear: !!parsed.unclear,
+    });
+  } catch (error) {
+    console.log("[debug] /api/interpret-needs-response failed:", error?.message || error);
+    res.status(502).json({ error: "Failed to interpret response." });
+  }
+});
+
 // --- Guided Tour detour-and-resume cache (see tour_detour_cache in
 // schema.sql, and /api/cron/cleanup-detour-cache above for cleanup). Saved
 // the moment a detour is confirmed, read back to reconnect to the next

@@ -138,6 +138,9 @@ const needsSuggestionTextEl = document.getElementById("needs-suggestion-text");
 const needsSuggestionClarifyEl = document.getElementById("needs-suggestion-clarify");
 const needsSuggestionYesBtn = document.getElementById("needs-suggestion-yes");
 const needsSuggestionNoBtn = document.getElementById("needs-suggestion-no");
+const needsSuggestionMicBtn = document.getElementById("needs-suggestion-mic-btn");
+const needsSuggestionVoiceInput = document.getElementById("needs-suggestion-voice-input");
+const needsSuggestionVoiceHint = document.getElementById("needs-suggestion-voice-hint");
 const settingsNeedsSuggestionsSection = document.getElementById("settings-needs-suggestions-section");
 const needsSuggestionsToggle = document.getElementById("needs-suggestions-toggle");
 const accountSignedIn = document.getElementById("account-signed-in");
@@ -1056,6 +1059,75 @@ const plannerChatMic = plannerChatMicBtn
   : null;
 if (plannerChatMicBtn) {
   plannerChatMicBtn.addEventListener("click", () => plannerChatMic.start());
+}
+
+// Pillar 3 (ENABLE_NEEDS_ROUTING) voice-first consent — same
+// createChatMicController pattern as onboarding-chat/planner-chat's mic
+// buttons just above, not a new speech-recognition path. The single
+// onFinalTranscript callback branches on needsSuggestionPending.stage
+// (set by offerNeedsSuggestion/handleNeedsSuggestionYes) since one banner
+// serves both the yes/no confirmation and the food-type clarifying
+// question, unlike onboarding/planner chat's one-purpose mic buttons.
+const needsSuggestionMic = needsSuggestionMicBtn
+  ? createChatMicController({
+      micBtn: needsSuggestionMicBtn,
+      inputEl: needsSuggestionVoiceInput,
+      onFinalTranscript: (text) => handleNeedsSuggestionVoiceTranscript(text),
+    })
+  : null;
+if (needsSuggestionMicBtn) {
+  needsSuggestionMicBtn.addEventListener("click", () => needsSuggestionMic.start());
+}
+
+async function handleNeedsSuggestionVoiceTranscript(transcript) {
+  if (!needsSuggestionPending) return; // banner closed mid-listen — nothing to resolve
+  const stage = needsSuggestionPending.stage === "clarifying" ? "clarify" : "confirm";
+  if (needsSuggestionVoiceHint) needsSuggestionVoiceHint.classList.add("hidden");
+
+  try {
+    const response = await fetch("/api/interpret-needs-response", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transcript, stage, userId: currentUser ? currentUser.id : null }),
+    });
+    if (!response.ok) throw new Error(`responded ${response.status}`);
+    const data = await response.json();
+
+    if (stage === "confirm") {
+      if (data.intent === "yes") {
+        handleNeedsSuggestionYes();
+      } else if (data.intent === "no") {
+        handleNeedsSuggestionNo();
+      } else {
+        showNeedsSuggestionVoiceUnclear();
+      }
+      return;
+    }
+
+    // stage === "clarify" — any genuinely on-topic reply proceeds (arriving
+    // here already implies "yes" was given at the confirm stage); only a
+    // truly uninterpretable reply falls back to the pills/button.
+    if (data.unclear) {
+      showNeedsSuggestionVoiceUnclear();
+      return;
+    }
+    (data.matchedLabels || []).forEach((label) => {
+      const pill = needsSuggestionClarifyEl?.querySelector(`.onboarding-pill[data-value="${label}"]`);
+      if (pill) pill.classList.add("is-selected");
+    });
+    handleNeedsSuggestionYes([], data.preferenceText || transcript);
+  } catch (error) {
+    // Fail silently toward the safest option — never proceed on a guess.
+    // The buttons/pills are always still right there, fully functional.
+    console.log("[needs] voice interpretation failed, falling back to buttons:", error?.message || error);
+    showNeedsSuggestionVoiceUnclear();
+  }
+}
+
+function showNeedsSuggestionVoiceUnclear() {
+  if (!needsSuggestionVoiceHint) return;
+  needsSuggestionVoiceHint.textContent = "Didn't quite catch that — go ahead and tap below.";
+  needsSuggestionVoiceHint.classList.remove("hidden");
 }
 
 if (onboardingGuestBtn) {
@@ -3261,6 +3333,11 @@ const NEEDS_SUGGESTION_COOLDOWN_MS = (window.NEEDS_SUGGESTION_COOLDOWN_MINUTES |
 const NEEDS_CHECK_INTERVAL_MS = 60000;
 const NEEDS_SUGGESTIONS_SETTING_KEY = "sabri_needs_suggestions_enabled";
 const NEEDS_SUGGESTION_AUTO_DISMISS_MS = 6000;
+// Set false by the SabriSpeechRecognition.ensureReady() check further down
+// if this device has no working speech engine at all — restoreMainMic()
+// checks this so it never un-hides a mic button that's supposed to stay
+// permanently hidden on an unsupported device.
+let speechRecognitionAvailable = true;
 
 let needsCheckInterval = null;
 let lastNeedsSuggestionAt = 0;
@@ -3306,6 +3383,31 @@ function hideNeedsSuggestionBanner() {
     needsSuggestionClarifyEl.classList.add("hidden");
     needsSuggestionClarifyEl.innerHTML = "";
   }
+  stopNeedsSuggestionListening();
+  isConversing = false;
+}
+
+// Voice-first consent (this round's addition): SabriSpeechRecognition is a
+// single shared engine — only one caller can be actively listening at a
+// time (see its own comments). While the suggestion banner's mic might be
+// listening, the main "Tap to talk" mic is suppressed so tapping it can't
+// silently steal the recognition session out from under the banner (or
+// vice versa) and orphan whichever caller loses. This only ever
+// hides/shows an existing button via a class the button's own click
+// handler doesn't touch — startListening()/checkForNarration/
+// narrateAndSpeak are untouched.
+function suppressMainMic() {
+  micBtn.classList.add("hidden");
+}
+function restoreMainMic() {
+  if (speechRecognitionAvailable) micBtn.classList.remove("hidden");
+}
+
+function stopNeedsSuggestionListening() {
+  if (needsSuggestionMicBtn?.classList.contains("is-listening")) needsSuggestionMic.cancel();
+  if (needsSuggestionVoiceInput) needsSuggestionVoiceInput.value = "";
+  if (needsSuggestionVoiceHint) needsSuggestionVoiceHint.classList.add("hidden");
+  restoreMainMic();
 }
 
 async function checkNeedsAndMaybeSuggest() {
@@ -3388,7 +3490,24 @@ function showNeedsSuggestionBanner(text) {
     needsSuggestionClarifyEl.innerHTML = "";
   }
   if (needsSuggestionYesBtn) needsSuggestionYesBtn.textContent = "Yes, take me";
+  if (needsSuggestionVoiceInput) needsSuggestionVoiceInput.value = "";
+  if (needsSuggestionVoiceHint) needsSuggestionVoiceHint.classList.add("hidden");
   needsSuggestionBanner.classList.remove("hidden");
+  // Voice is available the moment the banner shows (tap the mic, same
+  // convention as the core "Tap to talk" flow) — not auto-started, since
+  // starting recognition without a user gesture right after Sabri just
+  // finished speaking risks picking up TTS tail-end audio on a phone
+  // speaker (no headphones) and can silently fail under browser
+  // microphone-gesture policies anyway. See the buttons/pills below, which
+  // work identically whether or not voice is used at all.
+  suppressMainMic();
+  // Reuses isConversing — the exact flag checkForNarration/
+  // triggerNarrationForPlace/handleUpdateAvailable already respect — so a
+  // fresh narration or PWA update can't fire mid-answer while a spoken
+  // reply genuinely takes a few seconds to give (this gap existed even
+  // before voice input, but a several-second voice round trip made it a
+  // real, not just theoretical, risk worth closing now).
+  isConversing = true;
 }
 
 const MEAL_CLARIFY_OPTIONS = ["Quick bite", "Sit-down meal", "Local favorite", "Date spot"];
@@ -3408,45 +3527,51 @@ function showMealClarifyPills() {
   });
   needsSuggestionClarifyEl.classList.remove("hidden");
   if (needsSuggestionYesBtn) needsSuggestionYesBtn.textContent = "Find it";
+  if (needsSuggestionVoiceInput) needsSuggestionVoiceInput.value = "";
+  if (needsSuggestionVoiceHint) needsSuggestionVoiceHint.classList.add("hidden");
 }
 
-if (needsSuggestionYesBtn) {
-  needsSuggestionYesBtn.addEventListener("click", async () => {
-    if (!needsSuggestionPending) return;
-    const { category, stage } = needsSuggestionPending;
+// Shared by both the tap (Yes button) and voice ("yes"/on-topic clarify
+// reply) paths — see handleNeedsSuggestionVoiceTranscript above — so voice
+// and buttons genuinely resolve the same interaction through the same
+// code, not two parallel implementations that could drift.
+async function handleNeedsSuggestionYes(extraPreferenceLabels = [], extraPreferenceText = "") {
+  if (!needsSuggestionPending) return;
+  const { category, stage } = needsSuggestionPending;
 
-    if (category === "meal" && stage === "confirm") {
-      needsSuggestionPending.stage = "clarifying";
-      showMealClarifyPills();
-      return;
-    }
+  if (category === "meal" && stage === "confirm") {
+    needsSuggestionPending.stage = "clarifying";
+    showMealClarifyPills();
+    return;
+  }
 
-    needsSuggestionYesBtn.disabled = true;
-    try {
-      const preferenceLabels = needsSuggestionClarifyEl
-        ? Array.from(needsSuggestionClarifyEl.querySelectorAll(".is-selected")).map((pill) => pill.dataset.value)
-        : [];
-      await resolveNeedsSuggestionAccepted(category, preferenceLabels);
-    } finally {
-      needsSuggestionYesBtn.disabled = false;
-    }
-  });
+  if (needsSuggestionYesBtn) needsSuggestionYesBtn.disabled = true;
+  try {
+    const pillLabels = needsSuggestionClarifyEl
+      ? Array.from(needsSuggestionClarifyEl.querySelectorAll(".is-selected")).map((pill) => pill.dataset.value)
+      : [];
+    const preferenceLabels = Array.from(new Set([...pillLabels, ...extraPreferenceLabels]));
+    await resolveNeedsSuggestionAccepted(category, preferenceLabels, extraPreferenceText);
+  } finally {
+    if (needsSuggestionYesBtn) needsSuggestionYesBtn.disabled = false;
+  }
 }
 
-if (needsSuggestionNoBtn) {
-  needsSuggestionNoBtn.addEventListener("click", () => {
-    if (!needsSuggestionPending) return;
-    logEvent("needs_suggestion_declined", { category: needsSuggestionPending.category });
-    needsSuggestionPending = null;
-    hideNeedsSuggestionBanner();
-  });
+function handleNeedsSuggestionNo() {
+  if (!needsSuggestionPending) return;
+  logEvent("needs_suggestion_declined", { category: needsSuggestionPending.category });
+  needsSuggestionPending = null;
+  hideNeedsSuggestionBanner();
 }
 
-async function resolveNeedsSuggestionAccepted(category, preferenceLabels) {
+if (needsSuggestionYesBtn) needsSuggestionYesBtn.addEventListener("click", () => handleNeedsSuggestionYes());
+if (needsSuggestionNoBtn) needsSuggestionNoBtn.addEventListener("click", () => handleNeedsSuggestionNo());
+
+async function resolveNeedsSuggestionAccepted(category, preferenceLabels, extraPreferenceText = "") {
   try {
     let options = [];
     if (category === "meal") {
-      const preferenceText = preferenceLabels.join(" ");
+      const preferenceText = [...preferenceLabels, extraPreferenceText].filter(Boolean).join(" ");
       const params = new URLSearchParams({
         lat: String(lastPosition.latitude),
         lng: String(lastPosition.longitude),
@@ -3456,7 +3581,10 @@ async function resolveNeedsSuggestionAccepted(category, preferenceLabels) {
       const response = await fetch(`/api/find-meal-options?${params.toString()}`);
       const data = await response.json();
       options = data.options || [];
-      logEvent("needs_suggestion_accepted", { category, preferenceLabels });
+      // preferenceText captured here (whether typed via pill taps or
+      // spoken) is the same interaction-logging pattern inferred_interests
+      // is built from — see /api/infer-interests — for future sharpening.
+      logEvent("needs_suggestion_accepted", { category, preferenceLabels, preferenceText });
     } else {
       const kind = category === "weather_shelter" ? "shelter" : "shade";
       const params = new URLSearchParams({ lat: String(lastPosition.latitude), lng: String(lastPosition.longitude), kind });
@@ -6102,10 +6230,15 @@ const SabriSpeechRecognition = (() => {
 })();
 
 SabriSpeechRecognition.ensureReady().then((ready) => {
+  speechRecognitionAvailable = ready;
   if (!ready) {
     micBtn.classList.add("hidden");
     onboardingChatMicBtn?.classList.add("hidden");
     plannerChatMicBtn?.classList.add("hidden");
+    // Pillar 3's needs-suggestion banner still works fully via its
+    // buttons/pills when voice genuinely isn't available on this device —
+    // this just hides the mic affordance so it isn't shown as an option.
+    needsSuggestionMicBtn?.classList.add("hidden");
   }
 });
 
@@ -6132,7 +6265,8 @@ if (micPermissionRetryBtn) {
   });
 }
 
-// Shared mic-button wiring for onboarding-chat and planner-chat — routes
+// Shared mic-button wiring for onboarding-chat, planner-chat, and the
+// Pillar 3 needs-suggestion banner (see needsSuggestionMic above) — routes
 // through the exact same SabriSpeechRecognition interface and
 // silence-timer pattern the core "Talk to Sabri" flow above uses
 // (INITIAL_SILENCE_MS before any speech, FOLLOWUP_SILENCE_MS resetting on
@@ -6145,7 +6279,7 @@ if (micPermissionRetryBtn) {
 // "doesn't stop listening at the right time" in real-world beta testing.
 // Routing everything through SabriSpeechRecognition means there is now
 // exactly one place that ever assigns recognition.onresult/onend/onerror,
-// regardless of which of the three mic buttons is in use.
+// regardless of which mic button is in use.
 function createChatMicController({ micBtn, inputEl, onFinalTranscript }) {
   let chatSilenceTimer = null;
   let cancelled = false;

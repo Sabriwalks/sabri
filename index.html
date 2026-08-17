@@ -1009,11 +1009,24 @@
 
   <!-- Pillar 3: needs-aware proactive routing (ENABLE_NEEDS_ROUTING) — the
        meal/weather suggestion prompt. Mirrors update-banner's shape (a
-       fixed status banner) but always requires an explicit Yes/No tap —
-       per spec, a suggestion must NEVER auto-apply. See
-       offerNeedsSuggestion/respondToNeedsSuggestion in app.js. -->
+       fixed status banner) but always requires an explicit yes/no —
+       per spec, a suggestion must NEVER auto-apply. Voice (via the same
+       SabriSpeechRecognition/createChatMicController pipeline used
+       elsewhere) is the primary way to answer both the yes/no confirmation
+       and the food-type clarifying question; the Yes/No buttons and
+       clarify pills below remain a fully-working tap fallback — see
+       offerNeedsSuggestion/handleNeedsSuggestionYes/handleNeedsSuggestionNo
+       in app.js. -->
   <div id="needs-suggestion-banner" class="needs-suggestion-banner hidden" role="dialog" aria-live="polite">
     <p id="needs-suggestion-text" class="needs-suggestion-text"></p>
+    <div class="needs-suggestion-voice-row">
+      <button id="needs-suggestion-mic-btn" class="mic-btn" aria-label="Answer by voice">
+        🎤
+        <span class="mic-waveform" aria-hidden="true"><span></span><span></span><span></span></span>
+      </button>
+      <input id="needs-suggestion-voice-input" type="text" class="onboarding-input" placeholder="Or tap the mic and just say it..." readonly />
+    </div>
+    <p id="needs-suggestion-voice-hint" class="needs-suggestion-voice-hint hidden"></p>
     <div id="needs-suggestion-clarify" class="needs-suggestion-clarify hidden"></div>
     <div class="needs-suggestion-actions">
       <button id="needs-suggestion-yes" class="needs-suggestion-yes">Yes, take me</button>

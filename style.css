@@ -1050,6 +1050,33 @@ body {
   line-height: 1.4;
 }
 
+/* Voice-first consent row — the .mic-btn/.mic-waveform classes themselves
+   are shared, unchanged, with onboarding-chat/planner-chat (see index.html
+   for those). Sized down to fit this banner's tighter layout. */
+.needs-suggestion-voice-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.needs-suggestion-voice-row .mic-btn {
+  width: 40px;
+  height: 40px;
+  font-size: 16px;
+}
+
+.needs-suggestion-voice-row .onboarding-input {
+  flex: 1;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.needs-suggestion-voice-hint {
+  margin: -6px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
 .needs-suggestion-clarify {
   display: flex;
   flex-wrap: wrap;
