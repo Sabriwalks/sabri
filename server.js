@@ -1720,6 +1720,8 @@ app.post("/api/needs-suggestion", async (req, res) => {
   ].filter(Boolean);
   const languageGuidance = buildLanguageGuidance(languageName);
   if (languageGuidance) systemPromptParts.push(languageGuidance);
+  const genderConsistencyGuidance = buildGenderConsistencyGuidance(languageName, language);
+  if (genderConsistencyGuidance) systemPromptParts.push(genderConsistencyGuidance);
 
   let userMessage;
   if (category === "meal") {
@@ -3000,7 +3002,100 @@ function buildLanguageGuidance(languageName) {
         "- write in actual Hebrew characters when narrating in Hebrew."
     );
   }
+  if (languageName === "Arabic") {
+    // Real finding from testing, not a guess: with no dialect steer at all,
+    // "write as a native speaker would speak" alone was enough to make
+    // narration drift into Egyptian colloquial Arabic unprompted — genuinely
+    // fine for an Egyptian audience, but this app doesn't target one
+    // specific Arabic-speaking country. Modern Standard Arabic is understood
+    // broadly across every Arabic-speaking region regardless of the TTS
+    // voice's own accent (unconfirmed — Inworld doesn't document which
+    // dialect "Nour" is tuned for), so it's the safer default for a
+    // general-audience app even without that confirmation. This is a
+    // judgment call, not a proven-correct answer — worth revisiting once
+    // the voice's actual accent can be confirmed by ear.
+    parts.push(
+      "When narrating in Arabic, write in Modern Standard Arabic (فصحى) " +
+        "rather than a regional colloquial dialect (Egyptian, Gulf, " +
+        "Levantine, etc.) — this app has a broad Arabic-speaking audience, " +
+        "not one specific country's dialect, and MSA is understood " +
+        "everywhere. Still write naturally and warmly, not stiffly formal " +
+        "— MSA can absolutely sound like a real person talking, not a " +
+        "news broadcast."
+    );
+  }
   return parts.join("\n\n");
+}
+
+// Real, confirmed bug (native-speaker feedback, not guesswork): Hebrew
+// verbs/adjectives conjugate by grammatical gender, and narration was
+// mixing masculine and feminine forms within a single response — both for
+// the guide's own self-reference and for how it addresses the listener.
+// This is a genuine grammar error, not an accent/pronunciation issue, so
+// no TTS engine can fix it — it has to be fixed in the generated text.
+// Same underlying grammatical category (gendered verb/adjective
+// conjugation) genuinely applies to Arabic and Russian too, not just
+// Hebrew, so the same fix is applied there. French/Spanish only get the
+// lighter self-reference-only version, since their 2nd-person address
+// ("tu"/"vous", "tú"/"usted") doesn't conjugate by the LISTENER's gender
+// the way Hebrew/Arabic "you" verb forms do — see the per-language
+// comments below for why each is scoped the way it is.
+//
+// selfGender reuses resolveDefaultVoiceGender(language) — the exact same
+// function persona generation already uses to pick a name that matches
+// whichever voice will actually speak the narration (see /api/get-persona)
+// — rather than storing a separate gender field, since it's already a
+// deterministic function of (language, TTS_PROVIDER) and this way can
+// never drift out of sync with the persona-name logic or a future
+// provider switch.
+//
+// The listener-facing default (masculine, when addressing "you" in
+// Hebrew/Arabic) is a real product/language decision, not a purely
+// technical one — Hebrew and Arabic have no gender-neutral second person
+// the way English does, and this app has no signal at all about the
+// listener's gender (onboarding never asks). Masculine is used here
+// because it's the standard default for unspecified-gender formal address
+// in both languages — this is a genuine judgment call, not a proven-
+// correct answer, and asking the user's gender at onboarding (not
+// currently done) is the only way to do better than a fixed default.
+function buildGenderConsistencyGuidance(languageName, language) {
+  const selfGenderWord = resolveDefaultVoiceGender(language) === "male" ? "masculine" : "feminine";
+
+  if (languageName === "Hebrew" || languageName === "Arabic") {
+    return (
+      `GRAMMATICAL GENDER CONSISTENCY (${languageName}): ${languageName} verbs and adjectives conjugate by ` +
+        `grammatical gender — using both masculine and feminine forms within one response is a real ` +
+        `grammar error, not a style choice. Two separate things must EACH stay internally consistent ` +
+        `throughout this entire response, never switching mid-response (they do not have to match each ` +
+        `other, just each be consistent on its own):\n` +
+        `1) When referring to YOURSELF (the guide) — "I think", "I'm happy to show you" etc. — always use ` +
+        `${selfGenderWord} grammatical forms, consistently.\n` +
+        `2) When addressing the LISTENER directly ("you") — imperative verbs, "you'll see", etc. — ` +
+        `${languageName} has no gender-neutral default the way English does. Default to masculine ` +
+        `grammatical forms throughout, consistently, unless something in the conversation clearly ` +
+        `indicates otherwise.`
+    );
+  }
+
+  if (languageName === "Russian") {
+    return (
+      `GRAMMATICAL GENDER CONSISTENCY (Russian): Russian past-tense verbs conjugate by grammatical gender ` +
+        `(e.g. "я думал" vs "я думала") — mixing both within one response referring to the same speaker is ` +
+        `a real grammar error. When referring to YOURSELF (the guide) in the past tense, use consistent ` +
+        `${selfGenderWord === "masculine" ? "masculine" : "feminine"} verb forms throughout this entire ` +
+        `response, never switching mid-response.`
+    );
+  }
+
+  if (languageName === "French" || languageName === "Spanish") {
+    return (
+      `GRAMMATICAL GENDER AGREEMENT (${languageName}): adjectives and certain past participles describing ` +
+        `YOURSELF (the guide) agree in grammatical gender. Stay consistent with ${selfGenderWord} forms ` +
+        `throughout this entire response whenever you describe yourself, never switching mid-response.`
+    );
+  }
+
+  return null;
 }
 
 // Resolves a Claude-generated searchQuery (e.g. "Trevi Fountain Rome") into
@@ -3596,6 +3691,7 @@ app.post("/api/narrate", async (req, res) => {
     SPOKEN_LANGUAGE_RULES,
     buildPronunciationGuidance(languageName),
     buildLanguageGuidance(languageName),
+    buildGenderConsistencyGuidance(languageName, language),
     TIER_GUIDANCE[resolvedTier],
     DEPTH_GUIDANCE[resolvedDepth],
   ].filter(Boolean);
@@ -3721,6 +3817,8 @@ app.post("/api/narrate-proactive", async (req, res) => {
   if (languageGuidance) systemPromptParts.push(languageGuidance);
   const pronunciationGuidance = buildPronunciationGuidance(languageName);
   if (pronunciationGuidance) systemPromptParts.push(pronunciationGuidance);
+  const genderConsistencyGuidance = buildGenderConsistencyGuidance(languageName, language);
+  if (genderConsistencyGuidance) systemPromptParts.push(genderConsistencyGuidance);
 
   const userMessage =
     type === "dwell"
@@ -3851,6 +3949,9 @@ app.post("/api/ask", async (req, res) => {
 
   const pronunciationGuidance = buildPronunciationGuidance(languageName);
   if (pronunciationGuidance) systemPromptParts.push(pronunciationGuidance);
+
+  const genderConsistencyGuidance = buildGenderConsistencyGuidance(languageName, language);
+  if (genderConsistencyGuidance) systemPromptParts.push(genderConsistencyGuidance);
 
   // Used to use structured JSON output for the answer + 3 extracted fields
   // (locationCorrection, userStatedDestination, userStatedDirection) — now
