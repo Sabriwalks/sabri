@@ -422,6 +422,7 @@
           <button class="speed-btn" data-speed="0.75">0.75x</button>
           <button class="speed-btn is-active" data-speed="1">1.0x</button>
           <button class="speed-btn" data-speed="1.25">1.25x</button>
+          <button class="speed-btn" data-speed="1.5">1.5x</button>
         </div>
 
         <!-- Session mood — always-visible, changeable any time mid-walk
@@ -686,6 +687,17 @@
     <p class="now-playing">Now Playing</p>
     <h2 id="place-name" class="story-title">—</h2>
     <p id="place-description" class="story-description">—</p>
+
+    <!-- Skip stops the current narration outright (same interruptPlayback
+         used for question-interrupt); Replay instantly re-plays the last
+         narration's already-generated audio, no new Claude/TTS call — see
+         skipNarration/replayLastNarration in app.js. Both start hidden and
+         are shown/hidden by updateNarrationControlButtons based on
+         whether there's actually anything to skip/replay right now. -->
+    <div class="narration-controls">
+      <button id="narration-skip-btn" class="narration-control-btn hidden" aria-label="Skip this story">⏭ Skip</button>
+      <button id="narration-replay-btn" class="narration-control-btn hidden" aria-label="Replay this story">↺ Replay</button>
+    </div>
   </section>
 
   <p id="ask-subtitle" class="ask-subtitle hidden"></p>

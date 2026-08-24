@@ -38,6 +38,8 @@ const drawerClose = document.getElementById("drawer-close");
 const placeName = document.getElementById("place-name");
 const placeDescription = document.getElementById("place-description");
 const speedButtons = document.querySelectorAll(".speed-btn");
+const narrationSkipBtn = document.getElementById("narration-skip-btn");
+const narrationReplayBtn = document.getElementById("narration-replay-btn");
 const moodButtons = document.querySelectorAll(".mood-btn");
 const plannerMoodCardsContainer = document.getElementById("planner-mood-cards");
 const playBtn = document.getElementById("play-btn");
@@ -218,24 +220,44 @@ let firstAudioPlaybackAt = null; // timestamp, for time-to-first-audio measureme
 let tourStartPerfMark = null;
 let tourStartStageTimestamps = {};
 
+// Replay button's cache — accumulated by driveTtsQueue (see its own
+// comment), but only while cachingNarrationForReplay is true, so a
+// tap-to-talk Q&A answer right after a narration can't silently overwrite
+// "replay the last NARRATION" with Q&A audio instead. Set true/false at
+// the start/end of narrateAndSpeak specifically — the one flow this button
+// actually applies to.
+let lastNarrationAudioBlobs = [];
+let cachingNarrationForReplay = false;
+
 async function fetchSpeechBlobUrl(text) {
+  // No `speed` sent here — see the speedButtons click handler's comment
+  // for why. Every clip synthesizes at natural 1x; speed is applied
+  // purely via audio.playbackRate at play time in driveTtsQueue, so it's
+  // provider-agnostic and can never compound with a server-side rate.
   const response = await fetch("/api/speak", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, speed: selectedSpeed, voice: settings.voice, language: settings.language }),
+    body: JSON.stringify({ text, voice: settings.voice, language: settings.language }),
   });
   if (!response.ok) throw new Error("TTS request failed");
   const arrayBuffer = await response.arrayBuffer();
-  return URL.createObjectURL(new Blob([arrayBuffer], { type: "audio/wav" }));
+  // Returns the Blob alongside the URL (not just the URL) so the replay
+  // cache below can keep the underlying Blob alive and mint its own fresh
+  // object URL later, independent of whatever happens to the URL created
+  // here — driveTtsQueue revokes THIS url once superseded by the next
+  // clip, which would otherwise silently break Replay if it only ever
+  // held onto this same, soon-to-be-revoked url.
+  const blob = new Blob([arrayBuffer], { type: "audio/wav" });
+  return { blob, url: URL.createObjectURL(blob) };
 }
 
 function enqueueTtsSentence(text) {
   const generation = ttsQueueGeneration;
-  const blobUrlPromise = fetchSpeechBlobUrl(text).catch((error) => {
+  const resultPromise = fetchSpeechBlobUrl(text).catch((error) => {
     console.log("[tts] sentence synthesis failed, skipping:", error?.message || error);
     return null;
   });
-  ttsQueue.push({ text, blobUrlPromise, generation });
+  ttsQueue.push({ text, resultPromise, generation });
   if (!ttsQueueActive) driveTtsQueue();
 }
 
@@ -246,16 +268,28 @@ async function driveTtsQueue() {
     while (ttsQueue.length > 0) {
       const item = ttsQueue.shift();
       if (item.generation !== ttsQueueGeneration) continue; // interrupted — skip
-      const blobUrl = await item.blobUrlPromise;
+      const result = await item.resultPromise;
       if (item.generation !== ttsQueueGeneration) {
-        if (blobUrl) URL.revokeObjectURL(blobUrl);
+        if (result) URL.revokeObjectURL(result.url);
         continue;
       }
-      if (!blobUrl) continue; // this sentence failed to synthesize — skip it, don't stall the queue
+      if (!result) continue; // this sentence failed to synthesize — skip it, don't stall the queue
+      const { blob, url: blobUrl } = result;
 
       if (currentAudioObjectUrl) URL.revokeObjectURL(currentAudioObjectUrl);
       currentAudioObjectUrl = blobUrl;
       audioPlayer.src = blobUrl;
+      // Applied on every clip (not just once) so the gapless queue keeps
+      // respecting the chosen speed across sentence boundaries — src swaps
+      // don't preserve playbackRate on all browsers.
+      audioPlayer.playbackRate = selectedSpeed;
+      // Replay button's cache (see replayLastNarration) — keeps the Blob,
+      // not the url above (which gets revoked the moment the NEXT clip
+      // starts), so Replay can mint a fresh url instantly with no re-fetch.
+      // Only accumulated during an actual narration (see
+      // cachingNarrationForReplay's own comment) — cleared at the start of
+      // each new narration, not appended to indefinitely.
+      if (cachingNarrationForReplay) lastNarrationAudioBlobs.push({ text: item.text, blob });
 
       if (firstAudioPlaybackAt === null) {
         firstAudioPlaybackAt = performance.now();
@@ -2089,6 +2123,17 @@ settingsOverlay.addEventListener("click", closeSettings);
 
 function openSettings() {
   updateAccountSettingsUI();
+  // Real field bug this fixes: applyActiveVoiceProviderUI() was already
+  // called from applySettingsToUI() and the language-change listeners, but
+  // never from openSettings() itself — so a fresh page load that hadn't
+  // yet hit one of those other triggers (e.g. no profile restore, no
+  // language change) showed the stale OpenAI-style voice picker the
+  // moment Settings was opened, even under Inworld. Confirmed by reading
+  // openSettings() directly: it was the one real gap, not a broken
+  // applyActiveVoiceProviderUI() itself (that function is correct and
+  // covers every voice-picker surface in index.html — Settings and Edit
+  // Preferences, the only two that exist).
+  applyActiveVoiceProviderUI();
   // Pillar 3 (ENABLE_NEEDS_ROUTING) — the toggle only makes sense once the
   // server has the feature enabled at all.
   if (settingsNeedsSuggestionsSection) settingsNeedsSuggestionsSection.classList.toggle("hidden", !ENABLE_NEEDS_ROUTING);
@@ -4452,6 +4497,28 @@ const CAMERA_ENABLED = true;
 let cameraStream = null;
 let isIdentifying = false;
 
+// Real field bug this fixes: /api/identify used to receive no location
+// context at all, so a photo taken well after (and well away from) the
+// last narrated place still got interpreted with that place bleeding
+// into Claude's reasoning. This decay check is what decides whether
+// recentNarrationContext is even sent — see buildIdentifyLocationGuidance
+// in server.js, which trusts that by the time this field arrives, it's
+// still genuinely relevant. "Still standing at the same spot" vs. "clearly
+// moved on" — picked via judgment, not a precise science.
+const CAMERA_CONTEXT_DECAY_MINUTES = 2.5;
+const CAMERA_CONTEXT_DECAY_METERS = 40;
+
+function buildRecentNarrationContextForCamera() {
+  if (!currentPlaceName || lastNarrationEndTime === 0) return null;
+  const minutesAgo = (Date.now() - lastNarrationEndTime) / 60000;
+  if (minutesAgo > CAMERA_CONTEXT_DECAY_MINUTES) return null;
+  if (lastNarrationPosition && lastPosition) {
+    const moved = distanceInMeters(lastNarrationPosition, lastPosition);
+    if (moved > CAMERA_CONTEXT_DECAY_METERS) return null;
+  }
+  return { placeName: currentPlaceName, minutesAgo: Math.round(minutesAgo * 10) / 10 };
+}
+
 async function handleCameraTap() {
   if (!CAMERA_ENABLED) {
     showToast("Camera feature is unavailable");
@@ -4559,7 +4626,15 @@ if (cameraIdentifyBtn) {
       const response = await fetch("/api/identify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageBase64, mediaType: "image/jpeg", language: settings.language }),
+        body: JSON.stringify({
+          imageBase64,
+          mediaType: "image/jpeg",
+          language: settings.language,
+          city: currentCity,
+          country: currentCountry,
+          neighborhood: currentNeighborhoodName,
+          recentNarrationContext: buildRecentNarrationContextForCamera(),
+        }),
       });
       const data = await response.json();
 
@@ -4697,6 +4772,18 @@ speedButtons.forEach((button) => {
     selectedSpeed = parseFloat(button.dataset.speed);
     speedButtons.forEach((b) => b.classList.remove("is-active"));
     button.classList.add("is-active");
+    // Real bug found while wiring this up: these buttons previously only
+    // sent a `speed` param to /api/speak, which speakWithOpenAI honors but
+    // speakWithInworld (server.js) never even reads — under the current
+    // Inworld-default setup, tapping 0.75x/1.25x did nothing audible at
+    // all. audio.playbackRate works regardless of which TTS provider
+    // generated the clip, so it's now the only speed mechanism — see
+    // fetchSpeechBlobUrl, which no longer sends `speed` server-side at
+    // all, to avoid the two ever compounding (1.25x server + 1.25x client
+    // would silently play at 1.5625x). Applied immediately here so a
+    // speed change takes effect on whatever's already playing, not just
+    // the next clip.
+    audioPlayer.playbackRate = selectedSpeed;
   });
 });
 
@@ -5504,7 +5591,7 @@ async function narrateAndSpeak({
   prefetchedFocusedPlace = null,
 }) {
   isNarrating = true;
-  lastNarrationPosition = triggerPosition;
+  updateNarrationControlButtons();
   statusText.textContent = "Sabri is preparing your story...";
 
   // Must resolve (or at least attempt) BEFORE advancing to "preparing" —
@@ -5534,6 +5621,10 @@ async function narrateAndSpeak({
   clearTtsQueue();
   if (streamAbortController) streamAbortController.abort();
   streamAbortController = new AbortController();
+  // Replay button — fresh cache for THIS narration, see driveTtsQueue and
+  // cachingNarrationForReplay's own comments.
+  lastNarrationAudioBlobs = [];
+  cachingNarrationForReplay = true;
 
   let focusedPlace = tier === "neighborhood" ? place : null;
   let narrationText = "";
@@ -5705,10 +5796,30 @@ async function narrateAndSpeak({
   } finally {
     isNarrating = false;
     lastNarrationEndTime = Date.now();
+    // Real field bug this fixes: this used to be set at the START of
+    // narrateAndSpeak (to triggerPosition, before Claude generation + TTS
+    // playback even began), so if the user kept walking during a
+    // 20-40s narration, the cooldown's distance-moved check in
+    // checkForNarration compared against a position that was already
+    // 50-100m stale by the time playback actually finished — silently
+    // blocking the next narration even though the user had genuinely
+    // moved on well past the trigger threshold. Anchoring to the user's
+    // ACTUAL current position here instead (lastPosition, kept live by
+    // onLocation throughout) means movement DURING playback counts
+    // toward the next trigger, not just movement after it ends. Confirmed
+    // via code trace that lastNarrationPosition has no other reader that
+    // needs it set earlier — checkForNarration always early-returns while
+    // isNarrating is true, so nothing ever reads the mid-narration value.
+    lastNarrationPosition = lastPosition || triggerPosition;
     narratingPlaceId = null;
     refreshAllPlaceMarkers();
     hideTourLoadingOverlay();
     hideNarrationLoadingState();
+    // Stop accumulating into the replay cache once this narration is
+    // genuinely done — a Q&A answer right after must not silently get
+    // appended to "replay the last narration"'s audio.
+    cachingNarrationForReplay = false;
+    updateNarrationControlButtons();
   }
 }
 
@@ -5859,7 +5970,7 @@ async function speakNarration(text) {
     const response = await fetch("/api/speak", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, speed: selectedSpeed, voice: settings.voice, language: settings.language }),
+      body: JSON.stringify({ text, voice: settings.voice, language: settings.language }),
       signal: speakAbortController.signal,
     });
 
@@ -5876,6 +5987,7 @@ async function speakNarration(text) {
     }
     currentAudioObjectUrl = URL.createObjectURL(blob);
     audioPlayer.src = currentAudioObjectUrl;
+    audioPlayer.playbackRate = selectedSpeed;
 
     await new Promise((resolve) => {
       currentPlaybackResolve = resolve;
@@ -5927,6 +6039,54 @@ function interruptPlayback() {
     streamAbortController = null;
   }
 }
+
+// Skip — stops the current narration outright and does NOT restart until
+// the next real trigger (a new place, a tap-to-narrate, etc.), per spec.
+// Reuses interruptPlayback() as-is (the same function question-interrupt
+// already relies on) rather than a parallel stop mechanism — narrateAndSpeak's
+// own catch/finally already handle an aborted stream and a paused (not
+// "ended") audioPlayer correctly (see narration_skipped's own comment).
+function skipNarration() {
+  interruptPlayback();
+  updateNarrationControlButtons();
+}
+
+// Replay — instantly re-plays the last narration's already-generated
+// audio from the start. Deliberately does NOT call /api/narrate or
+// /api/speak again (see lastNarrationAudioBlobs) — same content, no extra
+// Claude/TTS cost, no wait.
+async function replayLastNarration() {
+  if (lastNarrationAudioBlobs.length === 0 || isNarrating) return;
+  interruptPlayback();
+  const blobsToPlay = lastNarrationAudioBlobs; // not cleared — replay can be tapped more than once
+  for (const entry of blobsToPlay) {
+    if (blobsToPlay !== lastNarrationAudioBlobs) return; // a newer narration started mid-replay — stop, don't talk over it
+    const url = URL.createObjectURL(entry.blob);
+    if (currentAudioObjectUrl) URL.revokeObjectURL(currentAudioObjectUrl);
+    currentAudioObjectUrl = url;
+    audioPlayer.src = url;
+    audioPlayer.playbackRate = selectedSpeed;
+    await new Promise((resolve) => {
+      currentPlaybackResolve = resolve;
+      audioPlayer.addEventListener("ended", resolve, { once: true });
+      const playPromise = audioPlayer.play();
+      if (playPromise && typeof playPromise.catch === "function") playPromise.catch(() => resolve());
+    });
+    currentPlaybackResolve = null;
+  }
+}
+
+// Shows Skip only while there's genuinely something playing to skip, and
+// Replay only once a narration has finished and left something behind to
+// replay — called from narrateAndSpeak's finally block and from
+// skip/replay's own handlers, not on a timer.
+function updateNarrationControlButtons() {
+  if (narrationSkipBtn) narrationSkipBtn.classList.toggle("hidden", !isNarrating);
+  if (narrationReplayBtn) narrationReplayBtn.classList.toggle("hidden", isNarrating || lastNarrationAudioBlobs.length === 0);
+}
+
+if (narrationSkipBtn) narrationSkipBtn.addEventListener("click", () => skipNarration());
+if (narrationReplayBtn) narrationReplayBtn.addEventListener("click", () => replayLastNarration());
 
 function togglePlayback() {
   if (!audioPlayer.src) return;

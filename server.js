@@ -320,6 +320,64 @@ const PRONUNCIATION_GUIDE_TEXT = Object.entries(HEBREW_PRONUNCIATION_GUIDE)
   .map(([word, phonetic]) => `${word} = "${phonetic}"`)
   .join("\n");
 
+// Real-world field report, distinct from HEBREW_PRONUNCIATION_GUIDE above:
+// that guide works by getting Claude to spell place names phonetically
+// IN the narration text itself, which is fine there because the
+// phonetic spelling is meant to be seen too. This glossary is for the
+// opposite situation — common Hebrew/Jewish TERMS (not place names) that
+// show up inside otherwise-non-Hebrew narration (e.g. "the Chabad house"
+// in English) where the WRITTEN word is correct and should stay on
+// screen exactly as written, but the TTS engine mispronounces it badly
+// (confirmed cringe-bad in real listening). So this substitution is
+// applied ONLY to the copy of the text sent to the TTS engine (see
+// applyHebrewLoanwordPronunciation below, called from /api/speak) —
+// never to what /api/narrate streams back for display. A starter list
+// based on terms likely in Jerusalem-area narration — expand from real
+// usage as more mispronunciations get reported.
+const HEBREW_LOANWORD_PRONUNCIATION = {
+  chabad: "khah-BAHD",
+  shul: "shool",
+  mikveh: "MIK-veh",
+  sukkah: "SOO-kah",
+  kotel: "KOH-tel",
+  yeshiva: "yeh-SHEE-vah",
+  mezuzah: "meh-ZOO-zah",
+  kippah: "kee-PAH",
+  tallit: "tah-LEET",
+  tefillin: "teh-FILL-in",
+  shabbat: "shah-BAHT",
+  challah: "KHAH-lah",
+  menorah: "meh-NOH-rah",
+  rebbe: "REH-beh",
+  minyan: "MIN-yahn",
+  siddur: "see-DOOR",
+};
+
+// Longest terms first so "shabbat" doesn't get partially matched before a
+// longer phrase containing it could (none currently, but keeps this safe
+// if the glossary grows to include multi-word terms later).
+const HEBREW_LOANWORD_REGEX = new RegExp(
+  `\\b(${Object.keys(HEBREW_LOANWORD_PRONUNCIATION)
+    .sort((a, b) => b.length - a.length)
+    .join("|")})\\b`,
+  "gi"
+);
+
+// Scoped to non-Hebrew narration only — see this constant's own comment
+// above for why, and buildLanguageGuidance's Hebrew branch for how Hebrew-
+// script narration already handles these terms correctly on its own.
+function applyHebrewLoanwordPronunciation(text, language) {
+  if (!text || language === "he") return text;
+  return text.replace(HEBREW_LOANWORD_REGEX, (match) => {
+    const phonetic = HEBREW_LOANWORD_PRONUNCIATION[match.toLowerCase()];
+    // Preserve the matched word's original casing convention (capitalized
+    // vs lowercase) so a sentence-leading "Shul was..." doesn't turn into
+    // a mid-sentence-looking "shool was..." — TTS engines are sometimes
+    // sensitive to leading capitalization for phrasing/emphasis.
+    return match[0] === match[0].toUpperCase() ? phonetic[0].toUpperCase() + phonetic.slice(1) : phonetic;
+  });
+}
+
 // Only relevant when the narration itself is in English (or another
 // non-Hebrew/Arabic language) — the point is spelling Hebrew place names
 // phonetically so an English-reading TTS voice pronounces them correctly.
@@ -397,9 +455,22 @@ const TOURIST_ORIENTATION_GUIDANCE =
   "goes beyond telling stories — you actively orient them and help them " +
   "feel confident and excited in an unfamiliar environment.\n\n" +
   "Always include:\n" +
-  "- Spatial orientation: cardinal directions and approximate distances " +
-  '(\'About 200 meters to your north...\', \'Just around the corner to ' +
-  "your left...')\n" +
+  // Real field bug this fixes: narration was ending with raw GPS-coordinate-
+  // sounding phrasing ("236m west") — traced directly to THIS example,
+  // which used to model exactly that pattern ("About 200 meters to your
+  // north..."). Rewritten so every example is the kind of thing a real
+  // human guide walking next to someone would actually say, not
+  // meters-and-cardinal-direction output. Distance/direction data is still
+  // available to Claude elsewhere in the prompt (nearby-places lists
+  // include distanceMeters/bearing) — this only changes how it should be
+  // TRANSLATED into speech, not whether spatial awareness matters.
+  "- Spatial orientation: describe direction and distance the way a real " +
+  "person walking beside someone would — never raw meters or cardinal " +
+  "directions ('236 meters west', 'to your north'). Say 'take a right up " +
+  "ahead', 'it's just past the corner', 'keep going straight for a " +
+  "couple minutes', 'it's right around the corner on your left' — natural " +
+  "walking-guide language a tourist can actually act on without needing a " +
+  "compass.\n" +
   "- Environmental context: help them understand where they are in the " +
   "city ('You are in the oldest part of the city', 'This street runs from " +
   "the old market down to the waterfront', 'You have just crossed from the " +
@@ -2060,8 +2131,30 @@ app.post("/api/get-persona", async (req, res) => {
     // data loss. Still worth knowing about if it's happening on every call.
     if (lookupError) console.error("[supabase] guide_personas select failed:", lookupError.message);
 
-    if (existing) {
+    // Root-caused a real field report (a "Miriam" persona narrating with a
+    // male voice) back to this exact cache: guide_personas is a permanent
+    // cache with no invalidation, and this table predates the name<->voice
+    // gender-matching logic entirely — a row generated before that fix
+    // existed (or before language even became part of the cache key) just
+    // sits here forever, served as-is on every lookup, regardless of any
+    // later improvement to how gender is resolved. The prior fix (see
+    // defaultVoiceGender below) was necessary but not sufficient — it only
+    // ever affected NEW persona generation, never retroactively touched
+    // rows already sitting in the table. Storing the gender a persona was
+    // actually generated for, and comparing it against what's currently
+    // expected on every lookup, makes stale rows (including ones with no
+    // stored gender at all, i.e. pre-fix data) self-heal the next time
+    // they're requested — this IS the fix, not the name-matching logic
+    // alone, which was already correct.
+    const defaultVoiceGender = resolveDefaultVoiceGender(resolvedLanguage);
+    if (existing && existing.gender === defaultVoiceGender) {
       return res.json({ persona: existing, cached: true });
+    }
+    if (existing) {
+      console.log(
+        `[persona] stale gender mismatch for ${city}/${archetype}/${resolvedLanguage} ` +
+          `(stored: ${existing.gender || "none — pre-fix row"}, expected: ${defaultVoiceGender}) — regenerating`
+      );
     }
 
     if (!ANTHROPIC_API_KEY) {
@@ -2075,7 +2168,6 @@ app.post("/api/get-persona", async (req, res) => {
     // (a male name is just as "authentically local" as a female one
     // anywhere) — purely about matching the generated name to the gender of
     // the TTS voice this language defaults to.
-    const defaultVoiceGender = resolveDefaultVoiceGender(resolvedLanguage);
     const userMessage =
       `You are creating a local tour guide persona for ${city}${country ? `, ${country}` : ""}. ` +
       `This guide's core personality and focus area is: ${archetypeDef.focus}. Their tone is ${archetypeDef.tone}.\n\n` +
@@ -2123,6 +2215,7 @@ app.post("/api/get-persona", async (req, res) => {
       generated_name: generated.name,
       generated_bio: generated.bio,
       style_notes: generated.styleNotes,
+      gender: defaultVoiceGender,
     };
 
     // onConflict handles the (rare but real) race of two users requesting
@@ -2130,11 +2223,30 @@ app.post("/api/get-persona", async (req, res) => {
     // — the unique constraint means the second insert becomes a no-op
     // update instead of an error, and both requests end up returning the
     // same persona rather than two different generated names.
-    const { data: inserted, error } = await supabaseAdmin
+    let { data: inserted, error } = await supabaseAdmin
       .from("guide_personas")
       .upsert(row, { onConflict: "city,archetype,language" })
       .select()
       .single();
+
+    // Discovered live while testing this exact fix: the `gender` column
+    // (see schema.sql) hadn't been applied to the deployed database yet,
+    // which made EVERY persona generation fail, not just the stale-gender
+    // case this was meant to fix — a real regression caught before it
+    // shipped. Falls back to writing the row without `gender` so persona
+    // generation keeps working even before the migration runs; it just
+    // won't self-heal until schema.sql's `alter table` has actually been
+    // applied to this database (see the flagged follow-up in the final
+    // report).
+    if (error && /gender/i.test(error.message || "") && /column/i.test(error.message || "")) {
+      console.error("[supabase] guide_personas.gender column missing — schema.sql not yet applied here, falling back without it:", error.message);
+      const { gender, ...rowWithoutGender } = row;
+      ({ data: inserted, error } = await supabaseAdmin
+        .from("guide_personas")
+        .upsert(rowWithoutGender, { onConflict: "city,archetype,language" })
+        .select()
+        .single());
+    }
 
     if (error) {
       console.error("[supabase] guide_personas upsert failed:", error.message || error);
@@ -2785,16 +2897,24 @@ function buildNearbyInterestGuidance(nearbyInterestPlace) {
   const { name, distanceMeters, direction } = nearbyInterestPlace;
   const directionPhrase = direction ? `to your ${direction}` : "nearby";
 
+  // The raw meters/direction figures above are for YOUR reasoning only —
+  // real field bug traced to this function's old example phrase, which
+  // literally modeled "About X meters to your Y..." and got echoed
+  // near-verbatim into narration. Now only instructs the STYLE, no raw
+  // numbers in the example itself, so there's nothing GPS-sounding left to
+  // copy.
   return (
     `There is a place this person will likely find fascinating about ` +
     `${Math.round(distanceMeters)} meters ${directionPhrase}: ${name}. Since ` +
     `it's not close enough to visit right now, proactively mention it at ` +
-    `the very end of this narration, after your usual transition — ` +
-    `something like "About ${Math.round(distanceMeters)} meters to your ` +
-    `${direction || "path ahead"} there is something I think you'll find ` +
-    `fascinating — keep walking and I'll tell you about it when you get ` +
-    `closer." Do not describe what it actually is yet — just build ` +
-    `anticipation.`
+    `the very end of this narration, after your usual transition — phrase ` +
+    `it the way a real guide walking beside them would, translating that ` +
+    `distance/direction into natural walking terms (e.g. "keep going this ` +
+    `way for a few minutes" or "just up ahead on your ${direction || "left"}") ` +
+    `— never raw meters or a cardinal direction. Say something like "there's ` +
+    `something up ahead I think you'll find fascinating — keep walking and ` +
+    `I'll tell you about it when you get closer." Do not describe what it ` +
+    `actually is yet — just build anticipation.`
   );
 }
 
@@ -4246,10 +4366,16 @@ app.post("/api/speak", async (req, res) => {
   }
 
   try {
+    // TTS-only substitution — see HEBREW_LOANWORD_PRONUNCIATION's own
+    // comment. text here is never echoed back to the client (this
+    // endpoint returns audio bytes only), so this can never leak into
+    // what's shown on screen — the display text already left the server
+    // via /api/narrate's SSE stream, a separate, earlier request.
+    const speechText = applyHebrewLoanwordPronunciation(text, language);
     const normalized =
       TTS_PROVIDER === "inworld"
-        ? await speakWithInworld({ text, speed, voice, language })
-        : await speakWithOpenAI({ text, speed, voice, language });
+        ? await speakWithInworld({ text: speechText, speed, voice, language })
+        : await speakWithOpenAI({ text: speechText, speed, voice, language });
 
     res.setHeader("Content-Type", "audio/wav");
     res.send(normalized);
@@ -4321,6 +4447,32 @@ function normalizeWavPeak(buffer) {
   }
 }
 
+// See /api/identify's own comment for the field bug this fixes. Builds
+// real, always-fresh location grounding (city/neighborhood) plus an
+// OPTIONAL recent-narration hint that the CLIENT decides whether to
+// include at all, based on a decay window (elapsed time AND distance
+// moved since that narration finished) — see handleCameraTap in app.js.
+// This function never has to guess about freshness itself; by the time
+// recentNarrationContext reaches here, the client has already decided
+// it's still relevant.
+function buildIdentifyLocationGuidance(city, country, neighborhood, recentNarrationContext) {
+  const parts = [];
+  if (city) {
+    parts.push(`The user is currently in ${neighborhood ? `${neighborhood}, ` : ""}${city}${country ? `, ${country}` : ""}.`);
+  }
+  if (recentNarrationContext?.placeName) {
+    parts.push(
+      `For reference only — a few minutes ago you were narrating about "${recentNarrationContext.placeName}" ` +
+        `(${recentNarrationContext.minutesAgo} min ago, nearby). The user may still be there, OR may have ` +
+        `moved on to something new — trust what the PHOTO actually shows over this reference. Only use this ` +
+        `as a tiebreaker if the image is genuinely ambiguous and could plausibly be the same place; never ` +
+        `assume it's the same place just because it looks superficially similar (e.g. a different building ` +
+        `of the same type/style).`
+    );
+  }
+  return parts.length ? parts.join("\n\n") : null;
+}
+
 const IDENTIFY_SYSTEM_PROMPT =
   "You are Sabri, a warm knowledgeable tour guide. The user has pointed " +
   "their camera at something and wants to know about it. Look at the image " +
@@ -4342,7 +4494,7 @@ app.post("/api/identify", async (req, res) => {
     return res.status(404).json({ error: "Camera feature is disabled." });
   }
 
-  const { imageBase64, mediaType, language } = req.body || {};
+  const { imageBase64, mediaType, language, city, country, neighborhood, recentNarrationContext } = req.body || {};
   if (!imageBase64) {
     return res.status(400).json({ error: "imageBase64 is required." });
   }
@@ -4361,7 +4513,20 @@ app.post("/api/identify", async (req, res) => {
   // non-English speaker pointing the camera at something should get the
   // answer in their language too, not always English.
   const languageGuidance = buildLanguageGuidance(LANGUAGE_NAMES[language]);
-  const systemPrompt = languageGuidance ? `${IDENTIFY_SYSTEM_PROMPT}\n\n${languageGuidance}` : IDENTIFY_SYSTEM_PROMPT;
+  // Real field bug this fixes: before this, /api/identify received NO
+  // location context at all — not even city/neighborhood — so a photo was
+  // identified purely from the image with zero grounding. Investigated
+  // directly rather than assumed: there was no existing "last narrated
+  // place" mechanism to decay in the first place, just a total absence of
+  // any location context. Fixed two things together: (1) always-fresh
+  // city/neighborhood grounding (cheap, already known client-side, no
+  // extra round trip), and (2) an OPTIONAL recentNarrationContext hint the
+  // client only ever sends when it's still fresh (see the decay check in
+  // app.js's handleCameraTap) — so a stale-context bug can't be
+  // reintroduced the same way, since the decay check decides whether this
+  // field is even populated, not this endpoint.
+  const locationGuidance = buildIdentifyLocationGuidance(city, country, neighborhood, recentNarrationContext);
+  const systemPrompt = [IDENTIFY_SYSTEM_PROMPT, locationGuidance, languageGuidance].filter(Boolean).join("\n\n");
 
   try {
     const message = await anthropic.messages.create({

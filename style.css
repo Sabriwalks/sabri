@@ -460,6 +460,32 @@ body {
   line-height: 1.6;
 }
 
+/* Skip/Replay — see skipNarration/replayLastNarration in app.js. Each
+   starts hidden; updateNarrationControlButtons shows only the one that's
+   actually actionable right now (Skip while narrating, Replay once
+   there's something to replay). */
+.narration-controls {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.narration-control-btn {
+  flex: 1;
+  padding: 10px 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.narration-control-btn:active {
+  background: var(--bg-elevated);
+}
+
 .speed-controls {
   display: flex;
   gap: 8px;

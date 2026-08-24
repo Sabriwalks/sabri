@@ -123,6 +123,18 @@ exception
   when duplicate_object then null;
 end $$;
 
+-- Real field bug this fixes: a "Miriam" persona (clearly female) was found
+-- narrating with a male voice — root cause was that this table has no
+-- invalidation at all, so a row generated before the name<->voice gender-
+-- matching logic existed (or before `language` above was even part of the
+-- cache key) just sits here forever, served as-is regardless of later
+-- fixes. Storing the gender a persona was actually generated for lets
+-- /api/get-persona detect a mismatch against what's CURRENTLY expected on
+-- every lookup and regenerate — existing rows have gender = null, which
+-- always counts as a mismatch (self-heals the very first time each old
+-- persona is next requested, no migration/backfill needed).
+alter table guide_personas add column if not exists gender text;
+
 -- Per-user, unlike guide_personas above (which is a shared content cache
 -- with no notion of any individual user). Tracks whether THIS user has
 -- already had a full self-introduction from a given persona in a given
