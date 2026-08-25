@@ -321,59 +321,130 @@ const PRONUNCIATION_GUIDE_TEXT = Object.entries(HEBREW_PRONUNCIATION_GUIDE)
   .join("\n");
 
 // Real-world field report, distinct from HEBREW_PRONUNCIATION_GUIDE above:
-// that guide works by getting Claude to spell place names phonetically
-// IN the narration text itself, which is fine there because the
-// phonetic spelling is meant to be seen too. This glossary is for the
-// opposite situation — common Hebrew/Jewish TERMS (not place names) that
-// show up inside otherwise-non-Hebrew narration (e.g. "the Chabad house"
-// in English) where the WRITTEN word is correct and should stay on
-// screen exactly as written, but the TTS engine mispronounces it badly
-// (confirmed cringe-bad in real listening). So this substitution is
-// applied ONLY to the copy of the text sent to the TTS engine (see
-// applyHebrewLoanwordPronunciation below, called from /api/speak) —
-// never to what /api/narrate streams back for display. A starter list
-// based on terms likely in Jerusalem-area narration — expand from real
-// usage as more mispronunciations get reported.
-const HEBREW_LOANWORD_PRONUNCIATION = {
-  chabad: "khah-BAHD",
-  shul: "shool",
-  mikveh: "MIK-veh",
-  sukkah: "SOO-kah",
-  kotel: "KOH-tel",
-  yeshiva: "yeh-SHEE-vah",
-  mezuzah: "meh-ZOO-zah",
-  kippah: "kee-PAH",
-  tallit: "tah-LEET",
-  tefillin: "teh-FILL-in",
-  shabbat: "shah-BAHT",
-  challah: "KHAH-lah",
-  menorah: "meh-NOH-rah",
-  rebbe: "REH-beh",
-  minyan: "MIN-yahn",
-  siddur: "see-DOOR",
+// that guide works by getting Claude to spell place names phonetically IN
+// the narration text itself, which is fine there because the phonetic
+// spelling is meant to be seen too. This glossary is for the opposite
+// situation — foreign-origin terms (religious/cultural vocabulary, place
+// names) embedded inside narration that the WRITTEN word is correct for
+// (should stay on screen exactly as written) but the active TTS voice
+// mispronounces badly (confirmed cringe-bad in real listening, for
+// Hebrew/Jewish terms in English narration specifically). Substitution is
+// applied ONLY to the copy of text sent to the TTS engine (see
+// applyPronunciationGlossary below, called from /api/speak) — never to
+// what /api/narrate streams back for display.
+//
+// Generalized from an original Hebrew-only version to cover all 6
+// supported languages, since this problem isn't Hebrew-specific — any of
+// Sabri's 6 narration languages can contain terms foreign to that
+// language. Keyed by the SPEAKING language (which voice is doing the
+// reading), NOT the term's language of origin — the same source term
+// needs a different respelling depending on which voice/phonetic system
+// is reading it (how "Sacré-Cœur" should be respelled for an English
+// voice vs. a Russian voice are different problems). Each language's
+// table is deliberately a starter seed, not exhaustive — the English
+// table has the most real content (Jerusalem-area terms, from actual
+// field reports); the others include a smaller proof-of-mechanism set
+// (validating the SYSTEM works cross-language) that's expected to grow
+// city-by-city from real mispronunciation reports the same way the
+// English/Jerusalem set did. This is a flat hand-editable table by
+// design — no DB table or admin UI needed at this stage, easy to extend
+// directly in this file as new terms get reported in any language.
+const PRONUNCIATION_GLOSSARY = {
+  en: {
+    chabad: "khah-BAHD",
+    shul: "shool",
+    mikveh: "MIK-veh",
+    sukkah: "SOO-kah",
+    kotel: "KOH-tel",
+    yeshiva: "yeh-SHEE-vah",
+    mezuzah: "meh-ZOO-zah",
+    kippah: "kee-PAH",
+    tallit: "tah-LEET",
+    tefillin: "teh-FILL-in",
+    shabbat: "shah-BAHT",
+    challah: "KHAH-lah",
+    menorah: "meh-NOH-rah",
+    rebbe: "REH-beh",
+    minyan: "MIN-yahn",
+    siddur: "see-DOOR",
+  },
+  // Hebrew-script narration already handles Hebrew/Jewish terms correctly
+  // on its own (see buildLanguageGuidance's Hebrew branch) — this is only
+  // for LATIN-script foreign terms Claude might leave un-transliterated
+  // mid-sentence (e.g. a well-known non-Israeli landmark name). Proof-of-
+  // mechanism seed, not yet backed by a real field report the way the
+  // English set is.
+  he: {
+    "big ben": "ביג בן",
+  },
+  // Real, useful content (not just proof-of-mechanism) — Jerusalem/Old
+  // City narration in Arabic genuinely references these same Hebrew/
+  // Jewish terms.
+  ar: {
+    chabad: "شاباد",
+    kotel: "الكوتيل",
+    shabbat: "شاباط",
+  },
+  // Cross-language proof-of-mechanism — recognizable non-Russian landmark
+  // names as they might appear un-transliterated (Latin script) inside
+  // otherwise-Cyrillic narration, respelled in Cyrillic so Nikolai's
+  // voice reads them the way a Russian speaker would expect.
+  ru: {
+    chabad: "хабад",
+    kotel: "котель",
+    "big ben": "биг-бэн",
+    "sacré-cœur": "сакре-кёр",
+  },
+  // Cross-language proof-of-mechanism.
+  es: {
+    kotel: "kótel",
+    shabbat: "shabát",
+  },
+  // Cross-language proof-of-mechanism.
+  fr: {
+    kotel: "kotel",
+    shabbat: "chabbat",
+  },
 };
 
-// Longest terms first so "shabbat" doesn't get partially matched before a
-// longer phrase containing it could (none currently, but keeps this safe
-// if the glossary grows to include multi-word terms later).
-const HEBREW_LOANWORD_REGEX = new RegExp(
-  `\\b(${Object.keys(HEBREW_LOANWORD_PRONUNCIATION)
-    .sort((a, b) => b.length - a.length)
-    .join("|")})\\b`,
-  "gi"
-);
+// One compiled regex per language, built lazily and cached — avoids
+// rebuilding the same regex on every single /api/speak call.
+const pronunciationRegexCache = new Map();
+function getPronunciationRegex(language) {
+  if (pronunciationRegexCache.has(language)) return pronunciationRegexCache.get(language);
+  const glossary = PRONUNCIATION_GLOSSARY[language];
+  if (!glossary || Object.keys(glossary).length === 0) {
+    pronunciationRegexCache.set(language, null);
+    return null;
+  }
+  // Longest terms first so a shorter term inside a longer phrase (e.g.
+  // "kotel" inside a hypothetical future "western kotel wall" multi-word
+  // entry) doesn't get partially matched first.
+  const regex = new RegExp(
+    `\\b(${Object.keys(glossary)
+      .sort((a, b) => b.length - a.length)
+      .map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join("|")})\\b`,
+    "gi"
+  );
+  pronunciationRegexCache.set(language, regex);
+  return regex;
+}
 
-// Scoped to non-Hebrew narration only — see this constant's own comment
-// above for why, and buildLanguageGuidance's Hebrew branch for how Hebrew-
-// script narration already handles these terms correctly on its own.
-function applyHebrewLoanwordPronunciation(text, language) {
-  if (!text || language === "he") return text;
-  return text.replace(HEBREW_LOANWORD_REGEX, (match) => {
-    const phonetic = HEBREW_LOANWORD_PRONUNCIATION[match.toLowerCase()];
+// Scoped per speaking-language glossary above — a no-op for any language
+// with no entries yet (falls straight through to returning text
+// unchanged).
+function applyPronunciationGlossary(text, language) {
+  const glossary = PRONUNCIATION_GLOSSARY[language];
+  const regex = getPronunciationRegex(language);
+  if (!text || !glossary || !regex) return text;
+  return text.replace(regex, (match) => {
+    const phonetic = glossary[match.toLowerCase()];
     // Preserve the matched word's original casing convention (capitalized
     // vs lowercase) so a sentence-leading "Shul was..." doesn't turn into
     // a mid-sentence-looking "shool was..." — TTS engines are sometimes
-    // sensitive to leading capitalization for phrasing/emphasis.
+    // sensitive to leading capitalization for phrasing/emphasis. Only
+    // meaningful for Latin-script targets; harmless no-op otherwise.
     return match[0] === match[0].toUpperCase() ? phonetic[0].toUpperCase() + phonetic.slice(1) : phonetic;
   });
 }
@@ -4366,12 +4437,12 @@ app.post("/api/speak", async (req, res) => {
   }
 
   try {
-    // TTS-only substitution — see HEBREW_LOANWORD_PRONUNCIATION's own
-    // comment. text here is never echoed back to the client (this
-    // endpoint returns audio bytes only), so this can never leak into
-    // what's shown on screen — the display text already left the server
-    // via /api/narrate's SSE stream, a separate, earlier request.
-    const speechText = applyHebrewLoanwordPronunciation(text, language);
+    // TTS-only substitution — see PRONUNCIATION_GLOSSARY's own comment.
+    // text here is never echoed back to the client (this endpoint returns
+    // audio bytes only), so this can never leak into what's shown on
+    // screen — the display text already left the server via /api/narrate's
+    // SSE stream, a separate, earlier request.
+    const speechText = applyPronunciationGlossary(text, language);
     const normalized =
       TTS_PROVIDER === "inworld"
         ? await speakWithInworld({ text: speechText, speed, voice, language })
