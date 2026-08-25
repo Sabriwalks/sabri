@@ -1160,6 +1160,145 @@ body {
   cursor: pointer;
 }
 
+/* Guided Destination pillar (ENABLE_GUIDED_DESTINATION) */
+
+.guide-me-btn {
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(250, 247, 242, 0.1);
+  color: var(--text-secondary);
+  font-size: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.guide-me-btn.is-active {
+  background: var(--gold);
+  color: var(--bg);
+  box-shadow: 0 8px 24px var(--gold-glow);
+}
+
+.destination-picker {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom) + 96px);
+  transform: translateX(-50%);
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 18px 18px;
+  border-radius: 20px;
+  background: rgba(15, 27, 45, 0.97);
+  border: 1px solid var(--border);
+  color: var(--white);
+  font-size: 14px;
+  box-shadow: 0 8px 24px var(--warm-shadow);
+  max-width: calc(100% - 32px);
+  width: 360px;
+}
+
+.destination-picker-title {
+  margin: 0;
+  padding-right: 20px;
+  line-height: 1.4;
+  font-weight: 600;
+}
+
+.destination-picker-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.destination-search-btn {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: var(--gold);
+  color: #0f1b2d;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.destination-active-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(212, 168, 83, 0.12);
+}
+
+.destination-active-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.destination-stop-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.destination-skip-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 4px 0 0;
+}
+
+/* Small persistent indicator, not a full map overlay — sits above the
+   bottom control row. Only ever shown once a destination is active AND
+   DeviceOrientationEvent is actually usable (see initCompassForDestination
+   in app.js) — absent otherwise, directions still work via spoken steps. */
+.destination-compass {
+  position: fixed;
+  right: 16px;
+  bottom: calc(env(safe-area-inset-bottom) + 170px);
+  z-index: 60;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(15, 27, 45, 0.85);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 6px 18px var(--warm-shadow);
+}
+
+.destination-compass-arrow {
+  font-size: 20px;
+  color: var(--text-secondary);
+  transform-origin: center;
+  transition: transform 0.15s ease, color 0.2s ease;
+}
+
+.destination-compass.is-aligned .destination-compass-arrow {
+  color: var(--gold);
+}
+
+.destination-compass.is-aligned {
+  border-color: var(--gold);
+  box-shadow: 0 6px 18px var(--gold-glow);
+}
+
 /* Settings drawer — slides in from the right. */
 
 .settings-overlay {
@@ -1928,6 +2067,16 @@ body {
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
+}
+
+/* Guided Destination pillar — a secondary action alongside the primary
+   "Tell me about this", only ever present while picking a destination. */
+.map-pin-popup-btn--destination {
+  display: block;
+  margin-top: 6px;
+  background: transparent;
+  color: var(--gold);
+  border: 1px solid var(--gold);
 }
 
 /* Camera "point and learn" overlay — full-screen live camera feed with a

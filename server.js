@@ -204,6 +204,10 @@ const TTS_PROVIDER = process.env.TTS_PROVIDER || "inworld";
 const ENABLE_PROACTIVE_DEPTH = process.env.ENABLE_PROACTIVE_DEPTH === "true";
 const ENABLE_RELATIONSHIP_CONTINUITY = process.env.ENABLE_RELATIONSHIP_CONTINUITY === "true";
 const ENABLE_NEEDS_ROUTING = process.env.ENABLE_NEEDS_ROUTING === "true";
+// Guided Destination pillar — opt-in single-destination directional overlay
+// on top of Wander mode (NOT an extension of plannedTour/Guided Tour Mode).
+// Same permanent, default-off, rollback-safe pattern as the 3 pillars above.
+const ENABLE_GUIDED_DESTINATION = process.env.ENABLE_GUIDED_DESTINATION === "true";
 
 // Pillar 1 (proactive depth) tunables. app.js has no process.env access (it's
 // browser code) — these are read here with defaults and injected into the
@@ -873,6 +877,7 @@ function renderIndexHtml() {
     `  window.ENABLE_PROACTIVE_DEPTH = ${JSON.stringify(ENABLE_PROACTIVE_DEPTH)};\n` +
     `  window.ENABLE_RELATIONSHIP_CONTINUITY = ${JSON.stringify(ENABLE_RELATIONSHIP_CONTINUITY)};\n` +
     `  window.ENABLE_NEEDS_ROUTING = ${JSON.stringify(ENABLE_NEEDS_ROUTING)};\n` +
+    `  window.ENABLE_GUIDED_DESTINATION = ${JSON.stringify(ENABLE_GUIDED_DESTINATION)};\n` +
     `  window.DWELL_THRESHOLD_MINUTES = ${JSON.stringify(DWELL_THRESHOLD_MINUTES)};\n` +
     `  window.PROACTIVE_CALLBACKS_PER_WALK = ${JSON.stringify(PROACTIVE_CALLBACKS_PER_WALK)};\n` +
     `  window.PROACTIVE_INTERJECTIONS_PER_HOUR = ${JSON.stringify(PROACTIVE_INTERJECTIONS_PER_HOUR)};\n` +
@@ -1909,8 +1914,17 @@ const MEAL_CLARIFY_LABELS = ["Quick bite", "Sit-down meal", "Local favorite", "D
 app.post("/api/interpret-needs-response", async (req, res) => {
   const { transcript, stage, userId } = req.body || {};
 
-  if (!ENABLE_NEEDS_ROUTING) {
-    return res.status(403).json({ error: "Needs routing is disabled on this server." });
+  // The "confirm" stage (yes/no/unclear classification) is generic enough
+  // that the Guided Destination pillar's reroute confirmation reuses it
+  // too (see handleDestinationRerouteVoiceTranscript in app.js), rather
+  // than standing up a second identical classifier — so this only needs
+  // ONE of the two pillars enabled, not specifically needs-routing. The
+  // "clarify" stage (food-type extraction) stays needs-routing-specific
+  // content-wise, but gating the whole endpoint on either flag is simpler
+  // and harmless — "clarify" is never called unless ENABLE_NEEDS_ROUTING's
+  // own client-side code path is what invokes it in the first place.
+  if (!ENABLE_NEEDS_ROUTING && !ENABLE_GUIDED_DESTINATION) {
+    return res.status(403).json({ error: "Neither needs routing nor guided destination is enabled on this server." });
   }
   if (!transcript || !transcript.trim()) {
     return res.status(400).json({ error: "transcript is required." });
@@ -3324,6 +3338,123 @@ async function findPlaceForQuery(query, biasLat, biasLng) {
     return null;
   }
 }
+
+// --- Guided Destination pillar (ENABLE_GUIDED_DESTINATION) ---
+// Thin wrapper around findPlaceForQuery — reuses the EXACT SAME place-
+// resolution pipeline Guided Tour planning already uses (real Google Place
+// lookup, never trusting raw Claude-generated coordinates), rather than
+// building a second one. This is the only new thing here: exposing it as
+// its own endpoint so the destination-search UI (free-text or voice) can
+// call it directly, the same way /api/plan-tour already calls the
+// underlying function server-side.
+app.get("/api/resolve-destination", async (req, res) => {
+  const query = req.query.query;
+  const biasLat = parseFloat(req.query.biasLat);
+  const biasLng = parseFloat(req.query.biasLng);
+  if (!ENABLE_GUIDED_DESTINATION) {
+    return res.status(403).json({ error: "Guided destination is disabled on this server." });
+  }
+  if (!query) {
+    return res.status(400).json({ error: "query is required." });
+  }
+  const place = await findPlaceForQuery(query, Number.isNaN(biasLat) ? undefined : biasLat, Number.isNaN(biasLng) ? undefined : biasLng);
+  res.json({ place });
+});
+
+// Real Google Directions API (walking mode) — the actual route, not a
+// straight-line bearing guess. Converts raw steps into natural spoken-
+// guide phrasing by reusing TOURIST_ORIENTATION_GUIDANCE (the SAME prompt
+// guidance the wandering-mode direction-phrasing fix already relies on for
+// "take a right up ahead" style output, not raw meters/cardinal
+// directions) rather than building a second phrasing approach — this
+// endpoint's system prompt includes that same guidance constant directly.
+app.get("/api/get-directions", async (req, res) => {
+  const originLat = parseFloat(req.query.originLat);
+  const originLng = parseFloat(req.query.originLng);
+  const destLat = parseFloat(req.query.destLat);
+  const destLng = parseFloat(req.query.destLng);
+  const destName = req.query.destName || "your destination";
+  const language = req.query.language;
+
+  if (!ENABLE_GUIDED_DESTINATION) {
+    return res.status(403).json({ error: "Guided destination is disabled on this server." });
+  }
+  if ([originLat, originLng, destLat, destLng].some((n) => Number.isNaN(n))) {
+    return res.status(400).json({ error: "originLat, originLng, destLat, destLng are required." });
+  }
+  if (!GOOGLE_MAPS_API_KEY) {
+    return res.status(500).json({ error: "GOOGLE_MAPS_API_KEY is not configured on the server." });
+  }
+
+  try {
+    const url = new URL("https://maps.googleapis.com/maps/api/directions/json");
+    url.searchParams.set("origin", `${originLat},${originLng}`);
+    url.searchParams.set("destination", `${destLat},${destLng}`);
+    url.searchParams.set("mode", "walking");
+    url.searchParams.set("key", GOOGLE_MAPS_API_KEY);
+
+    const response = await trackedFetch(url, undefined, { provider: "googleMaps", endpoint: "directions" });
+    const data = await response.json();
+    if (data.status !== "OK" || !data.routes?.[0]?.legs?.[0]) {
+      return res.json({ steps: null, naturalLanguageDirections: null, distanceMeters: null, durationSeconds: null });
+    }
+
+    const leg = data.routes[0].legs[0];
+    // html_instructions has embedded HTML tags (<b>, <div>) — strip them,
+    // this is going to Claude as plain text and eventually to TTS, never
+    // rendered as HTML.
+    const rawSteps = leg.steps.map((step) => ({
+      instruction: (step.html_instructions || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
+      distanceMeters: step.distance?.value ?? null,
+      durationSeconds: step.duration?.value ?? null,
+    }));
+
+    const languageName = LANGUAGE_NAMES[language];
+    const stepsText = rawSteps
+      .map((step, i) => `${i + 1}. ${step.instruction} (${step.distanceMeters}m, ~${Math.round(step.durationSeconds / 60)} min)`)
+      .join("\n");
+
+    const systemPromptParts = [
+      `You are Sabri, a warm knowledgeable personal tour guide, currently giving someone real spoken ` +
+        `walking directions toward ${destName}.`,
+      TOURIST_ORIENTATION_GUIDANCE,
+      SAFETY_GUIDANCE,
+      SPOKEN_LANGUAGE_RULES,
+      buildLanguageGuidance(languageName),
+      buildGenderConsistencyGuidance(languageName, language),
+    ].filter(Boolean);
+
+    const userMessage =
+      `Here are the raw turn-by-turn walking directions toward ${destName} (${Math.round(leg.distance.value)}m, ` +
+      `~${Math.round(leg.duration.value / 60)} min total):\n${stepsText}\n\nTurn this into 2-4 sentences of ` +
+      `natural spoken walking directions, the way you'd actually talk someone there in person — combine ` +
+      `steps that are trivial (e.g. two short turns in a row) rather than listing every single one ` +
+      `mechanically, and never read out raw meters or cardinal directions. End with a natural sense of how ` +
+      `far/long it is overall (e.g. "it's about a 10 minute walk from here"), not a precise figure.`;
+
+    const message = await anthropic.messages.create(
+      {
+        model: "claude-sonnet-4-6",
+        max_tokens: 400,
+        system: systemPromptParts.join("\n\n"),
+        messages: [{ role: "user", content: userMessage }],
+      },
+      undefined,
+      { endpoint: "get-directions" }
+    );
+    const naturalLanguageDirections = message.content.find((block) => block.type === "text")?.text || null;
+
+    res.json({
+      steps: rawSteps,
+      naturalLanguageDirections,
+      distanceMeters: Math.round(leg.distance.value),
+      durationSeconds: Math.round(leg.duration.value),
+    });
+  } catch (error) {
+    console.log("[debug] /api/get-directions failed:", error?.message || error);
+    res.status(502).json({ error: "Failed to get directions." });
+  }
+});
 
 app.post("/api/plan-tour", async (req, res) => {
   const { startLocation, endLocation, duration, maxDistance, interests, specificFocus, userProfile, currentCity } =

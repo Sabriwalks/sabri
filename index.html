@@ -453,6 +453,14 @@
           </button>
 
           <button id="camera-btn" class="camera-btn" aria-label="Take a photo">📷</button>
+
+          <!-- Guided Destination pillar (ENABLE_GUIDED_DESTINATION) — Entry
+               Point B, a persistent control visible during an active Wander
+               session. Hidden by default via JS (applyGuidedDestinationUI in
+               app.js) unless the server flag is on. Its label/behavior
+               switches between "set a destination" and "manage the active
+               one" — see openGuidedDestinationMenu in app.js. -->
+          <button id="guide-me-btn" class="guide-me-btn hidden" aria-label="Guide me to a destination">🧭</button>
         </div>
 
         <button id="drawer-handle" class="tap-to-read-row" aria-label="Show story details">Tap to read</button>
@@ -1044,6 +1052,64 @@
       <button id="needs-suggestion-yes" class="needs-suggestion-yes">Yes, take me</button>
       <button id="needs-suggestion-no" class="needs-suggestion-no">No thanks</button>
     </div>
+  </div>
+
+  <!-- Guided Destination pillar (ENABLE_GUIDED_DESTINATION) — the
+       destination-input picker, shared identically by both entry points
+       (right after choosing Wander, and the persistent "Guide Me" control
+       mid-walk — see maybeOfferDestinationPrompt/openGuidedDestinationMenu
+       in app.js). Voice reuses the same createChatMicController pattern as
+       the needs-suggestion banner above; tapping a map pin while this is
+       open is the other input method (see destinationPickerActive in
+       app.js — no separate UI for that, the existing pin popup gains a
+       "Guide me here" action while this flag is true). -->
+  <div id="destination-picker" class="destination-picker hidden" role="dialog" aria-live="polite">
+    <button id="destination-picker-close" class="drawer-close" aria-label="Close">✕</button>
+    <p id="destination-picker-title" class="destination-picker-title">Anywhere specific — or a general area — you want to head toward?</p>
+    <div class="needs-suggestion-voice-row">
+      <button id="destination-mic-btn" class="mic-btn" aria-label="Search by voice">
+        🎤
+        <span class="mic-waveform" aria-hidden="true"><span></span><span></span><span></span></span>
+      </button>
+      <input id="destination-input" type="text" class="onboarding-input" placeholder="A place, neighborhood, or landmark..." />
+      <button id="destination-search-btn" class="destination-search-btn" aria-label="Search">→</button>
+    </div>
+    <p id="destination-picker-hint" class="destination-picker-hint">Or tap a pin on the map to head there.</p>
+    <p id="destination-picker-status" class="destination-picker-hint hidden"></p>
+    <div id="destination-active-row" class="destination-active-row hidden">
+      <span id="destination-active-name" class="destination-active-name"></span>
+      <button id="destination-stop-btn" class="destination-stop-btn">Stop guiding me there</button>
+    </div>
+    <button id="destination-skip-btn" class="destination-skip-btn">No, just wander</button>
+  </div>
+
+  <!-- Reroute confirmation — mirrors needs-suggestion-banner's shape/voice
+       pattern exactly (voice-first with a tap fallback, same
+       createChatMicController usage) — see
+       handleDestinationRerouteYes/No in app.js. -->
+  <div id="destination-reroute-banner" class="needs-suggestion-banner hidden" role="dialog" aria-live="polite">
+    <p id="destination-reroute-text" class="needs-suggestion-text"></p>
+    <div class="needs-suggestion-voice-row">
+      <button id="destination-reroute-mic-btn" class="mic-btn" aria-label="Answer by voice">
+        🎤
+        <span class="mic-waveform" aria-hidden="true"><span></span><span></span><span></span></span>
+      </button>
+      <input id="destination-reroute-voice-input" type="text" class="onboarding-input" placeholder="Or tap the mic and just say it..." readonly />
+    </div>
+    <p id="destination-reroute-voice-hint" class="needs-suggestion-voice-hint hidden"></p>
+    <div class="needs-suggestion-actions">
+      <button id="destination-reroute-yes" class="needs-suggestion-yes">Head there instead</button>
+      <button id="destination-reroute-no" class="needs-suggestion-no">Keep current</button>
+    </div>
+  </div>
+
+  <!-- Compass arrow — a small persistent indicator, only ever shown while
+       activeDestination is set AND DeviceOrientationEvent is actually
+       available/permitted (see initCompassForDestination in app.js).
+       Degrades to simply not appearing if permission is denied/unavailable
+       — directions/narration still work via natural-language steps alone. -->
+  <div id="destination-compass" class="destination-compass hidden" aria-hidden="true">
+    <div id="destination-compass-arrow" class="destination-compass-arrow">➤</div>
   </div>
 
   <!-- PWA install banner. iOS Safari has no beforeinstallprompt event, so it

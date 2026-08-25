@@ -145,6 +145,29 @@ const needsSuggestionVoiceInput = document.getElementById("needs-suggestion-voic
 const needsSuggestionVoiceHint = document.getElementById("needs-suggestion-voice-hint");
 const settingsNeedsSuggestionsSection = document.getElementById("settings-needs-suggestions-section");
 const needsSuggestionsToggle = document.getElementById("needs-suggestions-toggle");
+// Guided Destination pillar (ENABLE_GUIDED_DESTINATION).
+const guideMeBtn = document.getElementById("guide-me-btn");
+const destinationPicker = document.getElementById("destination-picker");
+const destinationPickerCloseBtn = document.getElementById("destination-picker-close");
+const destinationPickerTitle = document.getElementById("destination-picker-title");
+const destinationMicBtn = document.getElementById("destination-mic-btn");
+const destinationInput = document.getElementById("destination-input");
+const destinationSearchBtn = document.getElementById("destination-search-btn");
+const destinationPickerHint = document.getElementById("destination-picker-hint");
+const destinationPickerStatus = document.getElementById("destination-picker-status");
+const destinationActiveRow = document.getElementById("destination-active-row");
+const destinationActiveName = document.getElementById("destination-active-name");
+const destinationStopBtn = document.getElementById("destination-stop-btn");
+const destinationSkipBtn = document.getElementById("destination-skip-btn");
+const destinationRerouteBanner = document.getElementById("destination-reroute-banner");
+const destinationRerouteText = document.getElementById("destination-reroute-text");
+const destinationRerouteMicBtn = document.getElementById("destination-reroute-mic-btn");
+const destinationRerouteVoiceInput = document.getElementById("destination-reroute-voice-input");
+const destinationRerouteVoiceHint = document.getElementById("destination-reroute-voice-hint");
+const destinationRerouteYesBtn = document.getElementById("destination-reroute-yes");
+const destinationRerouteNoBtn = document.getElementById("destination-reroute-no");
+const destinationCompass = document.getElementById("destination-compass");
+const destinationCompassArrow = document.getElementById("destination-compass-arrow");
 const accountSignedIn = document.getElementById("account-signed-in");
 const accountGuest = document.getElementById("account-guest");
 const accountNameEl = document.getElementById("account-name");
@@ -3030,6 +3053,22 @@ function buildPinPopupContent(place) {
     if (marker) marker.sabriTapped = true;
     triggerNarrationForPlace(place);
   });
+  // Guided Destination pillar — this popup's normal "Tell me about this"
+  // behavior above is completely untouched; this is a purely additive
+  // second button that only ever appears while the destination picker is
+  // open and specifically waiting for a pin-tap selection (Section 4's
+  // "tap a pin on the map" input method).
+  if (destinationPickerActive) {
+    const guideBtn = document.createElement("button");
+    guideBtn.type = "button";
+    guideBtn.className = "map-pin-popup-btn map-pin-popup-btn--destination";
+    guideBtn.textContent = "Guide me here →";
+    guideBtn.addEventListener("click", () => {
+      if (activeInfoWindow) activeInfoWindow.close();
+      handleDestinationSelected(place);
+    });
+    container.appendChild(guideBtn);
+  }
   return container;
 }
 
@@ -3721,6 +3760,396 @@ async function insertGuidedTourDetour(place, reason) {
   logEvent("needs_detour_started", { reason, mode: "guided" });
 }
 
+// --- Guided Destination pillar (ENABLE_GUIDED_DESTINATION) ---
+// Entirely new, self-contained logic — its own setInterval (mirroring
+// pinIgnoredSampleInterval/dwellCheckInterval/needsCheckInterval above),
+// its own state, own error isolation. This is explicitly NOT an extension
+// of plannedTour/Guided Tour Mode — activeDestination is a single-
+// destination directional OVERLAY on top of Wander mode. onLocation ->
+// checkForNarration -> narrateAndSpeak keeps running completely
+// unmodified alongside it; this only ever READS lastPosition/lastHeading
+// (already maintained by onLocation) and reuses isNarrating the same way
+// Pillars 1 and 3 do, so it can never talk over real narration and real
+// narration can never interrupt a direction being spoken either.
+const ENABLE_GUIDED_DESTINATION = window.ENABLE_GUIDED_DESTINATION === true;
+const DESTINATION_ARRIVAL_METERS = 25; // similar in spirit to GUIDED_TOUR_ARRIVAL_METERS (30)
+const DESTINATION_CHECK_INTERVAL_MS = 20000;
+
+let activeDestination = null; // { name, placeId, latitude, longitude, naturalLanguageDirections, distanceMeters }
+let destinationPickerActive = false; // true only while the picker is open AND a map-pin-tap selection is a live option
+let destinationCheckInterval = null;
+let destinationRerouteCandidate = null; // pending place while the reroute confirm banner is showing
+let destinationCompassActive = false;
+let destinationCompassPermissionRequested = false;
+let deviceOrientationHandler = null; // stashed so it can be removed on stop
+
+function resetGuidedDestinationState() {
+  activeDestination = null;
+  destinationPickerActive = false;
+  destinationRerouteCandidate = null;
+  clearInterval(destinationCheckInterval);
+  destinationCheckInterval = null;
+  stopDestinationCompass();
+  hideDestinationPicker();
+  hideDestinationRerouteBanner();
+  applyGuidedDestinationUI();
+}
+
+// Called alongside applySettingsToUI-style setup — visibility only, never
+// gates anything about the core narration pipeline.
+function applyGuidedDestinationUI() {
+  if (!guideMeBtn) return;
+  const shouldShow = ENABLE_GUIDED_DESTINATION && tourStartedAt && !plannedTourActive;
+  guideMeBtn.classList.toggle("hidden", !shouldShow);
+  guideMeBtn.classList.toggle("is-active", !!activeDestination);
+}
+
+// --- Entry Point A: right after Wander mode is chosen ---
+function maybeOfferDestinationPrompt() {
+  if (!ENABLE_GUIDED_DESTINATION) return;
+  applyGuidedDestinationUI();
+  openDestinationPicker();
+}
+
+// --- Entry Point B: persistent "Guide Me" control mid-walk ---
+if (guideMeBtn) {
+  guideMeBtn.addEventListener("click", () => openDestinationPicker());
+}
+
+function openDestinationPicker() {
+  if (!destinationPicker) return;
+  destinationInput.value = "";
+  destinationPickerStatus.classList.add("hidden");
+  destinationPickerStatus.textContent = "";
+  if (activeDestination) {
+    destinationActiveName.textContent = `Currently guiding you to ${activeDestination.name}`;
+    destinationActiveRow.classList.remove("hidden");
+    destinationPickerTitle.textContent = "Head somewhere else instead?";
+  } else {
+    destinationActiveRow.classList.add("hidden");
+    destinationPickerTitle.textContent = "Anywhere specific — or a general area — you want to head toward?";
+  }
+  destinationPicker.classList.remove("hidden");
+  destinationPickerActive = true;
+  suppressMainMic(); // same SabriSpeechRecognition single-engine guard Pillar 3 uses
+  // Same isConversing reuse Pillar 3's needs-suggestion banner relies on —
+  // checkForNarration/triggerNarrationForPlace/handleUpdateAvailable
+  // already respect this flag, so a fresh narration or PWA update can't
+  // fire while the picker (which can involve a real voice round trip) is
+  // open.
+  isConversing = true;
+}
+
+function hideDestinationPicker() {
+  if (!destinationPicker) return;
+  destinationPicker.classList.add("hidden");
+  destinationPickerActive = false;
+  if (destinationMic?.cancel) destinationMic.cancel();
+  restoreMainMic();
+  // Only clear isConversing if nothing else (the reroute banner) still
+  // needs it held — avoids the same "who clears it last" issue a naive
+  // unconditional reset would risk if both could ever be open back to back.
+  if (destinationRerouteBanner.classList.contains("hidden")) isConversing = false;
+}
+
+if (destinationPickerCloseBtn) destinationPickerCloseBtn.addEventListener("click", hideDestinationPicker);
+if (destinationSkipBtn) {
+  destinationSkipBtn.addEventListener("click", () => {
+    // Entry Point A declining, or Entry Point B just closing without a
+    // change — either way, activeDestination is left exactly as it was.
+    hideDestinationPicker();
+  });
+}
+if (destinationStopBtn) {
+  destinationStopBtn.addEventListener("click", () => {
+    stopGuidedDestination();
+    hideDestinationPicker();
+  });
+}
+
+const destinationMic = destinationMicBtn
+  ? createChatMicController({
+      micBtn: destinationMicBtn,
+      inputEl: destinationInput,
+      onFinalTranscript: (text) => searchDestination(text),
+    })
+  : null;
+if (destinationMicBtn) destinationMicBtn.addEventListener("click", () => destinationMic.start());
+if (destinationSearchBtn) destinationSearchBtn.addEventListener("click", () => searchDestination(destinationInput.value.trim()));
+if (destinationInput) {
+  destinationInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") searchDestination(destinationInput.value.trim());
+  });
+}
+
+// Reuses the EXACT SAME place-resolution pipeline Guided Tour planning
+// already uses (findPlaceForQuery server-side, real Google Place lookup —
+// never trusting raw coordinates) via the thin /api/resolve-destination
+// wrapper, rather than a second resolution path.
+async function searchDestination(query) {
+  if (!query) return;
+  destinationPickerStatus.textContent = "Looking that up...";
+  destinationPickerStatus.classList.remove("hidden");
+  try {
+    const params = new URLSearchParams({ query });
+    if (lastPosition) {
+      params.set("biasLat", String(lastPosition.latitude));
+      params.set("biasLng", String(lastPosition.longitude));
+    }
+    const response = await fetch(`/api/resolve-destination?${params.toString()}`);
+    const data = await response.json();
+    if (!data.place) {
+      destinationPickerStatus.textContent = "Couldn't find that — try a different search.";
+      return;
+    }
+    handleDestinationSelected(data.place);
+  } catch (error) {
+    console.log("[destination] search failed:", error?.message || error);
+    destinationPickerStatus.textContent = "Something went wrong — try again.";
+  }
+}
+
+// Shared entry point for BOTH destination-input methods (map pin tap and
+// search) from BOTH entry points — the single place that decides whether
+// a reroute confirmation is needed.
+function handleDestinationSelected(place) {
+  if (activeDestination && activeDestination.placeId !== place.placeId) {
+    destinationRerouteCandidate = place;
+    hideDestinationPicker();
+    showDestinationRerouteBanner(`Head to ${place.name} instead of ${activeDestination.name}?`);
+    return;
+  }
+  hideDestinationPicker();
+  setActiveDestination(place);
+}
+
+async function setActiveDestination(place) {
+  activeDestination = { name: place.name, placeId: place.placeId, latitude: place.latitude, longitude: place.longitude };
+  applyGuidedDestinationUI();
+  logEvent("guided_destination_set", { placeId: place.placeId });
+
+  // Real user gesture (a tap or voice-confirm) just happened right above —
+  // this IS the valid gesture context iOS Safari's
+  // DeviceOrientationEvent.requestPermission() requires; it cannot be
+  // requested proactively on load. See initCompassForDestination for the
+  // Android/no-prompt-needed path and the graceful-degradation fallback.
+  initCompassForDestination();
+
+  clearInterval(destinationCheckInterval);
+  destinationCheckInterval = setInterval(checkDestinationArrival, DESTINATION_CHECK_INTERVAL_MS);
+
+  await fetchAndSpeakDirections();
+}
+
+// Directions are spoken as an ADDITIONAL element woven into the existing
+// speech flow (same enqueueTtsSentence pipeline everything else uses), not
+// a separate UI voice or narration pathway.
+async function fetchAndSpeakDirections() {
+  if (!activeDestination || !lastPosition) return;
+  if (isNarrating || isConversing) return; // never talk over real narration/Q&A
+  isNarrating = true;
+  try {
+    const params = new URLSearchParams({
+      originLat: String(lastPosition.latitude),
+      originLng: String(lastPosition.longitude),
+      destLat: String(activeDestination.latitude),
+      destLng: String(activeDestination.longitude),
+      destName: activeDestination.name,
+      language: settings.language,
+    });
+    const response = await fetch(`/api/get-directions?${params.toString()}`);
+    const data = await response.json();
+    if (!data.naturalLanguageDirections) {
+      console.log("[destination] no route found");
+      return;
+    }
+    activeDestination.distanceMeters = data.distanceMeters;
+    data.naturalLanguageDirections
+      .split(/(?<=[.!?])\s+/)
+      .map((sentence) => sentence.trim())
+      .filter(Boolean)
+      .forEach((sentence) => enqueueTtsSentence(sentence));
+    await waitForTtsQueueDrain();
+  } catch (error) {
+    console.log("[destination] fetchAndSpeakDirections failed, skipping:", error?.message || error);
+  } finally {
+    isNarrating = false;
+  }
+}
+
+function stopGuidedDestination() {
+  if (!activeDestination) return;
+  logEvent("guided_destination_stopped", { placeId: activeDestination.placeId, reason: "user_cancelled" });
+  activeDestination = null;
+  clearInterval(destinationCheckInterval);
+  destinationCheckInterval = null;
+  stopDestinationCompass();
+  applyGuidedDestinationUI();
+}
+
+async function checkDestinationArrival() {
+  try {
+    if (!activeDestination || !lastPosition) return;
+    const distance = distanceInMeters(lastPosition, activeDestination);
+    if (distance > DESTINATION_ARRIVAL_METERS) return;
+    logEvent("guided_destination_arrived", { placeId: activeDestination.placeId });
+    if (!isNarrating && !isConversing) {
+      isNarrating = true;
+      try {
+        enqueueTtsSentence(`You've made it to ${activeDestination.name}.`);
+        await waitForTtsQueueDrain();
+      } finally {
+        isNarrating = false;
+      }
+    }
+    activeDestination = null;
+    clearInterval(destinationCheckInterval);
+    destinationCheckInterval = null;
+    stopDestinationCompass();
+    applyGuidedDestinationUI();
+  } catch (error) {
+    console.log("[destination] arrival check failed, skipping:", error?.message || error);
+  }
+}
+
+// --- Reroute confirmation (Entry Points A/B, both input methods) ---
+function showDestinationRerouteBanner(text) {
+  if (!destinationRerouteBanner) return;
+  destinationRerouteText.textContent = text;
+  destinationRerouteVoiceInput.value = "";
+  destinationRerouteVoiceHint.classList.add("hidden");
+  destinationRerouteBanner.classList.remove("hidden");
+  suppressMainMic();
+  isConversing = true;
+}
+function hideDestinationRerouteBanner() {
+  if (!destinationRerouteBanner) return;
+  destinationRerouteBanner.classList.add("hidden");
+  if (destinationRerouteMic?.cancel) destinationRerouteMic.cancel();
+  restoreMainMic();
+  if (destinationPicker.classList.contains("hidden")) isConversing = false;
+}
+
+// Shared by BOTH the tap (Yes button) and voice ("yes") paths — same
+// pattern as Pillar 3's handleNeedsSuggestionYes/No, one handler, not two
+// parallel implementations.
+function handleDestinationRerouteYes() {
+  if (!destinationRerouteCandidate) return;
+  const place = destinationRerouteCandidate;
+  destinationRerouteCandidate = null;
+  hideDestinationRerouteBanner();
+  setActiveDestination(place);
+}
+function handleDestinationRerouteNo() {
+  destinationRerouteCandidate = null;
+  hideDestinationRerouteBanner();
+}
+if (destinationRerouteYesBtn) destinationRerouteYesBtn.addEventListener("click", handleDestinationRerouteYes);
+if (destinationRerouteNoBtn) destinationRerouteNoBtn.addEventListener("click", handleDestinationRerouteNo);
+
+const destinationRerouteMic = destinationRerouteMicBtn
+  ? createChatMicController({
+      micBtn: destinationRerouteMicBtn,
+      inputEl: destinationRerouteVoiceInput,
+      onFinalTranscript: (text) => handleDestinationRerouteVoiceTranscript(text),
+    })
+  : null;
+if (destinationRerouteMicBtn) destinationRerouteMicBtn.addEventListener("click", () => destinationRerouteMic.start());
+
+// Reuses /api/interpret-needs-response's "confirm" stage — the same
+// generic yes/no/unclear classifier Pillar 3 already built, rather than a
+// second one for this pillar.
+async function handleDestinationRerouteVoiceTranscript(transcript) {
+  if (!destinationRerouteCandidate) return;
+  try {
+    const response = await fetch("/api/interpret-needs-response", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transcript, stage: "confirm", userId: currentUser ? currentUser.id : null }),
+    });
+    const data = await response.json();
+    if (data.intent === "yes") {
+      handleDestinationRerouteYes();
+    } else if (data.intent === "no") {
+      handleDestinationRerouteNo();
+    } else {
+      destinationRerouteVoiceHint.textContent = "Didn't quite catch that — go ahead and tap below.";
+      destinationRerouteVoiceHint.classList.remove("hidden");
+    }
+  } catch (error) {
+    console.log("[destination] reroute voice interpretation failed, falling back to buttons:", error?.message || error);
+    destinationRerouteVoiceHint.textContent = "Didn't quite catch that — go ahead and tap below.";
+    destinationRerouteVoiceHint.classList.remove("hidden");
+  }
+}
+
+// --- Compass arrow ---
+// iOS Safari requires DeviceOrientationEvent.requestPermission(), which
+// MUST be called from a direct user gesture — setActiveDestination is only
+// ever reached via a real tap or voice-confirm just before this runs, so
+// this is a valid gesture context. Android generally has no such prompt —
+// typeof check below handles both paths. Any failure/denial/unavailability
+// degrades gracefully: directions/narration already happened via
+// fetchAndSpeakDirections regardless, the compass is a bonus layer only.
+async function initCompassForDestination() {
+  try {
+    if (typeof DeviceOrientationEvent === "undefined") return;
+    if (typeof DeviceOrientationEvent.requestPermission === "function") {
+      if (!destinationCompassPermissionRequested) {
+        destinationCompassPermissionRequested = true;
+        const result = await DeviceOrientationEvent.requestPermission();
+        if (result !== "granted") return;
+      } else {
+        // Already asked once this session — iOS doesn't re-prompt, and a
+        // prior denial can't be un-denied without the user changing a
+        // system setting, so just don't attach a second listener.
+        return;
+      }
+    }
+    deviceOrientationHandler = handleDeviceOrientationForDestination;
+    window.addEventListener("deviceorientation", deviceOrientationHandler);
+    destinationCompassActive = true;
+    if (destinationCompass) destinationCompass.classList.remove("hidden");
+  } catch (error) {
+    console.log("[destination] compass permission/setup failed, degrading gracefully:", error?.message || error);
+  }
+}
+
+function stopDestinationCompass() {
+  if (deviceOrientationHandler) {
+    window.removeEventListener("deviceorientation", deviceOrientationHandler);
+    deviceOrientationHandler = null;
+  }
+  destinationCompassActive = false;
+  if (destinationCompass) destinationCompass.classList.add("hidden");
+}
+
+function handleDeviceOrientationForDestination(event) {
+  if (!activeDestination || !lastPosition) return;
+  // webkitCompassHeading (iOS Safari, already true-north-relative) takes
+  // priority when present; event.alpha (the standard field) is relative to
+  // the device's initial orientation, not true north, on most non-iOS
+  // browsers — close enough for a "getting warmer" style indicator, not
+  // precision navigation.
+  const heading = typeof event.webkitCompassHeading === "number" ? event.webkitCompassHeading : 360 - (event.alpha || 0);
+  const targetBearing = bearingDegreesTo(lastPosition, activeDestination);
+  let diff = Math.abs(heading - targetBearing) % 360;
+  if (diff > 180) diff = 360 - diff;
+  if (destinationCompassArrow) destinationCompassArrow.style.transform = `rotate(${targetBearing - heading}deg)`;
+  if (destinationCompass) destinationCompass.classList.toggle("is-aligned", diff <= 20);
+}
+
+function bearingDegreesTo(from, to) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const toDeg = (rad) => (rad * 180) / Math.PI;
+  const dLng = toRad(to.longitude - from.longitude);
+  const lat1 = toRad(from.latitude);
+  const lat2 = toRad(to.latitude);
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
 // --- Tour mode selector + guided tour planner ---
 // Two entry points from the Start Tour button: Wander (existing GPS-driven
 // discovery flow, unchanged) or Plan My Tour (multi-step planner ->
@@ -3765,14 +4194,19 @@ function closeTourModeModal() {
 
 if (tourModeClose) tourModeClose.addEventListener("click", closeTourModeModal);
 if (tourModeWanderBtn) {
-  tourModeWanderBtn.addEventListener("click", () => {
+  tourModeWanderBtn.addEventListener("click", async () => {
     closeTourModeModal();
     // Wander mode always starts fresh at the default mood — the planner's
     // mood step (Guided Tour) sets sessionMood right before its own
     // startTour() call, so this reset must NOT live inside startTour()
     // itself or it would clobber that choice.
     setSessionMood("curious");
-    startTour();
+    await startTour();
+    // Guided Destination pillar, Entry Point A — a new call alongside
+    // startTour(), not inside it; a no-op when the flag is off. Awaited
+    // so the picker appears once wandering has actually begun (GPS
+    // watch registered etc.), not racing startTour()'s own async setup.
+    maybeOfferDestinationPrompt();
   });
 }
 if (tourModePlanBtn) {
@@ -5021,6 +5455,9 @@ async function startTour() {
   resetNeedsRoutingState();
   clearInterval(needsCheckInterval);
   needsCheckInterval = setInterval(checkNeedsAndMaybeSuggest, NEEDS_CHECK_INTERVAL_MS);
+  // Guided Destination pillar (ENABLE_GUIDED_DESTINATION) — same
+  // start/clear pattern again.
+  resetGuidedDestinationState();
   pulseEl.classList.remove("is-locked");
   micBtn.classList.add("is-available");
 
@@ -6399,6 +6836,10 @@ SabriSpeechRecognition.ensureReady().then((ready) => {
     // buttons/pills when voice genuinely isn't available on this device —
     // this just hides the mic affordance so it isn't shown as an option.
     needsSuggestionMicBtn?.classList.add("hidden");
+    // Same reasoning for Guided Destination's search/reroute mic buttons —
+    // both still work fully via typing/tapping.
+    destinationMicBtn?.classList.add("hidden");
+    destinationRerouteMicBtn?.classList.add("hidden");
   }
 });
 
