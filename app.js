@@ -166,8 +166,6 @@ const destinationRerouteVoiceInput = document.getElementById("destination-rerout
 const destinationRerouteVoiceHint = document.getElementById("destination-reroute-voice-hint");
 const destinationRerouteYesBtn = document.getElementById("destination-reroute-yes");
 const destinationRerouteNoBtn = document.getElementById("destination-reroute-no");
-const destinationCompass = document.getElementById("destination-compass");
-const destinationCompassArrow = document.getElementById("destination-compass-arrow");
 const accountSignedIn = document.getElementById("account-signed-in");
 const accountGuest = document.getElementById("account-guest");
 const accountNameEl = document.getElementById("account-name");
@@ -2581,6 +2579,25 @@ if ("serviceWorker" in navigator && !isCapacitorNative()) {
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) checkForUpdateAndMaybeApply();
   });
+  // Real bug this fixes: skipWaiting()/clients.claim() in service-worker.js
+  // (unconditional, already correct) only affect NETWORK REQUESTS from an
+  // already-open tab — they don't reload the page's already-parsed shell
+  // (index.html, with that load's env-var injection baked in), so a page
+  // still needs to actually detect an update and reload. Every check above
+  // is tied to a visibility TRANSITION (backgrounding/returning, bfcache
+  // restore) — a tab that's watched continuously through an entire deploy
+  // (e.g. testing a flag: deploy, then just look at the still-open tab)
+  // never fires any of them, so it can run stale JS indefinitely until
+  // manually force-closed. This periodic check is the fix: re-checks on an
+  // interval too, not only on transitions, so a continuously-visible tab
+  // still discovers updates. Guarded to skip entirely while hidden (no
+  // point checking, and avoids needless network/battery use backgrounded)
+  // — visibilitychange already covers that transition when it happens.
+  const UPDATE_CHECK_INTERVAL_MS = 3 * 60 * 1000;
+  setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    checkForUpdateAndMaybeApply();
+  }, UPDATE_CHECK_INTERVAL_MS);
 
   // Reloads when the new worker actually takes control — either because
   // the user tapped the update banner, or because handleUpdateAvailable()
@@ -2934,16 +2951,52 @@ async function initMap() {
 
 initMap();
 
-function buildUserLocationIcon(heading) {
+// Guided Destination pillar — two-arrow redesign, replacing the old
+// separate single-arrow DOM element entirely (removed). Arrow 1 (heading)
+// is genuinely "existing behavior, keep as-is" — same shape/position as
+// before this pillar ever existed; Arrow 2 (bearing to activeDestination)
+// only ever renders once a destination is active, and the two visually
+// merge/glow together within COMPASS_MERGE_THRESHOLD_DEGREES (with wider
+// COMPASS_UNMERGE_THRESHOLD_DEGREES hysteresis to avoid flicker right at
+// one fixed boundary — see isCompassMerged, updated here since this is
+// where both angles are actually compared).
+function buildUserLocationIcon(heading, bearingToDestination) {
   const hasHeading = typeof heading === "number" && !Number.isNaN(heading);
-  const arrow = hasHeading
-    ? `<g transform="rotate(${heading} 28 28)"><path d="M28 6 L34 20 L28 15 L22 20 Z" fill="#D4A853"/></g>`
+  const hasDestinationBearing = typeof bearingToDestination === "number" && !Number.isNaN(bearingToDestination);
+
+  let merged = false;
+  if (hasHeading && hasDestinationBearing) {
+    let diff = Math.abs(heading - bearingToDestination) % 360;
+    if (diff > 180) diff = 360 - diff;
+    const threshold = isCompassMerged ? COMPASS_UNMERGE_THRESHOLD_DEGREES : COMPASS_MERGE_THRESHOLD_DEGREES;
+    merged = diff <= threshold;
+  }
+  isCompassMerged = merged;
+
+  const headingArrow = hasHeading
+    ? `<g transform="rotate(${heading} 28 28)">` +
+      `<path d="M28 6 L34 20 L28 15 L22 20 Z" fill="#D4A853"/>` +
+      (merged ? `<animate attributeName="opacity" values="1;0.45;1" dur="1.1s" repeatCount="indefinite"/>` : "") +
+      `</g>`
     : "";
+  // Un-merged: a plain, un-glowing outline (per spec, "returns to its
+  // plain, un-glowing rotating-indicator state"). Merged: solid and
+  // pulsing together with Arrow 1.
+  const destinationArrow = hasDestinationBearing
+    ? `<g transform="rotate(${bearingToDestination} 28 28)">` +
+      (merged
+        ? `<path d="M28 2 L37 22 L28 17 L19 22 Z" fill="#D4A853" opacity="0.85">` +
+          `<animate attributeName="opacity" values="0.85;0.3;0.85" dur="1.1s" repeatCount="indefinite"/></path>`
+        : `<path d="M28 2 L35 19 L28 14 L21 19 Z" fill="none" stroke="#FAF7F2" stroke-width="1.5" opacity="0.55"/>`) +
+      `</g>`
+    : "";
+
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="56" height="56" viewBox="0 0 56 56">` +
     `<circle cx="28" cy="28" r="18" fill="#D4A853" fill-opacity="0.22"/>` +
     `<circle cx="28" cy="28" r="10" fill="#D4A853" fill-opacity="0.45"/>` +
-    `${arrow}` +
+    `${destinationArrow}` +
+    `${headingArrow}` +
     `<circle cx="28" cy="28" r="6" fill="#D4A853" stroke="#FAF7F2" stroke-width="2"/>` +
     `</svg>`;
   return {
@@ -2986,7 +3039,19 @@ function updateUserLocationOnMap(latitude, longitude, heading) {
   if (!map) return;
   const position = { lat: latitude, lng: longitude };
   lastKnownUserPosition = position;
-  const icon = buildUserLocationIcon(heading);
+  // Guided Destination pillar — Arrow 1 prefers live device-compass
+  // heading (via deviceOrientationHeading, tracked only once a
+  // destination is active — see startDestinationOrientationTracking) over
+  // GPS course-of-travel whenever it's available, since GPS heading is
+  // null/absent while stationary, exactly when someone pausing to check
+  // direction needs it most. Arrow 2 (bearing to activeDestination) is
+  // pure geometry, no permission needed. Both are entirely absent with no
+  // active destination — bearingToDestination stays null, which
+  // buildUserLocationIcon treats as "today's single-heading-arrow
+  // behavior," unchanged from before this pillar existed.
+  const effectiveHeading = activeDestination && deviceOrientationHeading !== null ? deviceOrientationHeading : heading;
+  const bearingToDestination = activeDestination ? bearingDegreesTo({ latitude, longitude }, activeDestination) : null;
+  const icon = buildUserLocationIcon(effectiveHeading, bearingToDestination);
 
   if (!userLocationMarker) {
     userLocationMarker = new google.maps.Marker({ position, map, icon, zIndex: 1000 });
@@ -3779,9 +3844,6 @@ let activeDestination = null; // { name, placeId, latitude, longitude, naturalLa
 let destinationPickerActive = false; // true only while the picker is open AND a map-pin-tap selection is a live option
 let destinationCheckInterval = null;
 let destinationRerouteCandidate = null; // pending place while the reroute confirm banner is showing
-let destinationCompassActive = false;
-let destinationCompassPermissionRequested = false;
-let deviceOrientationHandler = null; // stashed so it can be removed on stop
 
 function resetGuidedDestinationState() {
   activeDestination = null;
@@ -3789,7 +3851,7 @@ function resetGuidedDestinationState() {
   destinationRerouteCandidate = null;
   clearInterval(destinationCheckInterval);
   destinationCheckInterval = null;
-  stopDestinationCompass();
+  stopDestinationOrientationTracking();
   hideDestinationPicker();
   hideDestinationRerouteBanner();
   applyGuidedDestinationUI();
@@ -3829,7 +3891,7 @@ function openDestinationPicker() {
     destinationActiveRow.classList.add("hidden");
     destinationPickerTitle.textContent = "Anywhere specific — or a general area — you want to head toward?";
   }
-  destinationPicker.classList.remove("hidden");
+  destinationPicker.classList.add("is-visible");
   destinationPickerActive = true;
   suppressMainMic(); // same SabriSpeechRecognition single-engine guard Pillar 3 uses
   // Same isConversing reuse Pillar 3's needs-suggestion banner relies on —
@@ -3842,7 +3904,7 @@ function openDestinationPicker() {
 
 function hideDestinationPicker() {
   if (!destinationPicker) return;
-  destinationPicker.classList.add("hidden");
+  destinationPicker.classList.remove("is-visible");
   destinationPickerActive = false;
   if (destinationMic?.cancel) destinationMic.cancel();
   restoreMainMic();
@@ -3931,9 +3993,10 @@ async function setActiveDestination(place) {
   // Real user gesture (a tap or voice-confirm) just happened right above —
   // this IS the valid gesture context iOS Safari's
   // DeviceOrientationEvent.requestPermission() requires; it cannot be
-  // requested proactively on load. See initCompassForDestination for the
-  // Android/no-prompt-needed path and the graceful-degradation fallback.
-  initCompassForDestination();
+  // requested proactively on load. See startDestinationOrientationTracking
+  // for the Android/no-prompt-needed path and the graceful-degradation
+  // fallback.
+  startDestinationOrientationTracking();
 
   clearInterval(destinationCheckInterval);
   destinationCheckInterval = setInterval(checkDestinationArrival, DESTINATION_CHECK_INTERVAL_MS);
@@ -3983,7 +4046,7 @@ function stopGuidedDestination() {
   activeDestination = null;
   clearInterval(destinationCheckInterval);
   destinationCheckInterval = null;
-  stopDestinationCompass();
+  stopDestinationOrientationTracking();
   applyGuidedDestinationUI();
 }
 
@@ -4005,7 +4068,7 @@ async function checkDestinationArrival() {
     activeDestination = null;
     clearInterval(destinationCheckInterval);
     destinationCheckInterval = null;
-    stopDestinationCompass();
+    stopDestinationOrientationTracking();
     applyGuidedDestinationUI();
   } catch (error) {
     console.log("[destination] arrival check failed, skipping:", error?.message || error);
@@ -4027,7 +4090,7 @@ function hideDestinationRerouteBanner() {
   destinationRerouteBanner.classList.add("hidden");
   if (destinationRerouteMic?.cancel) destinationRerouteMic.cancel();
   restoreMainMic();
-  if (destinationPicker.classList.contains("hidden")) isConversing = false;
+  if (!destinationPicker.classList.contains("is-visible")) isConversing = false;
 }
 
 // Shared by BOTH the tap (Yes button) and voice ("yes") paths — same
@@ -4083,60 +4146,62 @@ async function handleDestinationRerouteVoiceTranscript(transcript) {
   }
 }
 
-// --- Compass arrow ---
-// iOS Safari requires DeviceOrientationEvent.requestPermission(), which
-// MUST be called from a direct user gesture — setActiveDestination is only
-// ever reached via a real tap or voice-confirm just before this runs, so
-// this is a valid gesture context. Android generally has no such prompt —
-// typeof check below handles both paths. Any failure/denial/unavailability
-// degrades gracefully: directions/narration already happened via
-// fetchAndSpeakDirections regardless, the compass is a bonus layer only.
-async function initCompassForDestination() {
+// --- Two-arrow compass, rendered as part of the "you are here" marker
+// itself (see buildUserLocationIcon/updateUserLocationOnMap) ---
+// Real finding from investigating this rather than assuming: the OLD
+// single arrow (removed) was a separate DOM element off to the side near
+// the recenter button, and it compared DEVICE ORIENTATION against
+// destination bearing. The marker's OWN existing heading arrow (Arrow 1,
+// genuinely "keep as-is" per spec) has never used DeviceOrientationEvent
+// at all — it's built from GPS course-of-travel (position.coords.heading,
+// see onLocation/lastHeading), which is null/absent whenever the user is
+// stationary — exactly when someone pausing to check a compass needs it
+// most. So DeviceOrientationEvent is kept, but repurposed: only requested
+// once a destination is active (same valid-gesture-context reasoning as
+// before), and only used to make Arrow 1 itself more reliable —
+// deviceOrientationHeading below is preferred over GPS heading whenever
+// it's available, falling back to GPS heading otherwise. Arrow 2 (bearing
+// to destination) needs no permission at all — it's pure geometry from
+// already-available coordinates.
+let deviceOrientationHeading = null;
+let deviceOrientationHandler = null;
+let destinationCompassPermissionRequested = false;
+// Hysteresis (self-review requirement) — a lower bar to MERGE than to
+// UN-merge prevents flicker right at one fixed boundary; chosen after
+// reasoning about typical GPS/compass jitter (a few degrees) rather than
+// picked arbitrarily; open to tuning from real walk-test feedback.
+const COMPASS_MERGE_THRESHOLD_DEGREES = 18;
+const COMPASS_UNMERGE_THRESHOLD_DEGREES = 26;
+let isCompassMerged = false;
+
+async function startDestinationOrientationTracking() {
   try {
     if (typeof DeviceOrientationEvent === "undefined") return;
     if (typeof DeviceOrientationEvent.requestPermission === "function") {
-      if (!destinationCompassPermissionRequested) {
-        destinationCompassPermissionRequested = true;
-        const result = await DeviceOrientationEvent.requestPermission();
-        if (result !== "granted") return;
-      } else {
-        // Already asked once this session — iOS doesn't re-prompt, and a
-        // prior denial can't be un-denied without the user changing a
-        // system setting, so just don't attach a second listener.
-        return;
-      }
+      if (destinationCompassPermissionRequested) return; // iOS doesn't re-prompt; a denial can't be un-denied here
+      destinationCompassPermissionRequested = true;
+      const result = await DeviceOrientationEvent.requestPermission();
+      if (result !== "granted") return;
     }
-    deviceOrientationHandler = handleDeviceOrientationForDestination;
+    deviceOrientationHandler = (event) => {
+      const heading = typeof event.webkitCompassHeading === "number" ? event.webkitCompassHeading : 360 - (event.alpha || 0);
+      deviceOrientationHeading = Number.isNaN(heading) ? null : heading;
+    };
     window.addEventListener("deviceorientation", deviceOrientationHandler);
-    destinationCompassActive = true;
-    if (destinationCompass) destinationCompass.classList.remove("hidden");
   } catch (error) {
+    // Degrades gracefully — Arrow 1 just keeps using GPS heading, Arrow 2
+    // and directions/narration are entirely unaffected either way.
     console.log("[destination] compass permission/setup failed, degrading gracefully:", error?.message || error);
   }
 }
 
-function stopDestinationCompass() {
+function stopDestinationOrientationTracking() {
   if (deviceOrientationHandler) {
     window.removeEventListener("deviceorientation", deviceOrientationHandler);
     deviceOrientationHandler = null;
   }
-  destinationCompassActive = false;
-  if (destinationCompass) destinationCompass.classList.add("hidden");
-}
-
-function handleDeviceOrientationForDestination(event) {
-  if (!activeDestination || !lastPosition) return;
-  // webkitCompassHeading (iOS Safari, already true-north-relative) takes
-  // priority when present; event.alpha (the standard field) is relative to
-  // the device's initial orientation, not true north, on most non-iOS
-  // browsers — close enough for a "getting warmer" style indicator, not
-  // precision navigation.
-  const heading = typeof event.webkitCompassHeading === "number" ? event.webkitCompassHeading : 360 - (event.alpha || 0);
-  const targetBearing = bearingDegreesTo(lastPosition, activeDestination);
-  let diff = Math.abs(heading - targetBearing) % 360;
-  if (diff > 180) diff = 360 - diff;
-  if (destinationCompassArrow) destinationCompassArrow.style.transform = `rotate(${targetBearing - heading}deg)`;
-  if (destinationCompass) destinationCompass.classList.toggle("is-aligned", diff <= 20);
+  deviceOrientationHeading = null;
+  isCompassMerged = false;
 }
 
 function bearingDegreesTo(from, to) {

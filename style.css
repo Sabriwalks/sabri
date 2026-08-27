@@ -1162,44 +1162,89 @@ body {
 
 /* Guided Destination pillar (ENABLE_GUIDED_DESTINATION) */
 
+/* A true fixed corner control (not an inline row item) — the single
+   persistent piece for both entry points, replacing what used to be a
+   bottom-pushed prompt plus a separate inline button. Plain/outline at
+   rest; .is-active (a destination is currently set) fills it gold and
+   glowing, so its state is readable at a glance without opening anything. */
 .guide-me-btn {
-  flex-shrink: 0;
+  position: fixed;
+  top: calc(env(safe-area-inset-top) + 76px);
+  right: 16px;
+  z-index: 60;
   width: 48px;
   height: 48px;
-  border: none;
+  border: 1px solid var(--border);
   border-radius: 50%;
-  background: rgba(250, 247, 242, 0.1);
+  background: rgba(15, 27, 45, 0.85);
   color: var(--text-secondary);
   font-size: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
+  box-shadow: 0 6px 18px var(--warm-shadow);
+  transition: background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .guide-me-btn.is-active {
   background: var(--gold);
-  color: var(--bg);
+  color: #0f1b2d;
+  border-color: var(--gold);
   box-shadow: 0 8px 24px var(--gold-glow);
 }
 
+/* True centered modal (mirrors .tour-mode-modal's overlay/backdrop shape)
+   — replaces the old bottom-pushed-into-layout banner entirely. Stays in
+   the layout at all times (never display:none) so opacity/transform can
+   actually transition; .is-visible is the real show/hide toggle (see
+   openDestinationPicker/hideDestinationPicker in app.js), same pattern
+   .update-banner already uses elsewhere in this file. */
 .destination-picker {
   position: fixed;
-  left: 50%;
-  bottom: calc(env(safe-area-inset-bottom) + 96px);
-  transform: translateX(-50%);
+  inset: 0;
   z-index: 300;
+  background: rgba(15, 27, 45, 0.72);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+
+.destination-picker.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.destination-picker-card {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 20px 18px 18px;
+  padding: 24px 20px 20px;
   border-radius: 20px;
   background: rgba(15, 27, 45, 0.97);
   border: 1px solid var(--border);
   color: var(--white);
   font-size: 14px;
   box-shadow: 0 8px 24px var(--warm-shadow);
-  max-width: calc(100% - 32px);
+  max-width: calc(100% - 16px);
   width: 360px;
+  transform: scale(0.92) translateY(10px);
+  opacity: 0;
+  /* A slight overshoot on the way in reads as a genuine "pop", not just a
+     linear fade — the requested "slow pop-up/fade-in", not an abrupt
+     push-into-layout. */
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.3s ease;
+}
+
+.destination-picker.is-visible .destination-picker-card {
+  transform: scale(1) translateY(0);
+  opacity: 1;
 }
 
 .destination-picker-title {
@@ -1261,42 +1306,6 @@ body {
   text-decoration: underline;
   cursor: pointer;
   padding: 4px 0 0;
-}
-
-/* Small persistent indicator, not a full map overlay — sits above the
-   bottom control row. Only ever shown once a destination is active AND
-   DeviceOrientationEvent is actually usable (see initCompassForDestination
-   in app.js) — absent otherwise, directions still work via spoken steps. */
-.destination-compass {
-  position: fixed;
-  right: 16px;
-  bottom: calc(env(safe-area-inset-bottom) + 170px);
-  z-index: 60;
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  background: rgba(15, 27, 45, 0.85);
-  border: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 6px 18px var(--warm-shadow);
-}
-
-.destination-compass-arrow {
-  font-size: 20px;
-  color: var(--text-secondary);
-  transform-origin: center;
-  transition: transform 0.15s ease, color 0.2s ease;
-}
-
-.destination-compass.is-aligned .destination-compass-arrow {
-  color: var(--gold);
-}
-
-.destination-compass.is-aligned {
-  border-color: var(--gold);
-  box-shadow: 0 6px 18px var(--gold-glow);
 }
 
 /* Settings drawer — slides in from the right. */
