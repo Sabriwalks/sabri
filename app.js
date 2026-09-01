@@ -4007,10 +4007,34 @@ async function setActiveDestination(place) {
 // Directions are spoken as an ADDITIONAL element woven into the existing
 // speech flow (same enqueueTtsSentence pipeline everything else uses), not
 // a separate UI voice or narration pathway.
+// Real bug this fixes (found and confirmed live, not assumed): this used
+// to set the shared isNarrating flag while speaking directions — but
+// checkForNarration's very first line is "if (isNarrating || isConversing)
+// return", so for however long directions took to fetch+speak (which can
+// be a genuinely long time — a full Claude-phrased multi-step route, not a
+// short interjection), Wander mode's entire narration pipeline was blocked
+// solid. Hit hardest at Entry Point A specifically: right after Wander
+// starts, BEFORE any narration has ever run yet, meaning #tour-controls
+// (which only ever activates via startStory(), itself only ever called
+// from a completed narration) never appeared, and the idle "Start Tour"
+// prompt stayed on screen the entire time — directly violating this
+// pillar's own explicit spec requirement that Wander's existing narration
+// engine "keeps running COMPLETELY UNMODIFIED alongside this... does not
+// replace or gate spontaneous narration." Fixed with a separate dedicated
+// flag: still polite about not talking over an ALREADY in-progress
+// narration/conversation (or another direction-speech already running),
+// but no longer blocks a NEW one from starting. Tradeoff, stated
+// honestly: if a real narration decision lands while directions are still
+// being read, narrateAndSpeak's clearTtsQueue()/abort will cut the
+// directions off mid-sentence — a real but minor, recoverable UX rough
+// edge, clearly preferable to the alternative this replaces (the entire
+// tour appearing frozen for the whole duration).
+let isSpeakingDirections = false;
+
 async function fetchAndSpeakDirections() {
   if (!activeDestination || !lastPosition) return;
-  if (isNarrating || isConversing) return; // never talk over real narration/Q&A
-  isNarrating = true;
+  if (isNarrating || isConversing || isSpeakingDirections) return;
+  isSpeakingDirections = true;
   try {
     const params = new URLSearchParams({
       originLat: String(lastPosition.latitude),
@@ -4036,7 +4060,7 @@ async function fetchAndSpeakDirections() {
   } catch (error) {
     console.log("[destination] fetchAndSpeakDirections failed, skipping:", error?.message || error);
   } finally {
-    isNarrating = false;
+    isSpeakingDirections = false;
   }
 }
 
@@ -4056,13 +4080,15 @@ async function checkDestinationArrival() {
     const distance = distanceInMeters(lastPosition, activeDestination);
     if (distance > DESTINATION_ARRIVAL_METERS) return;
     logEvent("guided_destination_arrived", { placeId: activeDestination.placeId });
-    if (!isNarrating && !isConversing) {
-      isNarrating = true;
+    // Same dedicated flag as fetchAndSpeakDirections, same reasoning —
+    // this must never be able to block a real narration from starting.
+    if (!isNarrating && !isConversing && !isSpeakingDirections) {
+      isSpeakingDirections = true;
       try {
         enqueueTtsSentence(`You've made it to ${activeDestination.name}.`);
         await waitForTtsQueueDrain();
       } finally {
-        isNarrating = false;
+        isSpeakingDirections = false;
       }
     }
     activeDestination = null;

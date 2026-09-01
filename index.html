@@ -1071,8 +1071,26 @@
        above; tapping a map pin while this is open is the other input
        method (see destinationPickerActive in app.js — no separate UI for
        that, the existing pin popup gains a "Guide me here" action while
-       this flag is true). -->
-  <div id="destination-picker" class="destination-picker hidden" role="dialog" aria-live="polite">
+       this flag is true).
+
+       Deliberately NO base "hidden" class here (unlike most other
+       drawers/modals in this file) — real production freeze bug this
+       fixes: show/hide is entirely governed by the .is-visible toggle
+       (opacity/pointer-events, see openDestinationPicker/
+       hideDestinationPicker in app.js), added when this was redesigned
+       from a .hidden-toggling bottom banner into a true animated modal.
+       The base "hidden" class was accidentally left in this markup from
+       before that redesign — .hidden's `display:none !important` always
+       wins over .is-visible's opacity, so the modal could add
+       "is-visible", isConversing would correctly become true (blocking
+       core narration exactly as designed), but the modal itself,
+       including its Skip/Search buttons, never actually rendered or
+       became clickable — an invisible, un-closable, un-searchable dialog
+       that permanently blocked Wander mode's narration (and therefore the
+       UI transition from the idle "Start Tour" prompt to the active tour
+       controls, which only ever happens via a real narration completing)
+       for anyone who hit Entry Point A. -->
+  <div id="destination-picker" class="destination-picker" role="dialog" aria-live="polite">
     <div id="destination-picker-card" class="destination-picker-card">
       <button id="destination-picker-close" class="drawer-close" aria-label="Close">✕</button>
       <p id="destination-picker-title" class="destination-picker-title">Anywhere specific — or a general area — you want to head toward?</p>
