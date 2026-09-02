@@ -356,7 +356,18 @@
          applyGuidedDestinationUI. Opens the same #destination-picker modal
          either way; its content adapts to whether a destination is
          already set (see openDestinationPicker). -->
-    <button id="guide-me-btn" class="guide-me-btn hidden" aria-label="Guide me to a destination">🧭</button>
+    <!-- Real field feedback: the auto-picked 🧭 emoji looked bad and
+         didn't match anything else in the app. Replaced with a plain
+         compass-needle SVG using currentColor, so it automatically follows
+         .guide-me-btn's color rules in style.css (gold on the button's
+         dark navy resting background, then navy once .is-active fills the
+         button gold) rather than needing separate color logic here — the
+         same navy/gold language as the compass redesign in item 1. -->
+    <button id="guide-me-btn" class="guide-me-btn hidden" aria-label="Guide me to a destination">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 3 L16 12 L12 9.5 L8 12 Z" fill="currentColor" />
+      </svg>
+    </button>
 
     <!-- Full-screen map — see app.js initMap()/updateUserLocationOnMap() for
          the user location dot, place pins, and pin-tap-to-narrate wiring. -->

@@ -2960,6 +2960,15 @@ initMap();
 // COMPASS_UNMERGE_THRESHOLD_DEGREES hysteresis to avoid flicker right at
 // one fixed boundary — see isCompassMerged, updated here since this is
 // where both angles are actually compared).
+// Arrow color, real field feedback: gold (the old color) is already used
+// for every map pin and reads as no-contrast against the sandy map
+// basemap — navy (--bg, the app's own brand navy) has real contrast
+// against both. Gold is now reserved specifically as the "you're on
+// track" alignment signal (a glowing halo), not a base color either arrow
+// wears all the time.
+const COMPASS_ARROW_COLOR = "#0F1B2D";
+const COMPASS_GLOW_COLOR = "#D4A853";
+
 function buildUserLocationIcon(heading, bearingToDestination) {
   const hasHeading = typeof heading === "number" && !Number.isNaN(heading);
   const hasDestinationBearing = typeof bearingToDestination === "number" && !Number.isNaN(bearingToDestination);
@@ -2973,21 +2982,31 @@ function buildUserLocationIcon(heading, bearingToDestination) {
   }
   isCompassMerged = merged;
 
+  // Real field bug this fixes: the previous <animate> pulse looked broken
+  // in practice, not smooth — because this whole icon is a fresh data: URI
+  // on every setIcon() call (see updateUserLocationOnMap's throttling
+  // comment below), any in-flight SMIL animation gets thrown away and
+  // restarted from frame zero on every redraw, which reads as a flicker/
+  // tick rather than a pulse. A static glow (no animation) renders
+  // identically regardless of how often the icon gets redrawn, and still
+  // reads as a clear "aligned" signal via the halo appearing/disappearing.
+  const glow = merged
+    ? `<circle cx="28" cy="28" r="23" fill="none" stroke="${COMPASS_GLOW_COLOR}" stroke-width="3" opacity="0.5"/>` +
+      `<circle cx="28" cy="28" r="23" fill="none" stroke="${COMPASS_GLOW_COLOR}" stroke-width="9" opacity="0.16"/>`
+    : "";
+
   const headingArrow = hasHeading
-    ? `<g transform="rotate(${heading} 28 28)">` +
-      `<path d="M28 6 L34 20 L28 15 L22 20 Z" fill="#D4A853"/>` +
-      (merged ? `<animate attributeName="opacity" values="1;0.45;1" dur="1.1s" repeatCount="indefinite"/>` : "") +
-      `</g>`
+    ? `<g transform="rotate(${heading} 28 28)"><path d="M28 6 L34 20 L28 15 L22 20 Z" fill="${COMPASS_ARROW_COLOR}"/></g>`
     : "";
   // Un-merged: a plain, un-glowing outline (per spec, "returns to its
-  // plain, un-glowing rotating-indicator state"). Merged: solid and
-  // pulsing together with Arrow 1.
+  // plain, un-glowing rotating-indicator state"). Merged: solid, matching
+  // Arrow 1, with the shared halo above signaling alignment instead of
+  // the arrows changing color themselves.
   const destinationArrow = hasDestinationBearing
     ? `<g transform="rotate(${bearingToDestination} 28 28)">` +
       (merged
-        ? `<path d="M28 2 L37 22 L28 17 L19 22 Z" fill="#D4A853" opacity="0.85">` +
-          `<animate attributeName="opacity" values="0.85;0.3;0.85" dur="1.1s" repeatCount="indefinite"/></path>`
-        : `<path d="M28 2 L35 19 L28 14 L21 19 Z" fill="none" stroke="#FAF7F2" stroke-width="1.5" opacity="0.55"/>`) +
+        ? `<path d="M28 2 L37 22 L28 17 L19 22 Z" fill="${COMPASS_ARROW_COLOR}"/>`
+        : `<path d="M28 2 L35 19 L28 14 L21 19 Z" fill="none" stroke="${COMPASS_ARROW_COLOR}" stroke-width="1.5" opacity="0.6"/>`) +
       `</g>`
     : "";
 
@@ -2995,6 +3014,7 @@ function buildUserLocationIcon(heading, bearingToDestination) {
     `<svg xmlns="http://www.w3.org/2000/svg" width="56" height="56" viewBox="0 0 56 56">` +
     `<circle cx="28" cy="28" r="18" fill="#D4A853" fill-opacity="0.22"/>` +
     `<circle cx="28" cy="28" r="10" fill="#D4A853" fill-opacity="0.45"/>` +
+    `${glow}` +
     `${destinationArrow}` +
     `${headingArrow}` +
     `<circle cx="28" cy="28" r="6" fill="#D4A853" stroke="#FAF7F2" stroke-width="2"/>` +
@@ -3035,6 +3055,35 @@ if (recenterBtn) {
   recenterBtn.addEventListener("click", recenterMapOnUser);
 }
 
+// Real field bug this fixes: google.maps.Marker's legacy icon API has no
+// way to just rotate/restyle an existing rendered icon — every visual
+// change means setIcon() with a brand-new data: URI, which the browser
+// has to decode and swap in fresh, which is what was actually producing
+// the reported map ticking/glitching (confirmed by reading the code, not
+// assumed: setIcon() was being called on literally every GPS tick,
+// including ticks where the heading moved by a fraction of a degree —
+// visually identical to the last redraw, but still forcing a full image
+// swap). The fully correct fix would be migrating this one marker to
+// google.maps.marker.AdvancedMarkerElement, whose content is a real DOM
+// node a CSS transform can rotate in place with zero recreation — that's
+// a genuine architecture change (a new Maps library to load, a different
+// marker API) out of scope for a same-day glitch fix, so it's not done
+// here; flagged as the real long-term fix if this throttle doesn't fully
+// resolve it on a real device. What IS done here, within the existing
+// legacy Marker API: only actually call setIcon() when the rendered
+// content would look meaningfully different — skip redundant redraws for
+// sub-threshold heading/bearing jitter and no merge-state change, which
+// is most GPS ticks in practice.
+const COMPASS_REDRAW_THRESHOLD_DEGREES = 4;
+let lastRenderedHeading = null;
+let lastRenderedBearing = null;
+let lastRenderedMergedState = null;
+
+function angleDiffDegrees(a, b) {
+  let diff = Math.abs(a - b) % 360;
+  return diff > 180 ? 360 - diff : diff;
+}
+
 function updateUserLocationOnMap(latitude, longitude, heading) {
   if (!map) return;
   const position = { lat: latitude, lng: longitude };
@@ -3051,13 +3100,34 @@ function updateUserLocationOnMap(latitude, longitude, heading) {
   // behavior," unchanged from before this pillar existed.
   const effectiveHeading = activeDestination && deviceOrientationHeading !== null ? deviceOrientationHeading : heading;
   const bearingToDestination = activeDestination ? bearingDegreesTo({ latitude, longitude }, activeDestination) : null;
+  // Always computed (cheap — just updates the merge hysteresis state
+  // machine, which must stay correct every tick regardless of whether we
+  // actually redraw) — see the redraw-throttling comment above for why
+  // the icon this returns isn't always applied to the marker.
   const icon = buildUserLocationIcon(effectiveHeading, bearingToDestination);
 
   if (!userLocationMarker) {
     userLocationMarker = new google.maps.Marker({ position, map, icon, zIndex: 1000 });
+    lastRenderedHeading = effectiveHeading;
+    lastRenderedBearing = bearingToDestination;
+    lastRenderedMergedState = isCompassMerged;
   } else {
     userLocationMarker.setPosition(position);
-    userLocationMarker.setIcon(icon);
+
+    const headingChanged =
+      (typeof effectiveHeading === "number") !== (typeof lastRenderedHeading === "number") ||
+      (typeof effectiveHeading === "number" && angleDiffDegrees(effectiveHeading, lastRenderedHeading) > COMPASS_REDRAW_THRESHOLD_DEGREES);
+    const bearingChanged =
+      (typeof bearingToDestination === "number") !== (typeof lastRenderedBearing === "number") ||
+      (typeof bearingToDestination === "number" && angleDiffDegrees(bearingToDestination, lastRenderedBearing) > COMPASS_REDRAW_THRESHOLD_DEGREES);
+    const mergedChanged = isCompassMerged !== lastRenderedMergedState;
+
+    if (headingChanged || bearingChanged || mergedChanged) {
+      userLocationMarker.setIcon(icon);
+      lastRenderedHeading = effectiveHeading;
+      lastRenderedBearing = bearingToDestination;
+      lastRenderedMergedState = isCompassMerged;
+    }
   }
 
   if (!hasMapCenteredOnUser) {
