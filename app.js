@@ -3981,7 +3981,32 @@ function hideDestinationPicker() {
   // Only clear isConversing if nothing else (the reroute banner) still
   // needs it held — avoids the same "who clears it last" issue a naive
   // unconditional reset would risk if both could ever be open back to back.
-  if (destinationRerouteBanner.classList.contains("hidden")) isConversing = false;
+  if (destinationRerouteBanner.classList.contains("hidden")) {
+    isConversing = false;
+    // Real regression this fixes (confirmed live via instrumented tracing,
+    // not assumed): checkForNarration only ever runs from inside onLocation
+    // (see the watchPosition callback), which itself only reaches
+    // checkForNarration on GPS stabilizing OR on a move past
+    // SIGNIFICANT_MOVE_METERS since the last call — both one-shot gates
+    // checked BEFORE isConversing is ever looked at. Entry Point A opens
+    // this picker (isConversing = true) the instant Wander mode starts,
+    // which is exactly when GPS is also mid-stabilizing — so the one tick
+    // that clears the stabilization gate almost always lands while this
+    // picker is still up, and checkForNarration's own isConversing guard
+    // throws that one shot away. Closing the picker (skip or otherwise)
+    // correctly clears isConversing, but nothing was left to give the
+    // pipeline another push — a stationary user (the overwhelmingly common
+    // case right after reading and dismissing a prompt) never produces
+    // another qualifying move, so checkForNarration simply never got called
+    // again, indefinitely. Traced live: instrumented call-count stayed at 1
+    // even after 3s idle post-skip. Re-attempting here with the last known
+    // fix is safe and idempotent — identical to what would happen if a real
+    // GPS tick arrived at this exact position right now, and checkForNarration's
+    // own cooldown/orientation/plannedTour guards behave the same either way.
+    if (gpsStabilized && lastPosition) {
+      checkForNarration(lastPosition.latitude, lastPosition.longitude, computeEffectiveHeading());
+    }
+  }
 }
 
 if (destinationPickerCloseBtn) destinationPickerCloseBtn.addEventListener("click", hideDestinationPicker);

@@ -1112,6 +1112,21 @@ body {
   font-size: 13px;
 }
 
+/* Real bug this fixes: #destination-input reuses .needs-suggestion-voice-row
+   purely for its flex-row layout (shared with the unrelated Pillar 3 needs-
+   suggestion banner), but that also pulled in the 13px font-size above —
+   under the 16px iOS Safari won't-auto-zoom threshold. Confirmed live (not
+   assumed): tapping this field zoomed the whole page viewport in, and iOS
+   doesn't reliably zoom back out on blur — exactly the "map stays zoomed in,
+   requires manual pinch to zoom out" report, and NOT a google.maps zoom
+   (map.getZoom() never changed in direct testing). ID selector specificity
+   wins over the shared class rule regardless of source order, so this only
+   restores the field this bug was actually reported on — the needs-
+   suggestion banner's own compact 13px sizing is untouched. */
+#destination-input {
+  font-size: 16px;
+}
+
 .needs-suggestion-voice-hint {
   margin: -6px 0 0;
   font-size: 12px;
