@@ -75,22 +75,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  /* TEMP TEST — PWA periodic-update-check diagnostic — REVERT AFTER CONFIRMING.
-     Same throwaway-marker approach as the prior foreground-update diagnostic
-     (see git history: "TEMP: green boot-loading background for PWA update
-     propagation test"). This time testing the newer setInterval/
-     visibilitychange periodic checkForUpdateAndMaybeApply() path specifically:
-     leave an already-installed, already-open PWA foregrounded (don't force-
-     close/reopen it) after this deploys. If that mechanism works, the app
-     should self-reload within ~3 minutes (or on the next background/
-     foreground cycle) and this magenta boot screen should flash on its own,
-     with zero manual reopen. If it never appears, the periodic check isn't
-     firing/applying on an already-open instance. Also watch for the existing
-     "Update available" banner appearing on its own during that window — that
-     alone confirms the check fired and found the update, independent of
-     whether auto-apply reloaded it. */
-  /* background: var(--bg); */
-  background: #ff00ff;
+  background: var(--bg);
 }
 
 .app-boot-cactus {
