@@ -9,7 +9,7 @@ AI-powered conversational audio tour guide app. Vanilla JS frontend (`app.js`), 
 - **Report honestly, including what wasn't verifiable** from this environment (real device sensors, real GPS movement, real network latency) vs. what was confirmed live.
 - **Get real measured numbers when performance/timing is the complaint** — don't describe a change qualitatively ("should be faster") when a before/after number is obtainable.
 - Commit messages must be specific and descriptive of what actually changed, not generic.
-- Push to `master` only when explicitly instructed — commit is not implicit permission to push.
+- Push to `master` by default after every commit, unless explicitly told to hold off (e.g. "commit only, don't push" or a paste that says so directly). Default is push — the risk of forgetting to push outweighs the risk of an unwanted push, since pushed code still requires a real device test/confirmation before it matters.
 
 ## Known recurring bug classes (check these first when debugging something that smells similar)
 
