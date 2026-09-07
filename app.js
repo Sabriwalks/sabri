@@ -1016,6 +1016,16 @@ const PLANNER_CHAT_OPENING =
 
 let plannerChatHistory = [];
 let plannerChatBusy = false;
+// Second "use my location" entry point, distinct from the step-by-step
+// button above: the conversational planner previously sent Wander mode's
+// lastPosition as-is on every message — null if the user opened Plan My
+// Tour without ever starting Wander this session (silently loses location
+// bias entirely), or however stale it happened to be otherwise. Fetched
+// once in the background when the chat opens (see openPlannerChat) via the
+// same accuracy-checked burst as the step-by-step button, so it's ready
+// by the time the user actually says "use my current location" without
+// adding latency to every message send.
+let plannerChatCurrentLocation = null;
 
 function addPlannerChatMessage(role, text) {
   const bubble = document.createElement("div");
@@ -1032,6 +1042,13 @@ async function openPlannerChat() {
   plannerChatMessagesEl.innerHTML = "";
   addPlannerChatMessage("assistant", PLANNER_CHAT_OPENING);
   speakNarration(PLANNER_CHAT_OPENING).catch(() => {});
+  // Background fetch, not awaited — see plannerChatCurrentLocation above.
+  plannerChatCurrentLocation = null;
+  if (hasGeolocationSupport()) {
+    getBestEffortPosition(PLANNER_LOCATION_BURST_MS, PLANNER_LOCATION_GOOD_ACCURACY_METERS).then((best) => {
+      if (best) plannerChatCurrentLocation = { latitude: best.coords.latitude, longitude: best.coords.longitude };
+    });
+  }
 }
 
 function closePlannerChatToStepByStep() {
@@ -1058,7 +1075,7 @@ async function sendPlannerChatMessage(userText) {
       body: JSON.stringify({
         messages: plannerChatHistory,
         currentCity,
-        currentLocation: lastPosition,
+        currentLocation: plannerChatCurrentLocation || lastPosition,
         userProfile,
       }),
     });
@@ -4834,34 +4851,75 @@ if (plannerStep0NextBtn) {
 
 // --- Planner Step 1: start / end points ---
 
+// Real bug this fixes (field report: resolved to "Mamilla" while the user
+// stood ~50ft from Zion Square): this used to trust the very FIRST GPS fix
+// getCurrentPosition returned, with no accuracy check at all — a cold-
+// start/urban-canyon fix can easily be off by hundreds of meters, which a
+// correct reverse-geocode of the (wrong) coordinates then resolves to a
+// real but wrong neighborhood. Wander mode never has this problem because
+// it waits for a stabilized watchPosition fix before trusting anything
+// (see gpsStabilized/GPS_STABILIZATION_READINGS) — this mirrors that same
+// discipline for this one-shot action instead of trusting a single fix.
+const PLANNER_LOCATION_BURST_MS = 6000;
+const PLANNER_LOCATION_GOOD_ACCURACY_METERS = 50;
+
+// Watches for up to burstMs, keeping the best (lowest-accuracy-value)
+// reading seen, and resolving early the moment a genuinely good fix
+// arrives. Resolves to null only if no reading came in at all.
+function getBestEffortPosition(burstMs, goodAccuracyMeters) {
+  return new Promise((resolve) => {
+    let best = null;
+    let watchId = null;
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (watchId !== null) geoClearWatch(watchId);
+      resolve(best);
+    };
+    geoWatchPosition(
+      (position) => {
+        if (!best || position.coords.accuracy < best.coords.accuracy) best = position;
+        if (position.coords.accuracy <= goodAccuracyMeters) finish();
+      },
+      () => finish(),
+      { enableHighAccuracy: true, timeout: burstMs }
+    ).then((id) => {
+      watchId = id;
+      if (settled) geoClearWatch(id); // finished (e.g. via the timeout below) before the watch even started
+    });
+    setTimeout(finish, burstMs);
+  });
+}
+
 if (plannerUseCurrentLocationBtn) {
-  plannerUseCurrentLocationBtn.addEventListener("click", () => {
+  plannerUseCurrentLocationBtn.addEventListener("click", async () => {
     if (!hasGeolocationSupport()) {
       showToast("Location isn't available on this device");
       return;
     }
     plannerUseCurrentLocationBtn.textContent = "Locating...";
-    geoGetCurrentPosition(
-      async (position) => {
-        const { latitude, longitude } = position.coords;
-        let name = "Current location";
-        try {
-          const response = await fetch(`/api/geocode?lat=${latitude}&lng=${longitude}`);
-          const data = await response.json();
-          if (response.ok && data.locationName) name = data.locationName;
-        } catch (error) {
-          // Fall back to the generic label.
-        }
-        plannerAnswers.startLocation = { lat: latitude, lng: longitude, name };
-        plannerStartInput.value = name;
-        plannerUseCurrentLocationBtn.textContent = "Use my current location";
-      },
-      () => {
-        plannerUseCurrentLocationBtn.textContent = "Use my current location";
-        showToast("Couldn't get your location");
-      },
-      { enableHighAccuracy: true, timeout: 15000 }
-    );
+    const best = await getBestEffortPosition(PLANNER_LOCATION_BURST_MS, PLANNER_LOCATION_GOOD_ACCURACY_METERS);
+    if (!best) {
+      plannerUseCurrentLocationBtn.textContent = "Use my current location";
+      showToast("Couldn't get your location");
+      return;
+    }
+    const { latitude, longitude, accuracy } = best.coords;
+    let name = "Current location";
+    try {
+      const response = await fetch(`/api/geocode?lat=${latitude}&lng=${longitude}`);
+      const data = await response.json();
+      if (response.ok && data.locationName) name = data.locationName;
+    } catch (error) {
+      // Fall back to the generic label.
+    }
+    plannerAnswers.startLocation = { lat: latitude, lng: longitude, name };
+    plannerStartInput.value = name;
+    plannerUseCurrentLocationBtn.textContent = "Use my current location";
+    if (accuracy > PLANNER_LOCATION_GOOD_ACCURACY_METERS) {
+      showToast(`Location may be imprecise (~${Math.round(accuracy)}m) — double-check the starting point above`);
+    }
   });
 }
 

@@ -3308,7 +3308,7 @@ function buildGenderConsistencyGuidance(languageName, language) {
 // starting area so ambiguous queries ("the old market") resolve to the
 // right city. Uses the classic Find Place From Text endpoint — same family
 // of API as the rest of server.js's Places calls (fetchNearbySearch etc.).
-async function findPlaceForQuery(query, biasLat, biasLng) {
+async function findPlaceForQuery(query, biasLat, biasLng, biasRadiusMeters = 20000) {
   if (!query || !GOOGLE_MAPS_API_KEY) return null;
 
   const url = new URL("https://maps.googleapis.com/maps/api/place/findplacefromtext/json");
@@ -3319,7 +3319,11 @@ async function findPlaceForQuery(query, biasLat, biasLng) {
   // causes an INVALID_REQUEST for every single query.
   url.searchParams.set("fields", "place_id,name,geometry,types,photos,rating,formatted_address");
   if (typeof biasLat === "number" && typeof biasLng === "number") {
-    url.searchParams.set("locationbias", `circle:20000@${biasLat},${biasLng}`);
+    // Default 20km is a "resolve to the right city" bias — deliberately
+    // loose for ordinary mid-tour stops. Plan My Tour's first/last stops
+    // pass a much tighter radius (see /api/plan-tour) since those are
+    // supposed to be anchored to a specific real point, not just city-wide.
+    url.searchParams.set("locationbias", `circle:${biasRadiusMeters}@${biasLat},${biasLng}`);
   }
   url.searchParams.set("key", GOOGLE_MAPS_API_KEY);
 
@@ -3456,6 +3460,10 @@ app.get("/api/get-directions", async (req, res) => {
   }
 });
 
+// Plan My Tour start/end anchoring — see /api/plan-tour below.
+const PLAN_TOUR_ANCHOR_BIAS_METERS = 3000; // tight Find-Place-From-Text bias for first/last stops specifically
+const PLAN_TOUR_ANCHOR_MAX_METERS = 600; // beyond this, trust real coordinates over the resolved candidate
+
 app.post("/api/plan-tour", async (req, res) => {
   const { startLocation, endLocation, duration, maxDistance, interests, specificFocus, userProfile, currentCity } =
     req.body || {};
@@ -3545,17 +3553,81 @@ app.post("/api/plan-tour", async (req, res) => {
 
     // Resolve each Claude-invented stop against a real Google Place so the
     // client has coordinates/placeId to drop a pin on and narrate from.
+    // Real bug this fixes (field report: tour started an 8-minute walk from
+    // the user and ended 10 minutes from the specified end address): every
+    // stop, including the first and last, was biased toward startLocation
+    // with the same loose 20km "right city" radius — the end address's own
+    // coordinates were never even consulted, and nothing checked the
+    // resolved first/last stop's real distance from where they actually
+    // needed to be. First/last stops now bias tightly toward their real
+    // anchor point (start/end respectively); middle stops keep the loose
+    // city-wide bias, since their exact position matters much less.
+    const sortedStops = (plan.stops || []).sort((a, b) => (a.stopNumber || 0) - (b.stopNumber || 0));
+    const lastIndex = sortedStops.length - 1;
     const resolvedStops = await Promise.all(
-      (plan.stops || [])
-        .sort((a, b) => (a.stopNumber || 0) - (b.stopNumber || 0))
-        .map(async (stop) => {
-          const place = await findPlaceForQuery(stop.searchQuery, startLocation.lat, startLocation.lng);
-          console.log(`[debug] /api/plan-tour: "${stop.searchQuery}" ->`, place ? place.name : "NOT FOUND");
-          return { ...stop, place };
-        })
+      sortedStops.map(async (stop, index) => {
+        const isFirst = index === 0;
+        const isLast = index === lastIndex;
+        const anchor = isLast && endLocation && typeof endLocation.lat === "number" ? endLocation : startLocation;
+        const biasRadius = isFirst || isLast ? PLAN_TOUR_ANCHOR_BIAS_METERS : undefined;
+        const place = await findPlaceForQuery(stop.searchQuery, anchor.lat, anchor.lng, biasRadius);
+        console.log(`[debug] /api/plan-tour: "${stop.searchQuery}" ->`, place ? place.name : "NOT FOUND");
+        return { ...stop, place, _isFirst: isFirst, _isLast: isLast };
+      })
     );
 
-    res.json({ ...plan, stops: resolvedStops.filter((stop) => stop.place) });
+    // Hard-constraint enforcement: a tight bias still only ever RANKS
+    // candidates for Claude's chosen search text — it doesn't reject a
+    // resolved place that's genuinely far from the real anchor if that
+    // text query itself was loosely worded or ambiguous. Real coordinates
+    // we already trust (the user's actual GPS fix / their specifically-
+    // selected end address) win over whatever Find-Place-From-Text
+    // returned when the two disagree by more than a comfortable stop-to-
+    // stop walk.
+    for (const stop of resolvedStops) {
+      if (!stop.place) continue;
+      if (stop._isFirst) {
+        const distance = distanceMeters(startLocation.lat, startLocation.lng, stop.place.latitude, stop.place.longitude);
+        if (distance > PLAN_TOUR_ANCHOR_MAX_METERS) {
+          const nearby = pickNearestPlaces(
+            await fetchNearbySearch(startLocation.lat, startLocation.lng, PLAN_TOUR_ANCHOR_BIAS_METERS),
+            null,
+            startLocation.lat,
+            startLocation.lng,
+            null,
+            1
+          )[0];
+          if (nearby) {
+            console.log(`[debug] /api/plan-tour: first stop "${stop.place.name}" was ${Math.round(distance)}m from start, substituting nearby real place "${nearby.name}"`);
+            stop.place = nearby;
+            stop.placeName = nearby.name;
+          }
+        }
+      } else if (stop._isLast && endLocation && typeof endLocation.lat === "number") {
+        const distance = distanceMeters(endLocation.lat, endLocation.lng, stop.place.latitude, stop.place.longitude);
+        if (distance > PLAN_TOUR_ANCHOR_MAX_METERS) {
+          console.log(`[debug] /api/plan-tour: last stop "${stop.place.name}" was ${Math.round(distance)}m from the specified end address, substituting the end address itself`);
+          stop.place = {
+            name: endLocation.name || "Your destination",
+            vicinity: null,
+            types: [],
+            primaryType: null,
+            rating: null,
+            priceLevel: null,
+            placeId: endLocation.placeId || `latlng:${endLocation.lat},${endLocation.lng}`,
+            photoReference: null,
+            latitude: endLocation.lat,
+            longitude: endLocation.lng,
+          };
+          stop.placeName = stop.place.name;
+        }
+      }
+    }
+
+    res.json({
+      ...plan,
+      stops: resolvedStops.filter((stop) => stop.place).map(({ _isFirst, _isLast, ...stop }) => stop),
+    });
   } catch (error) {
     res.status(502).json({ error: "Failed to generate a tour plan." });
   }
@@ -4963,6 +5035,17 @@ app.post("/api/plan-tour-chat", async (req, res) => {
         parsed.reply =
           "Hmm, I couldn't quite place that starting point — could you name a specific street, landmark, or " +
           "say 'my current location'?";
+      } else if (parsed.extractedTourParams.endLocationName && !resolvedEnd) {
+        // Real bug this fixes: the user DID name a specific end address, it
+        // failed to geocode, and this used to silently proceed with
+        // endLocation = null — completing the tour with no end constraint
+        // at all and no indication to the user their address was dropped.
+        // A null endLocationName (no end specified) is a legitimate case
+        // and must NOT hit this branch — only a specified-but-unresolvable
+        // one should.
+        parsed.isComplete = false;
+        parsed.reply =
+          "Hmm, I couldn't quite place that ending point — could you name a specific street, landmark, or address?";
       }
     }
 
