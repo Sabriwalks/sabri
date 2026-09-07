@@ -655,6 +655,32 @@ body {
   transform: scale(0.96);
 }
 
+/* Secondary next to mic-btn/camera-btn's primary gold circles — same
+   register as .recenter-btn (bg-elevated + gold icon), smaller, so it
+   doesn't compete with voice as the default way to ask. */
+.ask-type-btn {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  color: var(--gold);
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 14px var(--warm-shadow);
+}
+
+.ask-type-btn:active {
+  transform: scale(0.96);
+}
+
+#ask-type-row {
+  margin-top: 10px;
+}
+
 .tap-to-read-row {
   border: none;
   background: transparent;
@@ -952,6 +978,14 @@ body {
   line-height: 1.4;
   text-align: center;
   font-family: inherit;
+  transform: scale(1);
+  opacity: 1;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+.ask-edit-input--entering {
+  transform: scale(0.96);
+  opacity: 0;
 }
 
 /* Doubles as the "Tap to cancel" control while listening — sits above the
@@ -1219,6 +1253,30 @@ body {
   padding: 6px 12px;
   border-radius: 999px;
   cursor: pointer;
+}
+
+/* Item 0 (walk-test batch) — low-GPS-accuracy warning on the planner's
+   start-location input. No existing one-shot "flash an input" pattern
+   existed anywhere in the app (checked — every existing animation here is
+   an infinite loop for an ONGOING state: mic-pulse, tour-loading-pulse,
+   share-icon-glow, etc.), so this is new, but reuses the app's existing
+   --gold-glow attention color rather than inventing a new one. Finite
+   (2 pulses, ~1.6s) rather than infinite — a lasting-but-not-naggy visual
+   cue that outlives the 2.2s toast without needing a forced dismiss. */
+.input-accuracy-flash {
+  animation: input-accuracy-flash 1.6s ease-in-out 2;
+}
+
+@keyframes input-accuracy-flash {
+  0%,
+  100% {
+    box-shadow: none;
+    border-color: var(--border);
+  }
+  50% {
+    box-shadow: 0 0 0 3px var(--gold-glow);
+    border-color: var(--gold);
+  }
 }
 
 .settings-toggle-row {

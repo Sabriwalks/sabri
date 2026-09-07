@@ -371,6 +371,11 @@ const PRONUNCIATION_GLOSSARY = {
     rebbe: "REH-beh",
     minyan: "MIN-yahn",
     siddur: "see-DOOR",
+    // Real field report: Inworld reads "hostel" like "hostile" — this
+    // table isn't restricted to foreign-origin terms (see comment below),
+    // it's just been curated from real mispronunciation reports so far,
+    // and this is the first ordinary-English one.
+    hostel: "HOSS-tel",
   },
   // Hebrew-script narration already handles Hebrew/Jewish terms correctly
   // on its own (see buildLanguageGuidance's Hebrew branch) — this is only
@@ -712,7 +717,19 @@ const TIER_GUIDANCE = {
     "on the direction they're facing. Use this to intelligently determine " +
     "what the user is most likely looking at or experiencing right now — " +
     "prioritize places that are in front of the user over places that are " +
-    "merely closest. Center your narration on that one place.",
+    "merely closest. Center your narration on that one place. If you " +
+    "mention any other nearby place in passing — not the one place you're " +
+    "centering on — do not state specific facts about it (a construction " +
+    "date, who owned it, its architectural history) unless you are " +
+    "genuinely confident that fact belongs to that specific building and " +
+    "not a different one nearby. It's easy to misattribute a fact you know " +
+    "about the area to the wrong building. When you're not sure, it's fine " +
+    "to name what a place is (a restaurant, a shop) without asserting " +
+    "history about it. And only bring a nearby place into the story at all " +
+    "if it's genuinely thematically connected to what you're centering on " +
+    "— don't force a connection between the landmark and a nearby business " +
+    "just because it happens to be close by. It's completely fine to not " +
+    "mention what's nearby.",
 };
 
 const DEPTH_GUIDANCE = {
@@ -4276,7 +4293,14 @@ app.post("/api/ask", async (req, res) => {
       `currently near ${place} in ${area}. Answer their question ` +
       `conversationally, as if talking to them face to face. Keep answers to ` +
       `2-3 paragraphs maximum - they are walking and listening, not reading. ` +
-      `Stay in character as Sabri at all times.`,
+      `Stay in character as Sabri at all times. If this question is clearly ` +
+      `asking for MORE DEPTH on something already touched on (e.g. "tell me ` +
+      `more about the architecture" or "who actually owned this place ` +
+      `politically" after a surface-level mention), do not re-introduce or ` +
+      `re-summarize what's already been said as a lead-in — assume they ` +
+      `heard the narration and go straight to genuinely new detail beyond ` +
+      `it. Only recap prior context if the question specifically implies ` +
+      `they've forgotten or are confused about something already covered.`,
     TOURIST_ORIENTATION_GUIDANCE,
     buildUserProfileGuidance(userProfile),
     buildLocationGuidance(neighborhood, city, country),

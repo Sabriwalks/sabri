@@ -466,6 +466,10 @@
             <span class="mic-waveform" aria-hidden="true"><span></span><span></span><span></span></span>
           </button>
 
+          <!-- Alongside the mic, not replacing it — for noisy/windy
+               conditions where speaking a question isn't practical. -->
+          <button id="ask-type-btn" class="ask-type-btn" aria-label="Type a question instead">⌨️</button>
+
           <button id="play-btn" class="control-btn control-btn--main" aria-label="Play">
             <svg class="play-icon" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
             <svg class="loading-spinner hidden" viewBox="0 0 24 24" width="22" height="22" fill="none">
@@ -477,6 +481,14 @@
           </button>
 
           <button id="camera-btn" class="camera-btn" aria-label="Take a photo">📷</button>
+        </div>
+
+        <!-- Same mic+input+send row shape as .onboarding-chat-input-row,
+             minus the mic (that's the always-visible #mic-btn above) —
+             hidden until #ask-type-btn is tapped. -->
+        <div id="ask-type-row" class="onboarding-chat-input-row hidden">
+          <input id="ask-type-input" type="text" class="onboarding-input" placeholder="Type your question..." />
+          <button id="ask-type-send-btn" class="onboarding-chat-send-btn" aria-label="Send">→</button>
         </div>
 
         <button id="drawer-handle" class="tap-to-read-row" aria-label="Show story details">Tap to read</button>
@@ -1164,6 +1176,19 @@
     <div class="needs-suggestion-actions">
       <button id="narration-interrupt-yes" class="needs-suggestion-yes">Yes</button>
       <button id="narration-interrupt-no" class="needs-suggestion-no">No</button>
+    </div>
+  </div>
+
+  <!-- Photo-taken-during-narration confirm — own isolated state
+       (pendingPhotoInterrupt/pendingPhotoDeferred in app.js), same pattern
+       as narration-interrupt-banner above. "No" doesn't discard the photo —
+       it defers it until the current narration ends naturally (see
+       narrateAndSpeak's finally block). -->
+  <div id="photo-interrupt-banner" class="needs-suggestion-banner hidden" role="dialog" aria-live="polite">
+    <p id="photo-interrupt-text" class="needs-suggestion-text">End narration and tell you about what's in front of you?</p>
+    <div class="needs-suggestion-actions">
+      <button id="photo-interrupt-yes" class="needs-suggestion-yes">Yes</button>
+      <button id="photo-interrupt-no" class="needs-suggestion-no">No, finish first</button>
     </div>
   </div>
 

@@ -56,6 +56,10 @@ const cameraBtn = document.getElementById("camera-btn");
 const askSubtitle = document.getElementById("ask-subtitle");
 const askEditBtn = document.getElementById("ask-edit-btn");
 const askEditInput = document.getElementById("ask-edit-input");
+const askTypeBtn = document.getElementById("ask-type-btn");
+const askTypeRow = document.getElementById("ask-type-row");
+const askTypeInput = document.getElementById("ask-type-input");
+const askTypeSendBtn = document.getElementById("ask-type-send-btn");
 const listeningHint = document.getElementById("listening-hint");
 const toastEl = document.getElementById("toast");
 const settingsBtn = document.getElementById("settings-btn");
@@ -171,6 +175,9 @@ const destinationRerouteNoBtn = document.getElementById("destination-reroute-no"
 const narrationInterruptBanner = document.getElementById("narration-interrupt-banner");
 const narrationInterruptYesBtn = document.getElementById("narration-interrupt-yes");
 const narrationInterruptNoBtn = document.getElementById("narration-interrupt-no");
+const photoInterruptBanner = document.getElementById("photo-interrupt-banner");
+const photoInterruptYesBtn = document.getElementById("photo-interrupt-yes");
+const photoInterruptNoBtn = document.getElementById("photo-interrupt-no");
 const midTourDestinationBanner = document.getElementById("mid-tour-destination-banner");
 const midTourDestinationYesBtn = document.getElementById("mid-tour-destination-yes");
 const midTourDestinationNoBtn = document.getElementById("mid-tour-destination-no");
@@ -473,6 +480,20 @@ let lastNarrationEndTime = 0;
 let lastNarrationPosition = null;
 const NARRATION_COOLDOWN_MS = 10000;
 const NARRATION_COOLDOWN_METERS = 10;
+
+// Confirmed asymmetry this closes: a just-finished narration gets this
+// cooldown before a fresh GPS tick can start a new one; a just-finished
+// question-answer got none at all — isConversing simply flipping false
+// (for ANY reason, including askSabri's catch branch if backgrounding
+// interrupted the underlying fetch/stream) left checkForNarration free to
+// immediately narrate the nearest place on the very next tick, with zero
+// grace period. Same mechanism, same thresholds, mirrored for
+// conversations. This does NOT attempt to resume/retry an interrupted
+// answer itself — see askSabri's finally block and the note there; that
+// needs real-device confirmation of what backgrounding actually does to
+// an in-flight fetch before it can be built.
+let lastConversationEndTime = 0;
+let lastConversationPosition = null;
 
 const SIGNIFICANT_MOVE_METERS = 15;
 const ORIENTATION_RADIUS_METERS = 100;
@@ -4919,6 +4940,13 @@ if (plannerUseCurrentLocationBtn) {
     plannerUseCurrentLocationBtn.textContent = "Use my current location";
     if (accuracy > PLANNER_LOCATION_GOOD_ACCURACY_METERS) {
       showToast(`Location may be imprecise (~${Math.round(accuracy)}m) — double-check the starting point above`);
+      // The toast itself auto-dismisses after 2.2s with no lasting trace —
+      // this flashes the actual field the warning refers to so there's a
+      // cue that outlives the toast, without forcing a tap-to-dismiss
+      // (friction that isn't warranted for what might be a false alarm on
+      // genuinely fine GPS). Remove-then-reflow-then-add so a second
+      // low-accuracy fix in a row restarts the animation instead of no-op'ing.
+      flashInputForAttention(plannerStartInput);
     }
   });
 }
@@ -5584,67 +5612,133 @@ function handleIdentifyFailure() {
   speakNarration(message).catch(() => {});
 }
 
+// Own isolated pending-state for the photo-interrupt confirm, same pattern
+// as pendingGoldenCirclePlace — not shared with any other feature's
+// pending-variable. pendingPhotoDeferred is separate from
+// pendingPhotoInterrupt: the interrupt banner clears its own var on
+// yes/no, while a "No, finish first" answer moves the captured image into
+// pendingPhotoDeferred, which narrateAndSpeak's finally block checks once
+// the current narration actually ends.
+let pendingPhotoInterrupt = null;
+let pendingPhotoDeferred = null;
+
+// Extracted so it can be called from three places: immediately (nothing
+// playing), on interrupt-confirm (after interruptPlayback()), and once a
+// deferred narration naturally finishes (narrateAndSpeak's finally block)
+// — one pipeline, not three.
+async function sendPhotoForIdentification(imageBase64) {
+  isIdentifying = true;
+  cameraIdentifyBtn.disabled = true;
+  // Loading state layers OVER the still-live (but now static-looking)
+  // preview for the few seconds Claude is processing the frame — matches
+  // the wave+text loading pattern used for narration/onboarding chat
+  // elsewhere, rather than just a button-text change that's easy to miss.
+  if (cameraLoading) cameraLoading.classList.remove("hidden");
+
+  try {
+    const response = await fetch("/api/identify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        imageBase64,
+        mediaType: "image/jpeg",
+        language: settings.language,
+        city: currentCity,
+        country: currentCountry,
+        neighborhood: currentNeighborhoodName,
+        recentNarrationContext: buildRecentNarrationContextForCamera(),
+      }),
+    });
+    const data = await response.json();
+
+    if (!response.ok || !data.narration) {
+      handleIdentifyFailure();
+      return;
+    }
+
+    // Real bug this fixes: the "currently talking about" header label
+    // (locationName) previously wasn't touched at all by this path, so it
+    // kept showing whatever place a prior geographic narration had left
+    // there — silently stale, not reflecting that Sabri is now talking
+    // about the photo.
+    locationName.textContent = "Narration about image captured";
+    placeName.textContent = "Sabri";
+    placeDescription.textContent = data.narration;
+    placeDescription.classList.remove("story-description--fallback");
+    playerCard.classList.remove("hidden");
+    playerCard.classList.add("is-open");
+    appEl.classList.add("has-player");
+    startPrompt.classList.add("hidden");
+    tourControls.classList.remove("hidden");
+
+    logEvent("camera_identify_used", { resultSnippet: data.narration.slice(0, 80) });
+    await speakNarration(data.narration);
+  } catch (error) {
+    handleIdentifyFailure();
+  } finally {
+    isIdentifying = false;
+    cameraIdentifyBtn.disabled = false;
+    if (cameraLoading) cameraLoading.classList.add("hidden");
+  }
+}
+
+function showPhotoInterruptBanner() {
+  if (!photoInterruptBanner) return;
+  photoInterruptBanner.classList.remove("hidden");
+}
+function hidePhotoInterruptBanner() {
+  if (!photoInterruptBanner) return;
+  photoInterruptBanner.classList.add("hidden");
+}
+async function handlePhotoInterruptYes() {
+  if (!pendingPhotoInterrupt) return;
+  const { imageBase64 } = pendingPhotoInterrupt;
+  pendingPhotoInterrupt = null;
+  hidePhotoInterruptBanner();
+  // Same interruptPlayback()-then-proceed-directly pattern as
+  // handleNarrationInterruptYes — don't wait for the interrupted
+  // narration's own finally to clear isNarrating.
+  interruptPlayback();
+  await sendPhotoForIdentification(imageBase64);
+}
+function handlePhotoInterruptNo() {
+  if (!pendingPhotoInterrupt) return;
+  // Not discarded — deferred until the current narration ends naturally,
+  // bypassing the movement gate for this one deliberate trigger the same
+  // way forceFirstNarrationIfNeeded bypasses it for the stationary-cafe
+  // case (different mechanism: triggered by narration actually finishing,
+  // not a timer, but the same "deliberate one-time bypass" principle).
+  pendingPhotoDeferred = { imageBase64: pendingPhotoInterrupt.imageBase64 };
+  pendingPhotoInterrupt = null;
+  hidePhotoInterruptBanner();
+}
+if (photoInterruptYesBtn) photoInterruptYesBtn.addEventListener("click", handlePhotoInterruptYes);
+if (photoInterruptNoBtn) photoInterruptNoBtn.addEventListener("click", handlePhotoInterruptNo);
+
 if (cameraIdentifyBtn) {
-  cameraIdentifyBtn.addEventListener("click", async () => {
+  cameraIdentifyBtn.addEventListener("click", () => {
     if (isIdentifying || !cameraStream) return;
-    isIdentifying = true;
-    cameraIdentifyBtn.disabled = true;
-    // Loading state layers OVER the still-live (but now static-looking)
-    // preview for the few seconds Claude is processing the frame — matches
-    // the wave+text loading pattern used for narration/onboarding chat
-    // elsewhere, rather than just a button-text change that's easy to miss.
-    if (cameraLoading) cameraLoading.classList.remove("hidden");
+    const videoWidth = cameraVideo.videoWidth || 1280;
+    const videoHeight = cameraVideo.videoHeight || 720;
+    cameraCanvas.width = videoWidth;
+    cameraCanvas.height = videoHeight;
+    const context = cameraCanvas.getContext("2d");
+    context.drawImage(cameraVideo, 0, 0, videoWidth, videoHeight);
+    const imageBase64 = cameraCanvas.toDataURL("image/jpeg", 0.85);
+    closeCameraOverlay();
 
-    try {
-      const videoWidth = cameraVideo.videoWidth || 1280;
-      const videoHeight = cameraVideo.videoHeight || 720;
-      cameraCanvas.width = videoWidth;
-      cameraCanvas.height = videoHeight;
-      const context = cameraCanvas.getContext("2d");
-      context.drawImage(cameraVideo, 0, 0, videoWidth, videoHeight);
-      const imageBase64 = cameraCanvas.toDataURL("image/jpeg", 0.85);
-
-      const response = await fetch("/api/identify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          imageBase64,
-          mediaType: "image/jpeg",
-          language: settings.language,
-          city: currentCity,
-          country: currentCountry,
-          neighborhood: currentNeighborhoodName,
-          recentNarrationContext: buildRecentNarrationContextForCamera(),
-        }),
-      });
-      const data = await response.json();
-
-      closeCameraOverlay();
-
-      if (!response.ok || !data.narration) {
-        handleIdentifyFailure();
+    if (isNarrating) {
+      // Another confirm already active (avoid stacking two banners) — the
+      // safe default here is to defer rather than silently drop the photo.
+      if (isConversing || pendingGoldenCirclePlace || destinationRerouteCandidate || needsSuggestionPending || pendingMidTourDestination) {
+        pendingPhotoDeferred = { imageBase64 };
         return;
       }
-
-      placeName.textContent = "Sabri";
-      placeDescription.textContent = data.narration;
-      placeDescription.classList.remove("story-description--fallback");
-      playerCard.classList.remove("hidden");
-      playerCard.classList.add("is-open");
-      appEl.classList.add("has-player");
-      startPrompt.classList.add("hidden");
-      tourControls.classList.remove("hidden");
-
-      logEvent("camera_identify_used", { resultSnippet: data.narration.slice(0, 80) });
-      await speakNarration(data.narration);
-    } catch (error) {
-      closeCameraOverlay();
-      handleIdentifyFailure();
-    } finally {
-      isIdentifying = false;
-      cameraIdentifyBtn.disabled = false;
-      if (cameraLoading) cameraLoading.classList.add("hidden");
+      pendingPhotoInterrupt = { imageBase64 };
+      showPhotoInterruptBanner();
+      return;
     }
+    sendPhotoForIdentification(imageBase64);
   });
 }
 
@@ -5656,6 +5750,18 @@ function showToast(message) {
   toastHideTimeout = setTimeout(() => {
     toastEl.classList.remove("is-visible");
   }, 2200);
+}
+
+// Item 0 (walk-test batch) — a finite (non-looping) attention flash on a
+// specific input, for cases where the toast alone (2.2s, no lasting trace)
+// isn't enough. Remove-then-reflow-then-re-add so back-to-back calls (e.g.
+// two low-accuracy fixes in a row) restart the animation instead of no-op'ing
+// (re-adding a class that's already present doesn't restart a CSS animation).
+function flashInputForAttention(inputEl) {
+  if (!inputEl) return;
+  inputEl.classList.remove("input-accuracy-flash");
+  void inputEl.offsetWidth; // force reflow
+  inputEl.classList.add("input-accuracy-flash");
 }
 
 // --- Tour-start loading overlay (Wander mode) ---
@@ -6114,6 +6220,18 @@ function recordTravelPosition(latitude, longitude) {
   }
 }
 
+// A session row this recent almost certainly isn't a genuine prior visit —
+// it's this same continuous walk, re-saved by the visibilitychange
+// listener (app.js, "hidden" -> saveSessionToSupabase) the last time the
+// user merely backgrounded the app (switching apps, locking the phone),
+// with no dedup against an in-progress walk. Real bug this fixes: that
+// backgrounding-triggered save landed in Supabase within the SAME walk,
+// so a second startTour() call minutes later (e.g. after iOS reloaded the
+// PWA post-background, or starting a fresh Wander session right after a
+// Guided Tour) saw it as a "prior session in this city" and triggered
+// "welcome back"-style framing for someone who never actually left.
+const FIRST_VISIT_RECENCY_IGNORE_MS = 2 * 60 * 60 * 1000; // 2 hours
+
 // True unless returningUserContext (loaded from Supabase for a signed-in
 // user, see loadReturningUserContext) shows a prior session already in this
 // exact city — feeds the first-narration "give big picture orientation"
@@ -6121,7 +6239,11 @@ function recordTravelPosition(latitude, longitude) {
 function computeFirstVisitToCity() {
   if (!currentCity) return true;
   if (!returningUserContext || !Array.isArray(returningUserContext.recentSessions)) return true;
-  const priorCities = returningUserContext.recentSessions.map((session) => session.city).filter(Boolean);
+  const genuinelyPriorSessions = returningUserContext.recentSessions.filter((session) => {
+    if (!session.started_at) return true; // no timestamp to judge by — don't silently drop it
+    return Date.now() - new Date(session.started_at).getTime() > FIRST_VISIT_RECENCY_IGNORE_MS;
+  });
+  const priorCities = genuinelyPriorSessions.map((session) => session.city).filter(Boolean);
   return !priorCities.includes(currentCity);
 }
 
@@ -6400,6 +6522,20 @@ async function checkForNarration(latitude, longitude, heading) {
       distanceInMeters(lastNarrationPosition, { latitude, longitude }) >= NARRATION_COOLDOWN_METERS;
 
     if (!cooledDown || !movedEnough) {
+      statusText.textContent = "Keep walking, discovering...";
+      return;
+    }
+  }
+
+  // Same cooldown, mirrored for a just-finished question-answer (see
+  // lastConversationEndTime's declaration for the bug this closes).
+  if (lastConversationEndTime > 0) {
+    const conversationCooledDown = Date.now() - lastConversationEndTime >= NARRATION_COOLDOWN_MS;
+    const movedEnoughSinceConversation =
+      !lastConversationPosition ||
+      distanceInMeters(lastConversationPosition, { latitude, longitude }) >= NARRATION_COOLDOWN_METERS;
+
+    if (!conversationCooledDown || !movedEnoughSinceConversation) {
       statusText.textContent = "Keep walking, discovering...";
       return;
     }
@@ -6843,6 +6979,18 @@ async function narrateAndSpeak({
     // appended to "replay the last narration"'s audio.
     cachingNarrationForReplay = false;
     updateNarrationControlButtons();
+
+    // A photo taken mid-narration and deferred ("No, finish first") fires
+    // here, once this narration has genuinely ended — deliberately calling
+    // sendPhotoForIdentification directly rather than through any
+    // GPS/movement-triggered path, same bypass principle as
+    // forceFirstNarrationIfNeeded. Not awaited — narrateAndSpeak's own
+    // caller doesn't need to wait on an unrelated deferred photo.
+    if (pendingPhotoDeferred) {
+      const deferred = pendingPhotoDeferred;
+      pendingPhotoDeferred = null;
+      sendPhotoForIdentification(deferred.imageBase64);
+    }
   }
 }
 
@@ -7197,7 +7345,7 @@ const INITIAL_SILENCE_MS = 8000; // generous window before the user starts speak
 // tuning further in either direction.
 const FOLLOWUP_SILENCE_MS = 4000; // stop 4s after the last detected speech
 const MIN_QUESTION_LENGTH = 5; // shorter than this is almost always a mis-hear, not a real question
-const CONFIRM_DISPLAY_MS = 1000; // show the full captured text before sending it
+const CONFIRM_DISPLAY_MS = 3000; // show the full captured text before sending it — was 1000, too short to actually read and tap edit
 
 if (recognition) {
   recognition.continuous = false;
@@ -7557,6 +7705,35 @@ if (askEditInput) {
   });
 }
 
+// Alongside the mic, not a replacement — for noisy/windy conditions where
+// speaking isn't practical. A typed question skips the voice confirm-
+// window entirely (typing it out already IS the review step) and mirrors
+// startListening()'s own interrupt-then-proceed pattern rather than going
+// through SabriSpeechRecognition at all.
+if (askTypeBtn) {
+  askTypeBtn.addEventListener("click", () => {
+    const opening = askTypeRow.classList.contains("hidden");
+    askTypeRow.classList.toggle("hidden");
+    if (opening) askTypeInput.focus();
+  });
+}
+
+function submitTypedQuestion() {
+  const question = askTypeInput.value.trim();
+  if (!question || question.length < MIN_QUESTION_LENGTH) return;
+  askTypeInput.value = "";
+  askTypeRow.classList.add("hidden");
+  interruptPlayback();
+  isConversing = true;
+  askSabri(question);
+}
+if (askTypeSendBtn) askTypeSendBtn.addEventListener("click", submitTypedQuestion);
+if (askTypeInput) {
+  askTypeInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") submitTypedQuestion();
+  });
+}
+
 function startListening() {
   if (isListening) return;
 
@@ -7624,7 +7801,15 @@ function startListening() {
       askEditBtn.classList.add("hidden");
       askSubtitle.classList.add("hidden");
       askEditInput.value = question;
+      // No zoom/fade transition existed here at all before (a plain
+      // instant .hidden swap) — this adds one, same remove-then-reflow-
+      // then-settle technique as flashInputForAttention: start in the
+      // "entering" (small/transparent) state, force a reflow, then drop
+      // the class so it transitions to its normal resting state.
       askEditInput.classList.remove("hidden");
+      askEditInput.classList.add("ask-edit-input--entering");
+      void askEditInput.offsetWidth; // force reflow
+      askEditInput.classList.remove("ask-edit-input--entering");
       askEditInput.focus();
       askEditInput.select();
     };
@@ -7681,13 +7866,20 @@ async function askSabri(question) {
   // element activity starts (including the first queued TTS sentence).
   await sleep(AIRPODS_ROUTE_RECOVERY_MS);
 
+  // Real gaps this fixes: the transcribed question used to vanish the
+  // instant the answer appeared (no persistent record of what was asked),
+  // and there was no visual distinction between a fresh question and a
+  // follow-up continuing the same place's conversation. Reusing the
+  // existing title slot (previously always the static "Sabri") for both,
+  // rather than adding new UI elements.
+  const isFollowUp = currentPlaceConversation.length > 0;
   let answerText = "";
   let answerShown = false;
   const showAnswerUI = () => {
     if (answerShown) return;
     answerShown = true;
     askSubtitle.classList.add("hidden");
-    placeName.textContent = "Sabri";
+    placeName.textContent = isFollowUp ? `Following up: "${question}"` : `You asked: "${question}"`;
     placeDescription.textContent = "";
     placeDescription.classList.remove("story-description--fallback");
     playerCard.classList.remove("hidden");
@@ -7802,5 +7994,16 @@ async function askSabri(question) {
     }
   } finally {
     isConversing = false;
+    // Mirrors narrateAndSpeak's lastNarrationEndTime/lastNarrationPosition
+    // — see their declaration for the backgrounding bug this closes. This
+    // fires whether the answer finished cleanly or was cut off by the
+    // catch above (e.g. a backgrounding-killed fetch/stream), which is
+    // exactly the case that previously left zero grace period before a
+    // fresh GPS tick could immediately narrate the nearest place. This is
+    // a guard against being overridden, not a resume of the answer itself
+    // — a real resume/retry would need confirming, on a real device, that
+    // this catch branch is actually what backgrounding triggers here.
+    lastConversationEndTime = Date.now();
+    lastConversationPosition = lastPosition;
   }
 }
