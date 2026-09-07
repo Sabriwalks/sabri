@@ -1113,7 +1113,8 @@
         <input id="destination-input" type="text" class="onboarding-input" placeholder="A place, neighborhood, or landmark..." />
         <button id="destination-search-btn" class="destination-search-btn" aria-label="Search">→</button>
       </div>
-      <p id="destination-picker-hint" class="destination-picker-hint">Or tap a pin on the map to head there.</p>
+      <p class="destination-picker-hint">Every gold pin on the map can also be tapped directly as a destination.</p>
+      <button id="destination-map-picker-btn" type="button" class="destination-map-picker-btn">Or choose a destination from the map</button>
       <p id="destination-picker-status" class="destination-picker-hint hidden"></p>
       <div id="destination-active-row" class="destination-active-row hidden">
         <span id="destination-active-name" class="destination-active-name"></span>
@@ -1121,6 +1122,16 @@
       </div>
       <button id="destination-skip-btn" class="destination-skip-btn">No, just wander</button>
     </div>
+  </div>
+
+  <!-- Item 4(B) — shown while the destination picker is temporarily
+       backgrounded (is-visible removed, state kept) so the map underneath
+       becomes tappable for an arbitrary empty-point pin drop. Sized to
+       content only, not full-screen, so it never blocks map clicks itself
+       — see awaitingMapPinDrop in app.js. -->
+  <div id="map-pin-drop-indicator" class="map-pin-drop-indicator hidden">
+    <span>Tap the map to choose your destination</span>
+    <button id="map-pin-drop-cancel" type="button">Cancel</button>
   </div>
 
   <!-- Reroute confirmation — mirrors needs-suggestion-banner's shape/voice
@@ -1140,6 +1151,42 @@
     <div class="needs-suggestion-actions">
       <button id="destination-reroute-yes" class="needs-suggestion-yes">Head there instead</button>
       <button id="destination-reroute-no" class="needs-suggestion-no">Keep current</button>
+    </div>
+  </div>
+
+  <!-- Golden-circle-tap-during-narration confirm — own isolated state
+       (pendingGoldenCirclePlace in app.js), deliberately not sharing
+       destinationRerouteCandidate/needsSuggestionPending so it stays
+       unaffected by other pillars. Lightweight: no voice row, just a
+       yes/no confirm. -->
+  <div id="narration-interrupt-banner" class="needs-suggestion-banner hidden" role="dialog" aria-live="polite">
+    <p id="narration-interrupt-text" class="needs-suggestion-text">Start narration now?</p>
+    <div class="needs-suggestion-actions">
+      <button id="narration-interrupt-yes" class="needs-suggestion-yes">Yes</button>
+      <button id="narration-interrupt-no" class="needs-suggestion-no">No</button>
+    </div>
+  </div>
+
+  <!-- Mid-tour "Guide me here" confirm — shown only when a tour is running
+       and no destination is set yet (see pendingMidTourDestination in
+       app.js). The already-has-a-destination case is handled by the
+       existing destination-reroute-banner above, untouched. -->
+  <div id="mid-tour-destination-banner" class="needs-suggestion-banner hidden" role="dialog" aria-live="polite">
+    <p id="mid-tour-destination-text" class="needs-suggestion-text">Switch to this as your new destination? This replaces your current route.</p>
+    <div class="needs-suggestion-actions">
+      <button id="mid-tour-destination-yes" class="needs-suggestion-yes">Yes, guide me there</button>
+      <button id="mid-tour-destination-no" class="needs-suggestion-no">No, keep going</button>
+    </div>
+  </div>
+
+  <!-- Long-walk warning — shown once directions resolve to a >45 minute
+       walk (see checkLongWalkWarning in app.js). Non-blocking, dismissible,
+       own isolated state — doesn't gate isNarrating/isConversing. -->
+  <div id="long-walk-banner" class="needs-suggestion-banner hidden" role="dialog" aria-live="polite">
+    <p id="long-walk-text" class="needs-suggestion-text"></p>
+    <div id="long-walk-links" class="long-walk-links"></div>
+    <div class="needs-suggestion-actions">
+      <button id="long-walk-dismiss" class="needs-suggestion-no">Got it, I'll walk</button>
     </div>
   </div>
 

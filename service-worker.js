@@ -1,4 +1,4 @@
-const CACHE_NAME = "sabri-cache-v37";
+const CACHE_NAME = "sabri-cache-v38";
 const ASSETS_TO_CACHE = ["/", "/index.html", "/style.css", "/app.js", "/manifest.json"];
 
 self.addEventListener("install", (event) => {

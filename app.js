@@ -153,7 +153,9 @@ const destinationPickerTitle = document.getElementById("destination-picker-title
 const destinationMicBtn = document.getElementById("destination-mic-btn");
 const destinationInput = document.getElementById("destination-input");
 const destinationSearchBtn = document.getElementById("destination-search-btn");
-const destinationPickerHint = document.getElementById("destination-picker-hint");
+const destinationMapPickerBtn = document.getElementById("destination-map-picker-btn");
+const mapPinDropIndicator = document.getElementById("map-pin-drop-indicator");
+const mapPinDropCancelBtn = document.getElementById("map-pin-drop-cancel");
 const destinationPickerStatus = document.getElementById("destination-picker-status");
 const destinationActiveRow = document.getElementById("destination-active-row");
 const destinationActiveName = document.getElementById("destination-active-name");
@@ -166,6 +168,16 @@ const destinationRerouteVoiceInput = document.getElementById("destination-rerout
 const destinationRerouteVoiceHint = document.getElementById("destination-reroute-voice-hint");
 const destinationRerouteYesBtn = document.getElementById("destination-reroute-yes");
 const destinationRerouteNoBtn = document.getElementById("destination-reroute-no");
+const narrationInterruptBanner = document.getElementById("narration-interrupt-banner");
+const narrationInterruptYesBtn = document.getElementById("narration-interrupt-yes");
+const narrationInterruptNoBtn = document.getElementById("narration-interrupt-no");
+const midTourDestinationBanner = document.getElementById("mid-tour-destination-banner");
+const midTourDestinationYesBtn = document.getElementById("mid-tour-destination-yes");
+const midTourDestinationNoBtn = document.getElementById("mid-tour-destination-no");
+const longWalkBanner = document.getElementById("long-walk-banner");
+const longWalkText = document.getElementById("long-walk-text");
+const longWalkLinks = document.getElementById("long-walk-links");
+const longWalkDismissBtn = document.getElementById("long-walk-dismiss");
 const accountSignedIn = document.getElementById("account-signed-in");
 const accountGuest = document.getElementById("account-guest");
 const accountNameEl = document.getElementById("account-name");
@@ -2932,6 +2944,12 @@ async function initMap() {
 
   setupManualPanDetection();
   setupViewportPinRefresh();
+  // Item 4(B) — only ever fires for an empty-point tap: Google Maps does
+  // not bubble a marker's own click to the map's click listener, so a tap
+  // on an existing gold pin still goes through its own marker handler
+  // (buildPinPopupContent) untouched, guarded separately by
+  // awaitingMapPinDrop inside handleMapClickForPinDrop itself.
+  map.addListener("click", handleMapClickForPinDrop);
 
   // Dozens of individual DOM-backed google.maps.Marker instances (one per
   // nearby place, and this count is only going up now that pin discovery
@@ -3084,6 +3102,48 @@ function angleDiffDegrees(a, b) {
   return diff > 180 ? 360 - diff : diff;
 }
 
+// Raw consumer GPS fixes commonly jitter a couple of meters between reads
+// with no real movement (multipath, satellite reacquisition) — below this
+// threshold we treat a new fix as noise and don't move the dot at all,
+// mirroring the redraw-throttling already used for the heading/compass
+// icon above. Real moves above threshold are animated across the gap
+// instead of snapped to, so the dot glides rather than jumping.
+const MIN_MARKER_MOVE_METERS = 3;
+const MARKER_ANIMATE_MS = 300;
+let lastRenderedMarkerPosition = null; // separate from lastKnownUserPosition (raw, used by the recenter button) — this one only updates when we actually move the dot
+let markerAnimationFrame = null;
+let markerAnimationFallbackTimer = null;
+
+// Confirmed live while testing this batch (not a hypothetical): requestAnimationFrame
+// can simply never fire in some contexts (observed in a backgrounded/non-composited
+// preview tab — a bare rAF-only counter never incremented even after several
+// seconds). Relying on rAF alone for a real GPS move would then leave the
+// marker permanently stuck at its last position instead of just jittering,
+// which is worse than the bug this is fixing. The setTimeout below
+// guarantees the marker always lands on the true position within
+// durationMs regardless of whether any rAF frame ever actually ran; rAF is
+// used only for the best-effort smooth intermediate steps on top of that.
+function animateMarkerPosition(marker, fromLatLng, toLatLng, durationMs) {
+  if (markerAnimationFrame) cancelAnimationFrame(markerAnimationFrame);
+  if (markerAnimationFallbackTimer) clearTimeout(markerAnimationFallbackTimer);
+  const start = performance.now();
+  function step(now) {
+    const t = Math.min(1, (now - start) / durationMs);
+    marker.setPosition({
+      lat: fromLatLng.lat + (toLatLng.lat - fromLatLng.lat) * t,
+      lng: fromLatLng.lng + (toLatLng.lng - fromLatLng.lng) * t,
+    });
+    markerAnimationFrame = t < 1 ? requestAnimationFrame(step) : null;
+  }
+  markerAnimationFrame = requestAnimationFrame(step);
+  markerAnimationFallbackTimer = setTimeout(() => {
+    marker.setPosition(toLatLng);
+    if (markerAnimationFrame) cancelAnimationFrame(markerAnimationFrame);
+    markerAnimationFrame = null;
+    markerAnimationFallbackTimer = null;
+  }, durationMs + 50);
+}
+
 function updateUserLocationOnMap(latitude, longitude, heading) {
   if (!map) return;
   const position = { lat: latitude, lng: longitude };
@@ -3106,13 +3166,25 @@ function updateUserLocationOnMap(latitude, longitude, heading) {
   // the icon this returns isn't always applied to the marker.
   const icon = buildUserLocationIcon(effectiveHeading, bearingToDestination);
 
+  const movedMeters = lastRenderedMarkerPosition
+    ? distanceInMeters(lastRenderedMarkerPosition, { latitude, longitude })
+    : Infinity;
+  const shouldMoveMarker = !userLocationMarker || movedMeters >= MIN_MARKER_MOVE_METERS;
+
   if (!userLocationMarker) {
     userLocationMarker = new google.maps.Marker({ position, map, icon, zIndex: 1000 });
     lastRenderedHeading = effectiveHeading;
     lastRenderedBearing = bearingToDestination;
     lastRenderedMergedState = isCompassMerged;
+    lastRenderedMarkerPosition = { latitude, longitude };
   } else {
-    userLocationMarker.setPosition(position);
+    if (shouldMoveMarker) {
+      const fromPos = userLocationMarker.getPosition();
+      animateMarkerPosition(userLocationMarker, { lat: fromPos.lat(), lng: fromPos.lng() }, position, MARKER_ANIMATE_MS);
+      lastRenderedMarkerPosition = { latitude, longitude };
+    }
+    // Below-threshold jitter: leave the marker exactly where it is rather
+    // than snapping it back and forth between near-identical points.
 
     const headingChanged =
       (typeof effectiveHeading === "number") !== (typeof lastRenderedHeading === "number") ||
@@ -3134,7 +3206,7 @@ function updateUserLocationOnMap(latitude, longitude, heading) {
     hasMapCenteredOnUser = true;
     map.setCenter(position);
     map.setZoom(MAP_CITY_ZOOM);
-  } else if (!userHasManuallyPanned) {
+  } else if (!userHasManuallyPanned && shouldMoveMarker) {
     map.panTo(position);
   }
 }
@@ -3190,22 +3262,67 @@ function buildPinPopupContent(place) {
   });
   // Guided Destination pillar — this popup's normal "Tell me about this"
   // behavior above is completely untouched; this is a purely additive
-  // second button that only ever appears while the destination picker is
-  // open and specifically waiting for a pin-tap selection (Section 4's
-  // "tap a pin on the map" input method).
-  if (destinationPickerActive) {
+  // second button. Always shown whenever the pillar is on (not just while
+  // the destination picker happens to be open) — every gold pin can be
+  // selected as a wander destination at any time, including outside the
+  // picker flow entirely. See handleGuideMeHereTap for the confirm gate
+  // this now needs since it's reachable mid-tour.
+  if (ENABLE_GUIDED_DESTINATION) {
     const guideBtn = document.createElement("button");
     guideBtn.type = "button";
     guideBtn.className = "map-pin-popup-btn map-pin-popup-btn--destination";
     guideBtn.textContent = "Guide me here →";
     guideBtn.addEventListener("click", () => {
       if (activeInfoWindow) activeInfoWindow.close();
-      handleDestinationSelected(place);
+      handleGuideMeHereTap(place);
     });
     container.appendChild(guideBtn);
   }
   return container;
 }
+
+// Item 4(A-1) — the already-has-a-destination case is fully handled
+// downstream by handleDestinationSelected's existing reroute-confirm
+// banner (untouched). The new gap this closes: a tour running with NO
+// destination set yet — now reachable at any time since "Guide me here"
+// is no longer picker-gated — would otherwise silently commit via
+// setActiveDestination with zero confirm, out from under an in-progress
+// experience.
+function handleGuideMeHereTap(place) {
+  if (awaitingMapPinDrop) {
+    awaitingMapPinDrop = false;
+    hideMapPinDropIndicator();
+  }
+  if (tourStartedAt && !activeDestination) {
+    if (pendingGoldenCirclePlace || destinationRerouteCandidate || needsSuggestionPending || pendingMidTourDestination) return;
+    pendingMidTourDestination = place;
+    showMidTourDestinationBanner();
+    return;
+  }
+  handleDestinationSelected(place);
+}
+
+function showMidTourDestinationBanner() {
+  if (!midTourDestinationBanner) return;
+  midTourDestinationBanner.classList.remove("hidden");
+}
+function hideMidTourDestinationBanner() {
+  if (!midTourDestinationBanner) return;
+  midTourDestinationBanner.classList.add("hidden");
+}
+function handleMidTourDestinationYes() {
+  if (!pendingMidTourDestination) return;
+  const place = pendingMidTourDestination;
+  pendingMidTourDestination = null;
+  hideMidTourDestinationBanner();
+  handleDestinationSelected(place);
+}
+function handleMidTourDestinationNo() {
+  pendingMidTourDestination = null;
+  hideMidTourDestinationBanner();
+}
+if (midTourDestinationYesBtn) midTourDestinationYesBtn.addEventListener("click", handleMidTourDestinationYes);
+if (midTourDestinationNoBtn) midTourDestinationNoBtn.addEventListener("click", handleMidTourDestinationNo);
 
 // Adds/updates a pin for a place. isInterestMatch/isVisited/isNarratingNow/
 // relevanceTier determine its size/color (see buildPlaceMarkerIcon). Safe to
@@ -3408,11 +3525,27 @@ function samplePinIgnoredEvents() {
   }
 }
 
+// Own isolated pending-state for the golden-circle-tap-during-narration
+// confirm, deliberately separate from destinationRerouteCandidate/
+// needsSuggestionPending so this feature stays unaffected by (and doesn't
+// affect) the other pillars/confirmations.
+let pendingGoldenCirclePlace = null;
+
 // User tapped a pin's "Tell me about this →" button — narrate that place
 // immediately, bypassing the normal cooldown/discovery flow (this is an
 // explicit user request, not the passive walking-discovery pipeline).
+// While narration is actively playing, offer to interrupt instead of
+// silently doing nothing; while only isConversing (a banner/mic pipeline,
+// not narration itself) or another confirm is already pending, keep the
+// prior silent no-op rather than stacking a second popup on top.
 async function triggerNarrationForPlace(place) {
-  if (isNarrating || isConversing) return;
+  if (isNarrating) {
+    if (isConversing || pendingGoldenCirclePlace || destinationRerouteCandidate || needsSuggestionPending) return;
+    pendingGoldenCirclePlace = place;
+    showNarrationInterruptBanner();
+    return;
+  }
+  if (isConversing) return;
   await narrateAndSpeak({
     tier: "specific",
     places: [place],
@@ -3420,6 +3553,39 @@ async function triggerNarrationForPlace(place) {
     triggerPosition: lastPosition || { latitude: place.latitude, longitude: place.longitude },
   });
 }
+
+function showNarrationInterruptBanner() {
+  if (!narrationInterruptBanner) return;
+  narrationInterruptBanner.classList.remove("hidden");
+}
+function hideNarrationInterruptBanner() {
+  if (!narrationInterruptBanner) return;
+  narrationInterruptBanner.classList.add("hidden");
+}
+async function handleNarrationInterruptYes() {
+  if (!pendingGoldenCirclePlace) return;
+  const place = pendingGoldenCirclePlace;
+  pendingGoldenCirclePlace = null;
+  hideNarrationInterruptBanner();
+  // Mirrors startListening()'s existing pattern (app.js) of calling
+  // interruptPlayback() then proceeding immediately without waiting for
+  // the interrupted narrateAndSpeak's own finally block to clear
+  // isNarrating — calling triggerNarrationForPlace again here would just
+  // re-hit its isNarrating guard since that clears asynchronously.
+  interruptPlayback();
+  await narrateAndSpeak({
+    tier: "specific",
+    places: [place],
+    heading: lastHeading,
+    triggerPosition: lastPosition || { latitude: place.latitude, longitude: place.longitude },
+  });
+}
+function handleNarrationInterruptNo() {
+  pendingGoldenCirclePlace = null;
+  hideNarrationInterruptBanner();
+}
+if (narrationInterruptYesBtn) narrationInterruptYesBtn.addEventListener("click", handleNarrationInterruptYes);
+if (narrationInterruptNoBtn) narrationInterruptNoBtn.addEventListener("click", handleNarrationInterruptNo);
 
 // --- Pillar 1: proactive mid-walk depth (ENABLE_PROACTIVE_DEPTH) ---
 // Entirely new, self-contained logic that runs ALONGSIDE onLocation ->
@@ -3909,18 +4075,41 @@ async function insertGuidedTourDetour(place, reason) {
 const ENABLE_GUIDED_DESTINATION = window.ENABLE_GUIDED_DESTINATION === true;
 const DESTINATION_ARRIVAL_METERS = 25; // similar in spirit to GUIDED_TOUR_ARRIVAL_METERS (30)
 const DESTINATION_CHECK_INTERVAL_MS = 20000;
+// A genuinely stationary user (e.g. sitting still right after setting a
+// destination) only ever gets ONE qualifying GPS tick from onLocation's
+// one-shot stabilization/15m-movement gate — checkForNarration is never
+// re-driven after that for someone who doesn't physically move. This
+// timer forces one narration attempt regardless, so standing still doesn't
+// mean waiting forever. See forceFirstNarrationIfNeeded.
+const FIRST_NARRATION_FORCE_DELAY_MS = 30000;
 
 let activeDestination = null; // { name, placeId, latitude, longitude, naturalLanguageDirections, distanceMeters }
 let destinationPickerActive = false; // true only while the picker is open AND a map-pin-tap selection is a live option
 let destinationCheckInterval = null;
 let destinationRerouteCandidate = null; // pending place while the reroute confirm banner is showing
+let firstNarrationForceTimer = null;
+// Item 4(A-1) — own isolated pending-state for the mid-tour "Guide me
+// here" confirm, distinct from destinationRerouteCandidate (that one is
+// for replacing an ALREADY-set destination, handled separately) and from
+// pendingGoldenCirclePlace (narration-interrupt confirm, unrelated
+// feature) — no shared/reused state between these confirms.
+let pendingMidTourDestination = null;
+// Item 4(B) — true only while the picker's map-tap indicator is showing
+// and waiting for an arbitrary empty-point tap.
+let awaitingMapPinDrop = false;
 
 function resetGuidedDestinationState() {
   activeDestination = null;
   destinationPickerActive = false;
   destinationRerouteCandidate = null;
+  pendingMidTourDestination = null;
+  awaitingMapPinDrop = false;
+  hideMidTourDestinationBanner();
+  hideMapPinDropIndicator();
   clearInterval(destinationCheckInterval);
   destinationCheckInterval = null;
+  clearTimeout(firstNarrationForceTimer);
+  firstNarrationForceTimer = null;
   stopDestinationOrientationTracking();
   hideDestinationPicker();
   hideDestinationRerouteBanner();
@@ -4007,6 +4196,66 @@ function hideDestinationPicker() {
       checkForNarration(lastPosition.latitude, lastPosition.longitude, computeEffectiveHeading());
     }
   }
+}
+
+// Item 4(B) — backgrounds the picker (removes is-visible only, keeps
+// destinationPickerActive/isConversing/mic-suppression state intact, NOT
+// a full hideDestinationPicker() teardown) so the map underneath becomes
+// tappable for an arbitrary empty-point pin drop. See the map.addListener
+// click handler in initMap for where this resolves.
+if (destinationMapPickerBtn) {
+  destinationMapPickerBtn.addEventListener("click", () => {
+    destinationPicker.classList.remove("is-visible");
+    awaitingMapPinDrop = true;
+    showMapPinDropIndicator();
+  });
+}
+function showMapPinDropIndicator() {
+  if (!mapPinDropIndicator) return;
+  mapPinDropIndicator.classList.remove("hidden");
+}
+function hideMapPinDropIndicator() {
+  if (!mapPinDropIndicator) return;
+  mapPinDropIndicator.classList.add("hidden");
+}
+function handleMapPinDropCancel() {
+  awaitingMapPinDrop = false;
+  hideMapPinDropIndicator();
+  // No state was touched by backgrounding the picker, so restoring
+  // is-visible reopens it exactly as it was — but only if it's still
+  // meant to be open (e.g. not cancelled after the picker itself was
+  // separately closed some other way in the meantime).
+  if (destinationPickerActive) destinationPicker.classList.add("is-visible");
+}
+if (mapPinDropCancelBtn) mapPinDropCancelBtn.addEventListener("click", handleMapPinDropCancel);
+
+// Deliberately does its own /api/geocode fetch rather than reusing the
+// existing reverseGeocode() helper: that one shares a single
+// geocodeAbortController with the ambient "you're near X" location-label
+// cycle and side-effects locationName/currentCity/currentCountry directly
+// — calling it here would abort/interfere with that unrelated ongoing
+// lookup and clobber UI state that has nothing to do with a destination
+// pick. Same endpoint, no new server work, just an independent call.
+async function handleMapClickForPinDrop(event) {
+  if (!awaitingMapPinDrop) return;
+  awaitingMapPinDrop = false;
+  hideMapPinDropIndicator();
+  const lat = event.latLng.lat();
+  const lng = event.latLng.lng();
+  let locationName = null;
+  try {
+    const response = await fetch(`/api/geocode?lat=${lat}&lng=${lng}`);
+    const data = await response.json();
+    if (response.ok) locationName = data.locationName;
+  } catch (error) {
+    console.log("[destination] map pin drop reverse geocode failed:", error?.message || error);
+  }
+  handleDestinationSelected({
+    name: locationName || "Dropped pin",
+    placeId: `latlng:${lat},${lng}`,
+    latitude: lat,
+    longitude: lng,
+  });
 }
 
 if (destinationPickerCloseBtn) destinationPickerCloseBtn.addEventListener("click", hideDestinationPicker);
@@ -4097,6 +4346,21 @@ async function setActiveDestination(place) {
   destinationCheckInterval = setInterval(checkDestinationArrival, DESTINATION_CHECK_INTERVAL_MS);
 
   await fetchAndSpeakDirections();
+
+  // A stationary user (e.g. still sitting where they set this destination)
+  // may never get another qualifying GPS tick to trigger real narration —
+  // see FIRST_NARRATION_FORCE_DELAY_MS. Only relevant before the first
+  // narration of the session has happened; once it has, this is a no-op.
+  if (isFirstNarrationOfSession) {
+    statusText.textContent = "Start walking to hear your first stop.";
+    clearTimeout(firstNarrationForceTimer);
+    firstNarrationForceTimer = setTimeout(() => {
+      firstNarrationForceTimer = null;
+      if (isFirstNarrationOfSession && lastPosition) {
+        forceFirstNarrationIfNeeded(lastPosition.latitude, lastPosition.longitude, computeEffectiveHeading());
+      }
+    }, FIRST_NARRATION_FORCE_DELAY_MS);
+  }
 }
 
 // Directions are spoken as an ADDITIONAL element woven into the existing
@@ -4125,6 +4389,35 @@ async function setActiveDestination(place) {
 // edge, clearly preferable to the alternative this replaces (the entire
 // tour appearing frozen for the whole duration).
 let isSpeakingDirections = false;
+const LONG_WALK_THRESHOLD_SECONDS = 45 * 60;
+
+// Non-blocking, dismissible, own isolated state (doesn't gate
+// isNarrating/isConversing, doesn't reuse any pillar's pending-variable)
+// — a heads-up, not a gate on proceeding on foot.
+function showLongWalkWarning(durationSeconds, destLat, destLng) {
+  if (!longWalkBanner) return;
+  const minutes = Math.round(durationSeconds / 60);
+  longWalkText.textContent = `This walk is about ${minutes} minutes. Prefer not to walk it?`;
+  longWalkLinks.innerHTML = "";
+  [
+    { label: "Transit directions", url: `https://www.google.com/maps/dir/?api=1&destination=${destLat},${destLng}&travelmode=transit` },
+    { label: "Driving directions", url: `https://www.google.com/maps/dir/?api=1&destination=${destLat},${destLng}&travelmode=driving` },
+    { label: "Waze", url: `https://waze.com/ul?ll=${destLat},${destLng}&navigate=yes` },
+  ].forEach(({ label, url }) => {
+    const a = document.createElement("a");
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = label;
+    longWalkLinks.appendChild(a);
+  });
+  longWalkBanner.classList.remove("hidden");
+}
+function hideLongWalkWarning() {
+  if (!longWalkBanner) return;
+  longWalkBanner.classList.add("hidden");
+}
+if (longWalkDismissBtn) longWalkDismissBtn.addEventListener("click", hideLongWalkWarning);
 
 async function fetchAndSpeakDirections() {
   if (!activeDestination || !lastPosition) return;
@@ -4146,11 +4439,21 @@ async function fetchAndSpeakDirections() {
       return;
     }
     activeDestination.distanceMeters = data.distanceMeters;
-    data.naturalLanguageDirections
+    const sentences = data.naturalLanguageDirections
       .split(/(?<=[.!?])\s+/)
       .map((sentence) => sentence.trim())
-      .filter(Boolean)
-      .forEach((sentence) => enqueueTtsSentence(sentence));
+      .filter(Boolean);
+    // Item 5 — durationSeconds was already being computed and returned by
+    // /api/get-directions (server.js), just never read on the client until
+    // now. No second Directions API call needed.
+    if (data.durationSeconds > LONG_WALK_THRESHOLD_SECONDS) {
+      const minutes = Math.round(data.durationSeconds / 60);
+      sentences.unshift(
+        `Just so you know, this walk is about ${minutes} minutes — I've added transit and driving options below if you'd rather not walk.`
+      );
+      showLongWalkWarning(data.durationSeconds, activeDestination.latitude, activeDestination.longitude);
+    }
+    sentences.forEach((sentence) => enqueueTtsSentence(sentence));
     await waitForTtsQueueDrain();
   } catch (error) {
     console.log("[destination] fetchAndSpeakDirections failed, skipping:", error?.message || error);
@@ -5612,6 +5915,17 @@ async function startTour() {
     geoClearWatch(watchId);
   }
 
+  // Hide the idle "Start Tour" prompt as soon as a session is committed to
+  // starting, not only once real narration begins (startStory() below) —
+  // the tour-loading overlay that visually covers it can be dismissed
+  // early by ANY audio playing (see the audioPlayer "play" listener), e.g.
+  // walking-directions TTS from a just-set Guided Destination, well before
+  // narration itself has fired. Without this, that reveals a still-live
+  // "Start Tour" button whose handler unconditionally reopens mode
+  // selection and (via a fresh startTour()) destroys the destination the
+  // user just set.
+  startPrompt.classList.add("hidden");
+
   recentPositions = [];
   travelHistory = [];
   gpsStabilized = false;
@@ -6052,6 +6366,13 @@ async function checkForNarration(latitude, longitude, heading) {
 // STEP 1 - orient the user to the neighborhood they've just arrived in.
 // Sorted by actual distance (not prominence) so we never grab a famous but
 // far-away neighborhood over the one the user is actually standing in.
+// Returns whether it actually narrated something (false on the silent
+// "nearest place already narrated/visited" no-op) — its one existing
+// caller (checkForNarration, just above) discards this and unconditionally
+// returns right after either way, so this is purely additive and doesn't
+// change that path. Added so forceFirstNarrationIfNeeded (below) can tell
+// the difference and fall back to a different content source instead of
+// also silently producing nothing.
 async function runNeighborhoodOrientation(latitude, longitude) {
   statusText.textContent = "Getting your bearings...";
 
@@ -6067,10 +6388,31 @@ async function runNeighborhoodOrientation(latitude, longitude) {
 
   if (!place || narratedPlaceIds.has(place.placeId) || visitedPlaceIds.has(place.placeId)) {
     statusText.textContent = "Keep walking, discovering...";
-    return;
+    return false;
   }
 
   await narrateAndSpeak({ tier: "neighborhood", place, triggerPosition: { latitude, longitude } });
+  return true;
+}
+
+// Forces one narration attempt outside the normal movement-triggered path
+// — used only by the 30-second first-narration timer (see
+// FIRST_NARRATION_FORCE_DELAY_MS) for a user who set a destination and
+// then stayed put, since onLocation's one-shot movement gate never
+// re-drives checkForNarration for someone who doesn't physically move.
+// Deliberately does NOT call checkForNarration itself — this mirrors only
+// its isOriented branch, plus a fallback runSpecificZoomIn attempt if
+// runNeighborhoodOrientation silently no-ops (nearest place already
+// narrated/visited), so a forced attempt can't also go silent. Normal
+// moving-user behavior via checkForNarration is completely untouched.
+async function forceFirstNarrationIfNeeded(latitude, longitude, heading) {
+  if (isNarrating || isConversing || plannedTourActive || !isFirstNarrationOfSession) return;
+  if (!isOriented) {
+    const narrated = await runNeighborhoodOrientation(latitude, longitude);
+    if (!narrated) await runSpecificZoomIn(latitude, longitude, heading);
+  } else {
+    await runSpecificZoomIn(latitude, longitude, heading);
+  }
 }
 
 // STEP 2 - once oriented and still within range, fetch the nearest points

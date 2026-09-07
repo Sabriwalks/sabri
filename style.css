@@ -1157,6 +1157,70 @@ body {
   cursor: pointer;
 }
 
+/* Item 5 — long-walk warning's transit/driving deep links, built via
+   document.createElement (see checkLongWalkWarning in app.js), not
+   innerHTML. Plain anchors styled like small pills, not buttons. */
+.long-walk-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.long-walk-links a {
+  border: 1px solid var(--border);
+  color: var(--gold);
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  text-decoration: none;
+}
+
+/* Item 4(B) — real "choose from map" control replacing the old passive
+   hint paragraph, plus the non-blocking indicator shown while the
+   destination picker is backgrounded so the map underneath is tappable
+   (see awaitingMapPinDrop in app.js). The indicator is sized to content
+   only, NOT full-screen like .destination-picker, so it never blocks
+   clicks to the map around it. */
+.destination-map-picker-btn {
+  border: none;
+  background: none;
+  color: var(--gold);
+  font-size: 12px;
+  text-decoration: underline;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.map-pin-drop-indicator {
+  position: fixed;
+  left: 50%;
+  top: calc(env(safe-area-inset-top) + 16px);
+  transform: translateX(-50%);
+  z-index: 310;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(15, 27, 45, 0.97);
+  border: 1px solid var(--border);
+  color: var(--white);
+  font-size: 13px;
+  box-shadow: 0 8px 24px var(--warm-shadow);
+}
+
+.map-pin-drop-indicator button {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
 .settings-toggle-row {
   display: flex;
   align-items: center;
