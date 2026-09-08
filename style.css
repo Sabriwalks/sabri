@@ -139,6 +139,40 @@ body {
   background: var(--bg-elevated);
 }
 
+/* Map rotation feature — raster-fallback path only (non-WebGL devices,
+   confirmed live: map.setHeading() has no visual effect on raster tiles,
+   so rotation has to be simulated here instead). Only applied when
+   renderingtype_changed reports RASTER (see initMap in app.js) — the
+   primary vector path uses native setHeading() and never gets this class.
+   scale(1.8) keeps the rotated content covering the full viewport at any
+   angle (a plain rotate() on a corner-to-corner div otherwise leaves
+   background gaps at the corners) — 1.8x comfortably covers typical
+   mobile aspect ratios; transition is eased rather than snapping, since a
+   full-viewport CSS rotation reads as far more jarring per degree of
+   jitter than the small heading-arrow icon this app already throttles. */
+/* Planned-tour numbered stop markers — replaces the old legacy-Marker
+   icon+label combo (SymbolPath.CIRCLE + a label object), which
+   AdvancedMarkerElement doesn't support; same look as a real DOM node.
+   32px = 2x the old scale:16 circle radius. */
+.planned-tour-stop-marker {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #D4A853;
+  border: 1.5px solid #0F1B2D;
+  color: #0F1B2D;
+  font-weight: 700;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.map-rotation-fallback {
+  transform: rotate(var(--map-rotation-deg, 0deg)) scale(1.8);
+  transition: transform 0.3s ease-out;
+}
+
 /* Persona chip — small visual anchor for "who's talking to you". Floats
    below the header, hidden until a persona resolves for the current city
    (see ensurePersonaForCity/updatePersonaChip in app.js). */

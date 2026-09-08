@@ -912,8 +912,11 @@ function renderIndexHtml() {
   // this site's HTTP referrers in the Google Cloud Console.
   // libraries=places powers the tour planner's start/end location
   // autocomplete inputs (google.maps.places.Autocomplete — see app.js).
+  // libraries=marker is required for google.maps.marker.AdvancedMarkerElement
+  // (map rotation feature — markers need to be real DOM nodes, not legacy
+  // Marker's baked icons, to render correctly under a rotated vector map).
   const mapsScript = GOOGLE_MAPS_API_KEY
-    ? `<script src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}&loading=async&libraries=places" async defer></script>`
+    ? `<script src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}&loading=async&libraries=places,marker" async defer></script>`
     : "";
 
   return html

@@ -465,7 +465,7 @@ let isOriented = false;
 const narratedPlaceIds = new Set();
 
 // Which place's map pin currently shows the pulsing "narrating now" ring —
-// see buildPlaceMarkerIcon()/refreshAllPlaceMarkers() in the map module.
+// see buildPlaceMarkerContent()/refreshAllPlaceMarkers() in the map module.
 let narratingPlaceId = null;
 
 // Short-term memory: every narration and every question/answer pair, sent
@@ -2856,7 +2856,18 @@ window.addEventListener("appinstalled", () => {
 // as the tour progresses. See initMap() below for the warm custom style.
 
 // Warm, sandy/parchment style tuned for bright-sunlight readability — the
-// opposite of a typical dark/night map style.
+// opposite of a typical dark/night map style. NOT passed to the map
+// constructor — Map ID a0d0c80a3c969a99a42b6538 has this exact style
+// linked to it in Google Cloud Console instead (local `styles:` JSON is
+// documented as unavailable whenever a mapId is set, vector or raster —
+// "use cloud-based maps styling instead"). Kept here only as the source
+// this array is applied to `map` directly as a last-resort fallback if the
+// map is ever observed rendering in RASTER mode (see initMap) — Cloud
+// Console styling covers vector reliably; raster-fallback coverage isn't
+// fully confirmed in this environment, so this is a defensive belt-and-
+// suspenders backup, not the primary styling mechanism. See
+// MAP_STYLE_BACKUP.md for the same array preserved as a Cloud-Console
+// migration reference.
 const MAP_STYLE = [
   { elementType: "geometry", stylers: [{ color: "#F2E9DA" }] },
   { elementType: "labels.text.fill", stylers: [{ color: "#3A2F22" }] },
@@ -2954,6 +2965,25 @@ function waitForMarkerClusterer(timeoutMs = 5000) {
 // the constructor/class itself).
 let mapMarkerClusterer = null;
 
+// Map rotation feature — Map ID created + styled in Google Cloud Console
+// (see MAP_STYLE_BACKUP.md), verified live before this feature was built:
+// loading a standalone test page with this exact Map ID rendered the
+// correct sandy/parchment style with map.getRenderingType() === "VECTOR".
+const MAP_ID = "a0d0c80a3c969a99a42b6538";
+
+// "VECTOR" (native map.setHeading() rotation), "RASTER" (silent fallback
+// on non-WebGL devices — needs the CSS-transform rotation path instead),
+// or null (not yet known). Set via the renderingtype_changed listener
+// below, not polled — querying map.getRenderingType() immediately after
+// construction was observed live to return "UNINITIALIZED" unreliably for
+// a few seconds even on a device that ends up rendering VECTOR.
+let mapRenderingType = null;
+// The heading currently applied to the map (native setHeading value, or
+// the CSS rotation degrees in the raster fallback) — tracked locally
+// rather than read back from the map, for the same reason: querying
+// map.getHeading() right after setHeading() was unreliable in testing.
+let currentMapHeading = 0;
+
 async function initMap() {
   if (!mapEl) {
     console.log("[map] initMap aborted — #map element not found in DOM");
@@ -2964,7 +2994,9 @@ async function initMap() {
   console.log("[map] Google Maps JS API ready, creating map instance");
 
   // Neutral world view — no specific city — until the user's real GPS fix
-  // re-centers this (see updateUserLocationOnMap).
+  // re-centers this (see updateUserLocationOnMap). No local `styles:` here
+  // — see the MAP_STYLE comment above for why (Cloud Console owns styling
+  // once a mapId is set).
   map = new google.maps.Map(mapEl, {
     center: { lat: 20, lng: 0 },
     zoom: MAP_WORLD_ZOOM,
@@ -2976,9 +3008,32 @@ async function initMap() {
     // choice). Re-verified this is still the right call while investigating
     // the sluggish pan/zoom complaint — gestureHandling wasn't the cause.
     gestureHandling: "greedy",
-    styles: MAP_STYLE,
+    mapId: MAP_ID,
   });
   console.log("[map] map instance created");
+
+  map.addListener("renderingtype_changed", () => {
+    mapRenderingType = String(map.getRenderingType());
+    console.log("[map] renderingtype_changed ->", mapRenderingType);
+    if (mapRenderingType === "RASTER") {
+      // Confirmed live-tested behavior this compensates for: a CSS
+      // transform on #map (the only way to rotate a raster map — there's
+      // no native setHeading() for it) rotates EVERYTHING inside as one
+      // DOM subtree, markers included — unlike native vector setHeading(),
+      // which was confirmed live to leave AdvancedMarkerElement content
+      // upright automatically. So only the raster fallback needs per-
+      // marker counter-rotation (see applyMarkerCounterRotation);
+      // isUsingRasterFallback() below is what every rotation-aware call
+      // site checks to decide whether to bother.
+      mapEl.classList.add("map-rotation-fallback");
+      // Cloud Console styling is confirmed to cover the vector case (this
+      // is the map actually verified live before building this feature);
+      // raster-fallback coverage isn't confirmed in this environment, so
+      // apply the local MAP_STYLE array as a defensive backup specifically
+      // for this branch, not as the default path.
+      map.setOptions({ styles: MAP_STYLE });
+    }
+  });
 
   setupManualPanDetection();
   setupViewportPinRefresh();
@@ -3007,6 +3062,41 @@ async function initMap() {
 
 initMap();
 
+function isUsingRasterFallback() {
+  return mapRenderingType === "RASTER";
+}
+
+// Rotates the map view to face `heading` (a compass bearing, 0-360) —
+// native map.setHeading() on vector rendering (confirmed live: keeps
+// AdvancedMarkerElement content upright automatically, no counter-rotation
+// needed), or the CSS-transform fallback on raster (see
+// .map-rotation-fallback in style.css) for the rare non-WebGL device.
+// Throttled by the same COMPASS_REDRAW_THRESHOLD_DEGREES the heading-arrow
+// icon already uses (see buildUserLocationSvgString) rather than a second
+// threshold — one throttle to reason about, not two.
+function applyMapHeading(heading) {
+  if (!map || typeof heading !== "number" || Number.isNaN(heading)) return;
+  if (angleDiffDegrees(heading, currentMapHeading) <= COMPASS_REDRAW_THRESHOLD_DEGREES) return;
+  currentMapHeading = heading;
+  if (isUsingRasterFallback()) {
+    // Real bug caught live while testing this batch: the fallback class
+    // was only ever added inside initMap's renderingtype_changed listener
+    // — if that event doesn't (yet) fire, mapRenderingType could already
+    // read "RASTER" with the class still missing. classList.add is
+    // idempotent, so applying it here too on every raster heading update
+    // costs nothing and closes that gap.
+    mapEl.classList.add("map-rotation-fallback");
+    mapEl.style.setProperty("--map-rotation-deg", `${-heading}deg`);
+    // Real bug caught live while testing this batch: this call was
+    // missing entirely — marker counter-rotation was defined but never
+    // actually wired to fire on a heading change, so raster-fallback
+    // markers would have silently stayed un-counter-rotated forever.
+    refreshAllMarkerCounterRotations();
+  } else if (typeof map.setHeading === "function") {
+    map.setHeading(heading);
+  }
+}
+
 // Guided Destination pillar — two-arrow redesign, replacing the old
 // separate single-arrow DOM element entirely (removed). Arrow 1 (heading)
 // is genuinely "existing behavior, keep as-is" — same shape/position as
@@ -3025,9 +3115,57 @@ initMap();
 const COMPASS_ARROW_COLOR = "#0F1B2D";
 const COMPASS_GLOW_COLOR = "#D4A853";
 
-function buildUserLocationIcon(heading, bearingToDestination) {
+// Marker rotation registry (map-rotation feature, raster-fallback path
+// only) — AdvancedMarkerElement content confirmed LIVE to stay screen-
+// upright automatically under native vector map.setHeading(), so vector
+// mode needs zero counter-rotation code. Raster fallback has no native
+// rotation at all — #map itself gets CSS-rotated (see
+// .map-rotation-fallback), which rotates every DOM descendant uniformly,
+// markers included — so THAT path needs each marker's outer wrapper
+// counter-rotated by the same angle to stay upright. One shared registry
+// for every marker type (user-location, place pins, planned-tour stops)
+// rather than three separate mechanisms.
+const rotatableMarkerWrappers = new Set();
+
+function applyMarkerCounterRotation(wrapper) {
+  const counterDeg = isUsingRasterFallback() ? currentMapHeading : 0;
+  wrapper.style.transform = `translate(-50%, -50%) rotate(${counterDeg}deg)`;
+}
+
+function registerRotatableMarkerWrapper(wrapper) {
+  rotatableMarkerWrappers.add(wrapper);
+  applyMarkerCounterRotation(wrapper);
+}
+
+function unregisterRotatableMarkerWrapper(wrapper) {
+  rotatableMarkerWrappers.delete(wrapper);
+}
+
+// Called only from applyMapHeading's raster branch — vector mode never
+// touches this (0 marker updates, confirmed unnecessary live).
+function refreshAllMarkerCounterRotations() {
+  rotatableMarkerWrappers.forEach(applyMarkerCounterRotation);
+}
+
+// Builds the user-location marker's DOM content (a <div> wrapping an
+// inline SVG) for AdvancedMarkerElement — replaces the old data:-URI icon
+// object. mapHeading is whatever's currently applied to the map (0 if
+// rotation isn't active yet) — Arrow 1/Arrow 2 are drawn relative to it,
+// not to true north, so they read correctly once the map itself is
+// oriented to face the user's heading: derivation (verified against the
+// live-tested fact that marker content does NOT auto-rotate with the
+// vector map) is that each arrow's on-screen angle should equal
+// (its true compass bearing − the map's current heading) — when heading
+// tracking is active and the map is kept in sync with the user's own
+// heading, this makes Arrow 1 simply point straight up, and Arrow 2 point
+// exactly which way to turn toward the destination. With no rotation
+// active (mapHeading stays 0), this reduces to the exact original
+// absolute-from-north formula — unchanged behavior for anyone who never
+// gets/grants compass permission.
+function buildUserLocationSvgString(heading, bearingToDestination, mapHeading) {
   const hasHeading = typeof heading === "number" && !Number.isNaN(heading);
   const hasDestinationBearing = typeof bearingToDestination === "number" && !Number.isNaN(bearingToDestination);
+  const effectiveMapHeading = typeof mapHeading === "number" ? mapHeading : 0;
 
   let merged = false;
   if (hasHeading && hasDestinationBearing) {
@@ -3039,11 +3177,11 @@ function buildUserLocationIcon(heading, bearingToDestination) {
   isCompassMerged = merged;
 
   // Real field bug this fixes: the previous <animate> pulse looked broken
-  // in practice, not smooth — because this whole icon is a fresh data: URI
-  // on every setIcon() call (see updateUserLocationOnMap's throttling
-  // comment below), any in-flight SMIL animation gets thrown away and
-  // restarted from frame zero on every redraw, which reads as a flicker/
-  // tick rather than a pulse. A static glow (no animation) renders
+  // in practice, not smooth — because this whole icon used to be a fresh
+  // data: URI on every redraw (see the throttling comment on
+  // COMPASS_REDRAW_THRESHOLD_DEGREES below), so any in-flight SMIL
+  // animation got thrown away and restarted from frame zero, reading as a
+  // flicker/tick rather than a pulse. A static glow (no animation) renders
   // identically regardless of how often the icon gets redrawn, and still
   // reads as a clear "aligned" signal via the halo appearing/disappearing.
   const glow = merged
@@ -3051,22 +3189,24 @@ function buildUserLocationIcon(heading, bearingToDestination) {
       `<circle cx="28" cy="28" r="23" fill="none" stroke="${COMPASS_GLOW_COLOR}" stroke-width="9" opacity="0.16"/>`
     : "";
 
+  const headingRotation = hasHeading ? (((heading - effectiveMapHeading) % 360) + 360) % 360 : 0;
   const headingArrow = hasHeading
-    ? `<g transform="rotate(${heading} 28 28)"><path d="M28 6 L34 20 L28 15 L22 20 Z" fill="${COMPASS_ARROW_COLOR}"/></g>`
+    ? `<g transform="rotate(${headingRotation} 28 28)"><path d="M28 6 L34 20 L28 15 L22 20 Z" fill="${COMPASS_ARROW_COLOR}"/></g>`
     : "";
   // Un-merged: a plain, un-glowing outline (per spec, "returns to its
   // plain, un-glowing rotating-indicator state"). Merged: solid, matching
   // Arrow 1, with the shared halo above signaling alignment instead of
   // the arrows changing color themselves.
+  const destinationRotation = hasDestinationBearing ? (((bearingToDestination - effectiveMapHeading) % 360) + 360) % 360 : 0;
   const destinationArrow = hasDestinationBearing
-    ? `<g transform="rotate(${bearingToDestination} 28 28)">` +
+    ? `<g transform="rotate(${destinationRotation} 28 28)">` +
       (merged
         ? `<path d="M28 2 L37 22 L28 17 L19 22 Z" fill="${COMPASS_ARROW_COLOR}"/>`
         : `<path d="M28 2 L35 19 L28 14 L21 19 Z" fill="none" stroke="${COMPASS_ARROW_COLOR}" stroke-width="1.5" opacity="0.6"/>`) +
       `</g>`
     : "";
 
-  const svg =
+  return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="56" height="56" viewBox="0 0 56 56">` +
     `<circle cx="28" cy="28" r="18" fill="#D4A853" fill-opacity="0.22"/>` +
     `<circle cx="28" cy="28" r="10" fill="#D4A853" fill-opacity="0.45"/>` +
@@ -3074,12 +3214,21 @@ function buildUserLocationIcon(heading, bearingToDestination) {
     `${destinationArrow}` +
     `${headingArrow}` +
     `<circle cx="28" cy="28" r="6" fill="#D4A853" stroke="#FAF7F2" stroke-width="2"/>` +
-    `</svg>`;
-  return {
-    url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg),
-    scaledSize: new google.maps.Size(56, 56),
-    anchor: new google.maps.Point(28, 28),
-  };
+    `</svg>`
+  );
+}
+
+// Marker-creation path: a fresh wrapper. Update path (see
+// updateUserLocationOnMap) mutates innerHTML on the SAME wrapper instead —
+// no full node/content replacement needed for a redraw, unlike the old
+// data:-URI setIcon() approach this replaces.
+function buildUserLocationContent(heading, bearingToDestination, mapHeading) {
+  const wrapper = document.createElement("div");
+  wrapper.style.width = "56px";
+  wrapper.style.height = "56px";
+  wrapper.innerHTML = buildUserLocationSvgString(heading, bearingToDestination, mapHeading);
+  registerRotatableMarkerWrapper(wrapper); // sets the centering transform (and raster counter-rotation, if applicable)
+  return wrapper;
 }
 
 // Set true the moment the user manually drags the map (see
@@ -3165,17 +3314,19 @@ function animateMarkerPosition(marker, fromLatLng, toLatLng, durationMs) {
   if (markerAnimationFrame) cancelAnimationFrame(markerAnimationFrame);
   if (markerAnimationFallbackTimer) clearTimeout(markerAnimationFallbackTimer);
   const start = performance.now();
+  // AdvancedMarkerElement uses a plain settable `.position` property, not
+  // legacy Marker's setPosition() method.
   function step(now) {
     const t = Math.min(1, (now - start) / durationMs);
-    marker.setPosition({
+    marker.position = {
       lat: fromLatLng.lat + (toLatLng.lat - fromLatLng.lat) * t,
       lng: fromLatLng.lng + (toLatLng.lng - fromLatLng.lng) * t,
-    });
+    };
     markerAnimationFrame = t < 1 ? requestAnimationFrame(step) : null;
   }
   markerAnimationFrame = requestAnimationFrame(step);
   markerAnimationFallbackTimer = setTimeout(() => {
-    marker.setPosition(toLatLng);
+    marker.position = toLatLng;
     if (markerAnimationFrame) cancelAnimationFrame(markerAnimationFrame);
     markerAnimationFrame = null;
     markerAnimationFallbackTimer = null;
@@ -3186,23 +3337,22 @@ function updateUserLocationOnMap(latitude, longitude, heading) {
   if (!map) return;
   const position = { lat: latitude, lng: longitude };
   lastKnownUserPosition = position;
-  // Guided Destination pillar — Arrow 1 prefers live device-compass
-  // heading (via deviceOrientationHeading, tracked only once a
-  // destination is active — see startDestinationOrientationTracking) over
-  // GPS course-of-travel whenever it's available, since GPS heading is
-  // null/absent while stationary, exactly when someone pausing to check
-  // direction needs it most. Arrow 2 (bearing to activeDestination) is
-  // pure geometry, no permission needed. Both are entirely absent with no
-  // active destination — bearingToDestination stays null, which
-  // buildUserLocationIcon treats as "today's single-heading-arrow
-  // behavior," unchanged from before this pillar existed.
-  const effectiveHeading = activeDestination && deviceOrientationHeading !== null ? deviceOrientationHeading : heading;
+  // Arrow 1 (and, once granted, map rotation itself) prefers live device-
+  // compass heading over GPS course-of-travel whenever it's available,
+  // since GPS heading is null/absent while stationary, exactly when
+  // someone pausing to check direction needs it most. No longer gated on
+  // activeDestination — compass tracking now starts in plain Wander mode
+  // too (see startCompassTracking's Wander-mode call site), so this
+  // should prefer it there as well, not just during Guided Destination.
+  // Arrow 2 (bearing to activeDestination) is pure geometry, no permission
+  // needed, and stays entirely absent with no active destination.
+  const effectiveHeading = deviceOrientationHeading !== null ? deviceOrientationHeading : heading;
   const bearingToDestination = activeDestination ? bearingDegreesTo({ latitude, longitude }, activeDestination) : null;
-  // Always computed (cheap — just updates the merge hysteresis state
-  // machine, which must stay correct every tick regardless of whether we
-  // actually redraw) — see the redraw-throttling comment above for why
-  // the icon this returns isn't always applied to the marker.
-  const icon = buildUserLocationIcon(effectiveHeading, bearingToDestination);
+
+  // Map-rotation feature — reuses this same effectiveHeading, not a
+  // second heading pipeline. Internally throttled/no-ops if unchanged or
+  // invalid; safe to call every tick.
+  applyMapHeading(effectiveHeading);
 
   const movedMeters = lastRenderedMarkerPosition
     ? distanceInMeters(lastRenderedMarkerPosition, { latitude, longitude })
@@ -3210,15 +3360,26 @@ function updateUserLocationOnMap(latitude, longitude, heading) {
   const shouldMoveMarker = !userLocationMarker || movedMeters >= MIN_MARKER_MOVE_METERS;
 
   if (!userLocationMarker) {
-    userLocationMarker = new google.maps.Marker({ position, map, icon, zIndex: 1000 });
+    userLocationMarker = new google.maps.marker.AdvancedMarkerElement({
+      position,
+      map,
+      content: buildUserLocationContent(effectiveHeading, bearingToDestination, currentMapHeading),
+      zIndex: 1000,
+    });
     lastRenderedHeading = effectiveHeading;
     lastRenderedBearing = bearingToDestination;
     lastRenderedMergedState = isCompassMerged;
     lastRenderedMarkerPosition = { latitude, longitude };
+    // Wander-mode compass-permission flow (Option B, decided in the design
+    // pass) — fires here, once the user's own marker first renders, not on
+    // the Wander-button tap itself. Reuses the exact mechanism/one-shot
+    // guard Guided Destination already used (now shared, see
+    // startCompassTracking) — if a destination was already active at this
+    // exact moment and already requested it, this is a harmless no-op.
+    startCompassTracking();
   } else {
     if (shouldMoveMarker) {
-      const fromPos = userLocationMarker.getPosition();
-      animateMarkerPosition(userLocationMarker, { lat: fromPos.lat(), lng: fromPos.lng() }, position, MARKER_ANIMATE_MS);
+      animateMarkerPosition(userLocationMarker, lastRenderedMarkerPosition ? { lat: lastRenderedMarkerPosition.latitude, lng: lastRenderedMarkerPosition.longitude } : position, position, MARKER_ANIMATE_MS);
       lastRenderedMarkerPosition = { latitude, longitude };
     }
     // Below-threshold jitter: leave the marker exactly where it is rather
@@ -3233,7 +3394,12 @@ function updateUserLocationOnMap(latitude, longitude, heading) {
     const mergedChanged = isCompassMerged !== lastRenderedMergedState;
 
     if (headingChanged || bearingChanged || mergedChanged) {
-      userLocationMarker.setIcon(icon);
+      // Mutates the existing wrapper's innerHTML in place — no full
+      // content-node replacement needed, unlike the old setIcon()-with-a-
+      // fresh-data-URI approach this replaces (a real DOM node update is
+      // exactly the "rotate in place with zero recreation" this app's own
+      // prior code comment predicted AdvancedMarkerElement would enable).
+      userLocationMarker.content.innerHTML = buildUserLocationSvgString(effectiveHeading, bearingToDestination, currentMapHeading);
       lastRenderedHeading = effectiveHeading;
       lastRenderedBearing = bearingToDestination;
       lastRenderedMergedState = isCompassMerged;
@@ -3259,7 +3425,13 @@ function updateUserLocationOnMap(latitude, longitude, heading) {
 // wasn't judged worth showing — size just communicates how worth it.
 const RELEVANCE_TIER_SIZES = { high: 24, medium: 18, low: 12 };
 
-function buildPlaceMarkerIcon({ isInterestMatch, isVisited, isNarratingNow, relevanceTier }) {
+// Circular dots read identically at any rotation, so this content needs no
+// heading-relative math at all (unlike the user-location marker's
+// directional arrows) — still registered in rotatableMarkerWrappers for
+// the shared centering transform (AdvancedMarkerElement anchors content
+// bottom-center by default, like a pin-drop; these are meant to be
+// center-anchored like the old icon's `anchor: Point(20,20)` was).
+function buildPlaceMarkerContent({ isInterestMatch, isVisited, isNarratingNow, relevanceTier }) {
   const tierSize = RELEVANCE_TIER_SIZES[relevanceTier] || 18;
   const size = isNarratingNow ? 30 : isInterestMatch ? 26 : isVisited ? 14 : tierSize;
   const color = isVisited && !isNarratingNow ? "#B8A898" : "#D4A853";
@@ -3274,11 +3446,12 @@ function buildPlaceMarkerIcon({ isInterestMatch, isVisited, isNarratingNow, rele
     `${ringSvg}` +
     `<circle cx="20" cy="20" r="${size / 2}" fill="${color}" stroke="#0F1B2D" stroke-width="1.5"/>` +
     `</svg>`;
-  return {
-    url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg),
-    scaledSize: new google.maps.Size(40, 40),
-    anchor: new google.maps.Point(20, 20),
-  };
+  const wrapper = document.createElement("div");
+  wrapper.style.width = "40px";
+  wrapper.style.height = "40px";
+  wrapper.innerHTML = svg;
+  registerRotatableMarkerWrapper(wrapper);
+  return wrapper;
 }
 
 function buildPinPopupContent(place) {
@@ -3363,7 +3536,7 @@ if (midTourDestinationYesBtn) midTourDestinationYesBtn.addEventListener("click",
 if (midTourDestinationNoBtn) midTourDestinationNoBtn.addEventListener("click", handleMidTourDestinationNo);
 
 // Adds/updates a pin for a place. isInterestMatch/isVisited/isNarratingNow/
-// relevanceTier determine its size/color (see buildPlaceMarkerIcon). Safe to
+// relevanceTier determine its size/color (see buildPlaceMarkerContent). Safe to
 // call repeatedly for the same placeId — just updates the existing marker.
 // New markers are handed to the clusterer (see initMap) instead of being
 // added to the map directly, so pan/zoom doesn't have to reposition every
@@ -3383,13 +3556,12 @@ function upsertPlaceMarker(place, { isInterestMatch, relevanceTier } = {}) {
   const isVisited = narratedPlaceIds.has(place.placeId) || visitedPlaceIds.has(place.placeId);
   const isNarratingNow = narratingPlaceId === place.placeId;
   const resolvedTier = relevanceTier || place.relevanceTier;
-  const icon = buildPlaceMarkerIcon({ isInterestMatch: resolvedIsInterestMatch, isVisited, isNarratingNow, relevanceTier: resolvedTier });
 
   let marker = placeMarkersByPlaceId.get(place.placeId);
   if (!marker) {
-    marker = new google.maps.Marker({
+    marker = new google.maps.marker.AdvancedMarkerElement({
       position: { lat: place.latitude, lng: place.longitude },
-      icon,
+      content: buildPlaceMarkerContent({ isInterestMatch: resolvedIsInterestMatch, isVisited, isNarratingNow, relevanceTier: resolvedTier }),
       zIndex: isNarratingNow ? 900 : resolvedIsInterestMatch ? 500 : 200,
     });
     marker.addListener("click", () => {
@@ -3406,14 +3578,15 @@ function upsertPlaceMarker(place, { isInterestMatch, relevanceTier } = {}) {
     if (mapMarkerClusterer) {
       mapMarkerClusterer.addMarker(marker);
     } else {
-      marker.setMap(map);
+      marker.map = map;
     }
     placeMarkersByPlaceId.set(place.placeId, marker);
     console.log(`[map] pin added for "${place.name}" (total pins: ${placeMarkersByPlaceId.size})`);
     pinsEverLoaded = true;
     clearTimeout(noPinsToastTimeout);
   } else {
-    marker.setIcon(icon);
+    unregisterRotatableMarkerWrapper(marker.content);
+    marker.content = buildPlaceMarkerContent({ isInterestMatch: resolvedIsInterestMatch, isVisited, isNarratingNow, relevanceTier: resolvedTier });
   }
 }
 
@@ -3527,14 +3700,13 @@ function refreshAllPlaceMarkers() {
   for (const [placeId, marker] of placeMarkersByPlaceId) {
     const isVisited = narratedPlaceIds.has(placeId) || visitedPlaceIds.has(placeId);
     const isNarratingNow = narratingPlaceId === placeId;
-    marker.setIcon(
-      buildPlaceMarkerIcon({
-        isInterestMatch: interestPlaceIds.has(placeId),
-        isVisited,
-        isNarratingNow,
-        relevanceTier: marker.sabriRelevanceTier,
-      })
-    );
+    unregisterRotatableMarkerWrapper(marker.content);
+    marker.content = buildPlaceMarkerContent({
+      isInterestMatch: interestPlaceIds.has(placeId),
+      isVisited,
+      isNarratingNow,
+      relevanceTier: marker.sabriRelevanceTier,
+    });
   }
 }
 
@@ -4148,7 +4320,14 @@ function resetGuidedDestinationState() {
   destinationCheckInterval = null;
   clearTimeout(firstNarrationForceTimer);
   firstNarrationForceTimer = null;
-  stopDestinationOrientationTracking();
+  // Session-start clean slate (this function's only caller is startTour())
+  // — a fresh startCompassTracking() call re-attaches once the new
+  // session's first marker renders. Map rotation now keeps compass
+  // tracking running for the whole tour, not just while a destination is
+  // active, so this is NOT called from stopGuidedDestination/
+  // checkDestinationArrival anymore (destination ending mid-tour should
+  // not kill map rotation for the rest of the walk).
+  stopCompassTracking();
   hideDestinationPicker();
   hideDestinationRerouteBanner();
   applyGuidedDestinationUI();
@@ -4375,10 +4554,10 @@ async function setActiveDestination(place) {
   // Real user gesture (a tap or voice-confirm) just happened right above —
   // this IS the valid gesture context iOS Safari's
   // DeviceOrientationEvent.requestPermission() requires; it cannot be
-  // requested proactively on load. See startDestinationOrientationTracking
-  // for the Android/no-prompt-needed path and the graceful-degradation
-  // fallback.
-  startDestinationOrientationTracking();
+  // requested proactively on load. See startCompassTracking for the
+  // Android/no-prompt-needed path, the graceful-degradation fallback, and
+  // why this is idempotent with the Wander-mode trigger.
+  startCompassTracking();
 
   clearInterval(destinationCheckInterval);
   destinationCheckInterval = setInterval(checkDestinationArrival, DESTINATION_CHECK_INTERVAL_MS);
@@ -4506,7 +4685,9 @@ function stopGuidedDestination() {
   activeDestination = null;
   clearInterval(destinationCheckInterval);
   destinationCheckInterval = null;
-  stopDestinationOrientationTracking();
+  // Compass tracking deliberately NOT stopped here (map rotation should
+  // keep working for the rest of the tour after a destination is
+  // cancelled) — see stopCompassTracking's comment.
   applyGuidedDestinationUI();
 }
 
@@ -4530,7 +4711,9 @@ async function checkDestinationArrival() {
     activeDestination = null;
     clearInterval(destinationCheckInterval);
     destinationCheckInterval = null;
-    stopDestinationOrientationTracking();
+    // Compass tracking deliberately NOT stopped here — see
+    // stopCompassTracking's comment (map rotation keeps working for the
+    // rest of the tour after arrival, not just while en route).
     applyGuidedDestinationUI();
   } catch (error) {
     console.log("[destination] arrival check failed, skipping:", error?.message || error);
@@ -4609,7 +4792,7 @@ async function handleDestinationRerouteVoiceTranscript(transcript) {
 }
 
 // --- Two-arrow compass, rendered as part of the "you are here" marker
-// itself (see buildUserLocationIcon/updateUserLocationOnMap) ---
+// itself (see buildUserLocationContent/updateUserLocationOnMap) ---
 // Real finding from investigating this rather than assuming: the OLD
 // single arrow (removed) was a separate DOM element off to the side near
 // the recenter button, and it compared DEVICE ORIENTATION against
@@ -4618,16 +4801,25 @@ async function handleDestinationRerouteVoiceTranscript(transcript) {
 // at all — it's built from GPS course-of-travel (position.coords.heading,
 // see onLocation/lastHeading), which is null/absent whenever the user is
 // stationary — exactly when someone pausing to check a compass needs it
-// most. So DeviceOrientationEvent is kept, but repurposed: only requested
-// once a destination is active (same valid-gesture-context reasoning as
-// before), and only used to make Arrow 1 itself more reliable —
-// deviceOrientationHeading below is preferred over GPS heading whenever
-// it's available, falling back to GPS heading otherwise. Arrow 2 (bearing
-// to destination) needs no permission at all — it's pure geometry from
-// already-available coordinates.
+// most. DeviceOrientationEvent is kept, and deviceOrientationHeading below
+// is preferred over GPS heading whenever it's available, falling back to
+// GPS heading otherwise. Arrow 2 (bearing to destination) needs no
+// permission at all — it's pure geometry from already-available
+// coordinates.
+//
+// Map-rotation feature widened this from "Guided-Destination-only" to
+// session-wide: tracking now also starts the first time the user's own
+// marker renders in plain Wander mode (see updateUserLocationOnMap),
+// reusing this exact function/one-shot guard rather than a second
+// permission pattern — whichever trigger fires first satisfies both.
+// Correspondingly, this no longer gets torn down when a destination ends
+// (stopCompassTracking's only remaining call site is the top-of-session
+// reset in resetGuidedDestinationState/startTour) — map rotation should
+// keep working for the rest of the tour after a destination is cancelled
+// or arrived at, not just while one happens to be active.
 let deviceOrientationHeading = null;
 let deviceOrientationHandler = null;
-let destinationCompassPermissionRequested = false;
+let compassPermissionRequested = false;
 // Hysteresis (self-review requirement) — a lower bar to MERGE than to
 // UN-merge prevents flicker right at one fixed boundary; chosen after
 // reasoning about typical GPS/compass jitter (a few degrees) rather than
@@ -4636,12 +4828,13 @@ const COMPASS_MERGE_THRESHOLD_DEGREES = 18;
 const COMPASS_UNMERGE_THRESHOLD_DEGREES = 26;
 let isCompassMerged = false;
 
-async function startDestinationOrientationTracking() {
+async function startCompassTracking() {
   try {
+    if (deviceOrientationHandler) return; // already tracking — idempotent regardless of which trigger fires first
     if (typeof DeviceOrientationEvent === "undefined") return;
     if (typeof DeviceOrientationEvent.requestPermission === "function") {
-      if (destinationCompassPermissionRequested) return; // iOS doesn't re-prompt; a denial can't be un-denied here
-      destinationCompassPermissionRequested = true;
+      if (compassPermissionRequested) return; // iOS doesn't re-prompt; a denial can't be un-denied here
+      compassPermissionRequested = true;
       const result = await DeviceOrientationEvent.requestPermission();
       if (result !== "granted") return;
     }
@@ -4651,13 +4844,13 @@ async function startDestinationOrientationTracking() {
     };
     window.addEventListener("deviceorientation", deviceOrientationHandler);
   } catch (error) {
-    // Degrades gracefully — Arrow 1 just keeps using GPS heading, Arrow 2
-    // and directions/narration are entirely unaffected either way.
-    console.log("[destination] compass permission/setup failed, degrading gracefully:", error?.message || error);
+    // Degrades gracefully — Arrow 1/map rotation just keep using GPS
+    // heading, Arrow 2 and directions/narration are entirely unaffected.
+    console.log("[compass] permission/setup failed, degrading gracefully:", error?.message || error);
   }
 }
 
-function stopDestinationOrientationTracking() {
+function stopCompassTracking() {
   if (deviceOrientationHandler) {
     window.removeEventListener("deviceorientation", deviceOrientationHandler);
     deviceOrientationHandler = null;
@@ -5072,18 +5265,17 @@ function showPlannedTourOnMap(tour) {
     path.push(position);
     bounds.extend(position);
 
-    const marker = new google.maps.Marker({
+    // AdvancedMarkerElement doesn't support the legacy icon/label
+    // (SymbolPath + label) combo — same numbered-circle look built as a
+    // real DOM node instead (32px = 2x the old scale:16 radius).
+    const content = document.createElement("div");
+    content.className = "planned-tour-stop-marker";
+    content.textContent = String(index + 1);
+    registerRotatableMarkerWrapper(content); // circle content, but still needs the centering transform
+    const marker = new google.maps.marker.AdvancedMarkerElement({
       position,
       map,
-      label: { text: String(index + 1), color: "#0F1B2D", fontWeight: "700", fontSize: "13px" },
-      icon: {
-        path: google.maps.SymbolPath.CIRCLE,
-        fillColor: "#D4A853",
-        fillOpacity: 1,
-        strokeColor: "#0F1B2D",
-        strokeWeight: 1.5,
-        scale: 16,
-      },
+      content,
       zIndex: 700,
     });
     marker.addListener("click", () => {
@@ -5123,7 +5315,10 @@ function buildPlannedStopPopupContent(stop, index) {
 }
 
 function clearPlannedTourFromMap() {
-  plannedTourMarkers.forEach((marker) => marker.setMap(null));
+  plannedTourMarkers.forEach((marker) => {
+    unregisterRotatableMarkerWrapper(marker.content);
+    marker.map = null;
+  });
   plannedTourMarkers = [];
   if (plannedTourRouteLine) {
     plannedTourRouteLine.setMap(null);
