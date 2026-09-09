@@ -168,6 +168,33 @@ body {
   justify-content: center;
 }
 
+/* Item 3 — visual confirmation for the active Guided Destination's actual
+   location (previously nothing marked this at all — only the compass
+   arrow). A target/reticle shape, deliberately distinct from a solid
+   place-pin dot and from the user-location marker, so "where am I headed"
+   reads at a glance. */
+.destination-marker {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 3px solid #D4A853;
+  background: rgba(212, 168, 83, 0.18);
+  box-sizing: border-box;
+  position: relative;
+}
+
+.destination-marker::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #D4A853;
+  transform: translate(-50%, -50%);
+}
+
 .map-rotation-fallback {
   transform: rotate(var(--map-rotation-deg, 0deg)) scale(1.8);
   transition: transform 0.3s ease-out;
@@ -285,17 +312,30 @@ body {
 }
 
 /* Place photo header inside the narration drawer (reuses applyHomePhoto()
-   unchanged — only its class/position moved here from a full-screen photo). */
+   unchanged — only its class/position moved here from a full-screen photo).
+   Item 10 design pass: taller (180px, was 160px) for more visual presence,
+   and a soft gradient fading into the card's own background at the bottom
+   so the photo-to-text transition reads as one continuous surface instead
+   of a hard-edged rectangle sitting on top of the text block. */
 .drawer-place-photo {
+  position: relative;
   width: calc(100% + 48px);
-  margin: -40px -24px 16px;
-  height: 160px;
+  margin: -40px -24px 20px;
+  height: 180px;
   border-radius: 16px 16px 0 0;
   background-color: var(--bg-elevated);
   background-size: cover;
   background-position: center;
   opacity: 0;
   transition: opacity 0.5s ease;
+}
+
+.drawer-place-photo::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 48px;
+  background: linear-gradient(to bottom, transparent, var(--bg-elevated));
 }
 
 .drawer-place-photo.is-visible {
@@ -468,23 +508,41 @@ body {
 .now-playing {
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--gold);
+  opacity: 0.85;
 }
 
 .story-title {
   font-size: 20px;
   font-weight: 600;
   color: var(--white);
-  margin-top: 8px;
+  line-height: 1.3;
+  margin-top: 10px;
+}
+
+/* Item 10 design pass — the "You asked"/"Following up" question echo was
+   reusing the exact same large, bold title treatment as a real narration's
+   place name, which is a big part of what made the card read as
+   cluttered: a full sentence-length question doesn't carry the same visual
+   weight as a short title, but was styled as if it did. Smaller, lighter,
+   quote-toned instead — the question reads as context for the answer
+   below it, not competing with it. Toggled in app.js wherever the
+   question-echo text is set. */
+.story-title--question {
+  font-size: 15px;
+  font-weight: 500;
+  font-style: italic;
+  color: var(--text-secondary);
+  line-height: 1.4;
 }
 
 .story-description {
   font-size: 14px;
   line-height: 1.5;
   color: var(--text-secondary);
-  margin-top: 4px;
+  margin-top: 10px;
 }
 
 .story-description--fallback {
@@ -501,7 +559,7 @@ body {
 .narration-controls {
   display: flex;
   gap: 8px;
-  margin-top: 12px;
+  margin-top: 20px;
 }
 
 .narration-control-btn {
@@ -689,26 +747,29 @@ body {
   transform: scale(0.96);
 }
 
-/* Secondary next to mic-btn/camera-btn's primary gold circles — same
-   register as .recenter-btn (bg-elevated + gold icon), smaller, so it
-   doesn't compete with voice as the default way to ask. */
-.ask-type-btn {
-  flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-  border: none;
-  border-radius: 50%;
+/* Item 9 — only ever visible while actively listening (see
+   startListening/stopListening/cancelListening in app.js toggling its
+   hidden class) — a contextual "switch to typed input" option, not a
+   second permanently-visible affordance next to the mic. Positioned just
+   below listening-hint's "Tap to cancel" text, same fixed-pill register. */
+.ask-type-switch-btn {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom) + 300px);
+  transform: translateX(-50%);
+  z-index: 25;
+  border: 1px solid var(--border);
   background: var(--bg-elevated);
   color: var(--gold);
-  font-size: 15px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 999px;
   box-shadow: 0 4px 14px var(--warm-shadow);
 }
 
-.ask-type-btn:active {
-  transform: scale(0.96);
+.ask-type-switch-btn:active {
+  transform: translateX(-50%) scale(0.96);
 }
 
 #ask-type-row {

@@ -466,10 +466,6 @@
             <span class="mic-waveform" aria-hidden="true"><span></span><span></span><span></span></span>
           </button>
 
-          <!-- Alongside the mic, not replacing it — for noisy/windy
-               conditions where speaking a question isn't practical. -->
-          <button id="ask-type-btn" class="ask-type-btn" aria-label="Type a question instead">⌨️</button>
-
           <button id="play-btn" class="control-btn control-btn--main" aria-label="Play">
             <svg class="play-icon" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
             <svg class="loading-spinner hidden" viewBox="0 0 24 24" width="22" height="22" fill="none">
@@ -749,6 +745,12 @@
     aria-label="Edit what Sabri heard"
   />
   <p id="listening-hint" class="listening-hint hidden">Tap to stop</p>
+  <!-- Item 9 — consolidated from a permanently-visible second entry point
+       (a standalone keyboard icon in the main row) to one path: this only
+       appears once the mic is already active, offering to switch to typed
+       input from within that state rather than two always-visible
+       affordances competing for attention before either is needed. -->
+  <button id="ask-type-switch-btn" class="ask-type-switch-btn hidden" aria-label="Type instead">Type instead</button>
 
   <!-- Generic toast, currently only used by the camera placeholder button. -->
   <p id="toast" class="toast" role="status" aria-live="polite"></p>
@@ -1212,6 +1214,18 @@
     <div id="long-walk-links" class="long-walk-links"></div>
     <div class="needs-suggestion-actions">
       <button id="long-walk-dismiss" class="needs-suggestion-no">Got it, I'll walk</button>
+    </div>
+  </div>
+
+  <!-- Item 8 — check-in before a geographic narration overrides a multi-
+       turn Q&A thread (see offerConversationCheckIn in app.js). Own
+       isolated state (pendingConversationCheckIn), same pattern as the
+       other confirm banners in this batch. -->
+  <div id="conversation-checkin-banner" class="needs-suggestion-banner hidden" role="dialog" aria-live="polite">
+    <p id="conversation-checkin-text" class="needs-suggestion-text">Anything else you'd like to know, or should we keep walking?</p>
+    <div class="needs-suggestion-actions">
+      <button id="conversation-checkin-yes" class="needs-suggestion-yes">Yes, ask something</button>
+      <button id="conversation-checkin-no" class="needs-suggestion-no">No, let's continue</button>
     </div>
   </div>
 

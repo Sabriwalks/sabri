@@ -641,22 +641,57 @@ const GREETING_AND_CONTEXT_RULES =
 // Every narration must end with two things: a closing thought on the
 // current place, and a forward-looking transition that makes the walk feel
 // continuous rather than a series of disconnected stops.
-const TRANSITION_GUIDANCE =
-  "End every narration with a natural transition that does one of the " +
-  "following based on what is actually nearby according to the location " +
-  "context you have been given:\n" +
-  '- Directional: Reference a real nearby place and point toward it: "Keep ' +
-  'heading north — we are approaching [nearby place name] and I have a ' +
-  'story for you when we get there"\n' +
-  "- Observational: Point out something specific to notice right now: " +
-  '"Before you move on, look up at the roofline above you"\n' +
-  "- Connective: Connect to something from earlier in the walk if relevant: " +
-  '"This neighborhood actually has a deep connection to what we saw at ' +
-  '[earlier place]"\n' +
-  "- Anticipatory: Build excitement for what is coming without naming it: " +
-  '"The next few minutes of walking are going to surprise you"\n\n' +
-  "Never make the ending feel like a conclusion. The walk never ends — it " +
-  "only continues.";
+// Real bug this fixes (field report): the "Anticipatory" option below used
+// to be offered completely unconditionally, every single narration
+// (confirmed via investigation — this fragment had zero surrounding
+// conditional in the systemPromptParts assembly, unlike
+// buildNearbyInterestGuidance just above it in that array, which already
+// correctly returns null when there's no real matched place). That's the
+// literal source of "just around the corner is something that will blow
+// your socks off" with nothing actually known to be around the corner —
+// it made Sabri perform the SHAPE of having a real destination without
+// having one. Confirmed this affects plain Wander mode too, not just
+// Guided Tour (both route through the same /api/narrate assembly).
+// Now a function: "Directional" (needs a real nearby place to point
+// toward) and "Anticipatory" (the vague escape hatch) are only offered
+// when the caller confirms real nearby-place data actually exists —
+// reusing the exact same nearbyInterestPlace signal
+// buildNearbyInterestGuidance already uses for the same purpose, not a
+// second data source. Without real data, Claude is limited to
+// Observational (always available — the current view, not a future one)
+// and Connective, with an explicit instruction not to invent vague
+// forward-teasing when nothing specific is actually known.
+function buildTransitionGuidance(hasRealNearbyPlace) {
+  const options = hasRealNearbyPlace
+    ? '- Directional: Reference a real nearby place and point toward it: "Keep ' +
+      'heading north — we are approaching [nearby place name] and I have a ' +
+      'story for you when we get there"\n' +
+      "- Observational: Point out something specific to notice right now: " +
+      '"Before you move on, look up at the roofline above you"\n' +
+      "- Connective: Connect to something from earlier in the walk if relevant: " +
+      '"This neighborhood actually has a deep connection to what we saw at ' +
+      '[earlier place]"\n' +
+      "- Anticipatory: Build excitement for what is coming without naming it: " +
+      '"The next few minutes of walking are going to surprise you"\n\n'
+    : "- Observational: Point out something specific to notice right now: " +
+      '"Before you move on, look up at the roofline above you"\n' +
+      "- Connective: Connect to something from earlier in the walk if relevant: " +
+      '"This neighborhood actually has a deep connection to what we saw at ' +
+      '[earlier place]"\n' +
+      "- Or simply a warm, natural closing thought with no forward-teasing at " +
+      'all. Do NOT invent a vague "something amazing is coming up" line when ' +
+      "you don't actually have a specific upcoming place in mind — a genuine, " +
+      "grounded close is better than a performed one.\n\n";
+
+  return (
+    "End every narration with a natural transition that does one of the " +
+    "following based on what is actually nearby according to the location " +
+    "context you have been given:\n" +
+    options +
+    "Never make the ending feel like a conclusion. The walk never ends — it " +
+    "only continues."
+  );
+}
 
 // Distinct from TRANSITION_GUIDANCE above (which shapes how a narration
 // ENDS) — this is about not opening cold into pure content every single
@@ -2116,6 +2151,19 @@ app.get("/api/geocode", async (req, res) => {
     const results = data.results || [];
     res.json({
       locationName: extractLocationName(results),
+      // Item 3 fix — extractLocationName deliberately returns a
+      // neighborhood/locality-level name (correct for its original use:
+      // the ambient "you're near X" label and narration context, where a
+      // neighborhood IS what's wanted). Reusing that same broad name for a
+      // map-pin-drop DESTINATION is what actually produced the "very
+      // broad destination" field report — the underlying coordinates were
+      // always precise (see handleMapClickForPinDrop), only the display
+      // name was broad. results[0] is Google's most specific match
+      // (typically a street address/rooftop precision) — exposed here as
+      // an additive field so a destination-naming consumer can prefer it
+      // without changing locationName's existing behavior for its other
+      // callers (ambient label, narration location-grounding).
+      preciseAddress: results[0]?.formatted_address || null,
       ...extractLocationComponents(results),
     });
   } catch (error) {
@@ -4100,7 +4148,7 @@ app.post("/api/narrate", async (req, res) => {
     buildMoodGuidance(sessionMood),
     CONNECTIVE_NARRATION_GUIDANCE,
     buildProactiveCheckInGuidance(isGuidedTour),
-    TRANSITION_GUIDANCE,
+    buildTransitionGuidance(Boolean(nearbyInterestPlace && nearbyInterestPlace.name)),
     SAFETY_GUIDANCE,
     SPOKEN_LANGUAGE_RULES,
     buildPronunciationGuidance(languageName),
@@ -4568,7 +4616,7 @@ async function speakWithOpenAI({ text, speed, voice, language }) {
 
   // response_format: "wav" (not the default mp3) specifically so the
   // per-clip loudness normalization below can operate on raw PCM samples
-  // directly — see normalizeWavPeak's comment for why this fixes the real
+  // directly — see normalizeWavLoudness's comment for why this fixes the real
   // inter-clip volume inconsistency reported over AirPods without touching
   // timing/cadence at all. Trade-off, stated plainly: WAV is uncompressed,
   // so each clip is a larger download than the mp3 this replaced —
@@ -4587,7 +4635,7 @@ async function speakWithOpenAI({ text, speed, voice, language }) {
   );
 
   const arrayBuffer = await speech.arrayBuffer();
-  return normalizeWavPeak(Buffer.from(arrayBuffer));
+  return normalizeWavLoudness(Buffer.from(arrayBuffer));
 }
 
 // Confirmed directly against Inworld's real API (not guessed from docs):
@@ -4598,7 +4646,7 @@ async function speakWithOpenAI({ text, speed, voice, language }) {
 // straight to a standard 44-byte-header WAV file when audioConfig.
 // audioEncoding: "LINEAR16" is requested (defaults to MP3 otherwise, per a
 // live test) — requesting WAV directly like this was the cleanest option,
-// no conversion step needed for normalizeWavPeak to work on Inworld's
+// no conversion step needed for normalizeWavLoudness to work on Inworld's
 // output exactly the same way it does on OpenAI's.
 //
 // Voice/model: inworld-tts-1.5-max (their top-quality model, per real-world
@@ -4656,7 +4704,7 @@ async function speakWithInworld({ text, language }) {
     meta: { voiceId, modelId: data.usage?.modelId || "inworld-tts-1.5-max" },
   });
 
-  return normalizeWavPeak(Buffer.from(data.audioContent, "base64"));
+  return normalizeWavLoudness(Buffer.from(data.audioContent, "base64"));
 }
 
 app.post("/api/speak", async (req, res) => {
@@ -4687,22 +4735,36 @@ app.post("/api/speak", async (req, res) => {
 
 // Real-world testing over AirPods: volume audibly dipped up and down
 // between TTS clips, since each sentence is an independently generated
-// clip from OpenAI with no consistency enforced between them. Fixed with
-// pure peak normalization on the raw PCM samples — a linear amplitude
-// scale, sample-for-sample, at the exact same sample count and rate as the
-// original. This can only ever change loudness, never cadence/pacing/
-// timing (there is no way for a per-sample linear scale to shift where a
-// sample falls in time), and unlike dynamic-range compression it doesn't
-// reshape the waveform beyond a uniform multiply, so it shouldn't
-// introduce anything that reads as robotic. Deliberately conservative
-// (clamped gain range, skips clips already close to target) — erring
-// toward leaving a clip's natural sound alone over aggressively flattening
-// everything to identical loudness.
-const WAV_TARGET_PEAK = 29200; // ~-1dBFS of 16-bit PCM's 32767 ceiling — a little headroom, not full-scale
+// clip with no consistency enforced between them. First fix (peak-only
+// normalization, scaling each clip so its single loudest sample hit a
+// fixed target) shipped for this exact complaint — and the complaint came
+// back on a later real walk. Root-caused directly, not re-guessed: peak
+// only bounds the one loudest sample in a clip, not how loud the clip
+// sounds overall. Measured live against three real Inworld-synthesized
+// sentence clips (see the volume-drift investigation this fix came out
+// of): raw PEAK varied ~5dB clip-to-clip while raw RMS (a much closer
+// proxy for perceived loudness) varied only ~1.1dB — and peak-targeting
+// each clip to an identical ceiling actively WIDENED that RMS spread to
+// ~4dB, because a clip with one sharp transient (a hard consonant) sitting
+// on an otherwise quieter delivery reaches the peak target with far less
+// gain than a consistently-loud clip needs, ending up quieter overall even
+// though both clips now share the same peak. This is why the original fix
+// only partially worked: it does correctly prevent clipping, but clipping
+// prevention and consistent perceived loudness are different problems.
+// Switched to RMS-targeting — scales each clip toward a fixed root-mean-
+// square level instead of a fixed peak — which is what actually tracks
+// perceived loudness. The peak constraint from the original version is
+// kept, but demoted to a safety ceiling (never let a genuinely peaky clip
+// clip/distort just to hit the RMS target) rather than the primary target.
+// Same "only ever changes loudness, never cadence/pacing/timing" property
+// as before — still a uniform per-sample linear multiply, nothing that
+// reshapes the waveform or could read as robotic.
+const WAV_TARGET_RMS = 3800; // ~-18.7dBFS — close to this voice's measured natural average level, nudged up slightly for outdoor/walking listening
+const WAV_PEAK_CEILING = 30000; // ~-0.8dBFS — hard safety cap, never exceeded regardless of the RMS target
 const WAV_MIN_GAIN = 0.3;
-const WAV_MAX_GAIN = 3.0;
+const WAV_MAX_GAIN = 4.0;
 
-function normalizeWavPeak(buffer) {
+function normalizeWavLoudness(buffer) {
   try {
     // Standard 44-byte canonical WAV header (RIFF/WAVE/fmt /data in that
     // fixed order) — exactly what OpenAI's TTS API returns. Not attempting
@@ -4724,15 +4786,22 @@ function normalizeWavPeak(buffer) {
     // every time via the catch below, without ever actually applying it.
     const dataLength = buffer.length - dataStart;
     const sampleCount = Math.floor(dataLength / 2);
+    if (sampleCount === 0) return buffer;
 
     let peak = 0;
+    let sumSquares = 0;
     for (let i = 0; i < sampleCount; i++) {
-      const sample = Math.abs(buffer.readInt16LE(dataStart + i * 2));
-      if (sample > peak) peak = sample;
+      const sample = buffer.readInt16LE(dataStart + i * 2);
+      const abs = Math.abs(sample);
+      if (abs > peak) peak = abs;
+      sumSquares += sample * sample;
     }
     if (peak === 0) return buffer; // silence — nothing to normalize
 
-    const gain = Math.min(WAV_MAX_GAIN, Math.max(WAV_MIN_GAIN, WAV_TARGET_PEAK / peak));
+    const rms = Math.sqrt(sumSquares / sampleCount);
+    const rmsGain = WAV_TARGET_RMS / rms;
+    const peakSafetyGain = WAV_PEAK_CEILING / peak;
+    const gain = Math.min(WAV_MAX_GAIN, Math.max(WAV_MIN_GAIN, Math.min(rmsGain, peakSafetyGain)));
     if (Math.abs(gain - 1) < 0.02) return buffer; // already close enough — skip the write pass
 
     const output = Buffer.from(buffer); // copy — never mutate the buffer passed in

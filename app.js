@@ -14,6 +14,7 @@ const personaChipNameEl = document.getElementById("persona-chip-name");
 const tourLoadingOverlay = document.getElementById("tour-loading-overlay");
 const tourLoadingText = document.getElementById("tour-loading-text");
 const narrationWaveEl = document.getElementById("narration-wave");
+const viewportMetaEl = document.querySelector('meta[name="viewport"]');
 const cameraOverlay = document.getElementById("camera-overlay");
 const cameraVideo = document.getElementById("camera-video");
 const cameraCanvas = document.getElementById("camera-canvas");
@@ -56,7 +57,7 @@ const cameraBtn = document.getElementById("camera-btn");
 const askSubtitle = document.getElementById("ask-subtitle");
 const askEditBtn = document.getElementById("ask-edit-btn");
 const askEditInput = document.getElementById("ask-edit-input");
-const askTypeBtn = document.getElementById("ask-type-btn");
+const askTypeSwitchBtn = document.getElementById("ask-type-switch-btn");
 const askTypeRow = document.getElementById("ask-type-row");
 const askTypeInput = document.getElementById("ask-type-input");
 const askTypeSendBtn = document.getElementById("ask-type-send-btn");
@@ -185,6 +186,9 @@ const longWalkBanner = document.getElementById("long-walk-banner");
 const longWalkText = document.getElementById("long-walk-text");
 const longWalkLinks = document.getElementById("long-walk-links");
 const longWalkDismissBtn = document.getElementById("long-walk-dismiss");
+const conversationCheckInBanner = document.getElementById("conversation-checkin-banner");
+const conversationCheckInYesBtn = document.getElementById("conversation-checkin-yes");
+const conversationCheckInNoBtn = document.getElementById("conversation-checkin-no");
 const accountSignedIn = document.getElementById("account-signed-in");
 const accountGuest = document.getElementById("account-guest");
 const accountNameEl = document.getElementById("account-name");
@@ -494,6 +498,18 @@ const NARRATION_COOLDOWN_METERS = 10;
 // an in-flight fetch before it can be built.
 let lastConversationEndTime = 0;
 let lastConversationPosition = null;
+
+// Item 8 — check-in before a geographic narration overrides a multi-turn
+// Q&A thread. Real gap this fixes: once isConversing/the cooldown above
+// both clear, checkForNarration had zero awareness of whether the just-
+// finished conversation was a single question or a follow-up thread — a
+// fresh narration could cut in the instant the user moved >15m, even
+// mid-thought on a follow-up. conversationCheckInOffered is per-thread
+// (reset whenever a new question is asked, so a later follow-up thread on
+// the same or a new place gets its own check-in rather than firing once
+// ever) — see recordQuestionLog's call site in askSabri.
+let conversationCheckInOffered = false;
+let pendingConversationCheckIn = null; // { latitude, longitude, heading } to resume with once resolved
 
 const SIGNIFICANT_MOVE_METERS = 15;
 const ORIENTATION_RADIUS_METERS = 100;
@@ -4307,6 +4323,36 @@ let pendingMidTourDestination = null;
 // Item 4(B) — true only while the picker's map-tap indicator is showing
 // and waiting for an arbitrary empty-point tap.
 let awaitingMapPinDrop = false;
+// Real gap this fixes (field report on the map-pin-drop flow
+// specifically, but applied to every destination-setting path for
+// consistency): there was previously NO visual marker anywhere on the map
+// for where the active destination actually is — only the compass arrow.
+// For a typed/spoken/golden-circle destination that's a minor gap; for an
+// empty-point map tap it meant literally no confirmation the tap
+// registered at all. One shared marker + helpers, used by every path via
+// setActiveDestination.
+let destinationMarker = null;
+
+function showDestinationMarker(lat, lng) {
+  if (!map) return;
+  clearDestinationMarker();
+  const content = document.createElement("div");
+  content.className = "destination-marker";
+  registerRotatableMarkerWrapper(content);
+  destinationMarker = new google.maps.marker.AdvancedMarkerElement({
+    position: { lat, lng },
+    map,
+    content,
+    zIndex: 950,
+  });
+}
+
+function clearDestinationMarker() {
+  if (!destinationMarker) return;
+  unregisterRotatableMarkerWrapper(destinationMarker.content);
+  destinationMarker.map = null;
+  destinationMarker = null;
+}
 
 function resetGuidedDestinationState() {
   activeDestination = null;
@@ -4314,6 +4360,7 @@ function resetGuidedDestinationState() {
   destinationRerouteCandidate = null;
   pendingMidTourDestination = null;
   awaitingMapPinDrop = false;
+  clearDestinationMarker();
   hideMidTourDestinationBanner();
   hideMapPinDropIndicator();
   clearInterval(destinationCheckInterval);
@@ -4459,14 +4506,28 @@ async function handleMapClickForPinDrop(event) {
   hideMapPinDropIndicator();
   const lat = event.latLng.lat();
   const lng = event.latLng.lng();
+  // Real gap this fixes (field report: "no indication that your tap set a
+  // location") — immediate, optimistic feedback the instant the tap
+  // registers, not gated on the reverse-geocode round trip that follows.
+  // The routing target itself (lat/lng below) was already precise before
+  // this fix — see the comment on the destination object below; this is
+  // purely a missing-feedback problem, not a coordinate-precision one.
+  showDestinationMarker(lat, lng);
+  showToast("Destination set");
   let locationName = null;
   try {
+    // preciseAddress (not locationName) deliberately — see /api/geocode's
+    // comment for why locationName alone produced the "very broad
+    // destination" report even though the coordinates were always exact.
     const response = await fetch(`/api/geocode?lat=${lat}&lng=${lng}`);
     const data = await response.json();
-    if (response.ok) locationName = data.locationName;
+    if (response.ok) locationName = data.preciseAddress || data.locationName;
   } catch (error) {
     console.log("[destination] map pin drop reverse geocode failed:", error?.message || error);
   }
+  // latitude/longitude are the RAW tapped coordinates, used as-is — never
+  // re-resolved against a nearby named place. Reverse geocoding above is
+  // for the display name only.
   handleDestinationSelected({
     name: locationName || "Dropped pin",
     placeId: `latlng:${lat},${lng}`,
@@ -4549,6 +4610,7 @@ function handleDestinationSelected(place) {
 async function setActiveDestination(place) {
   activeDestination = { name: place.name, placeId: place.placeId, latitude: place.latitude, longitude: place.longitude };
   applyGuidedDestinationUI();
+  showDestinationMarker(place.latitude, place.longitude);
   logEvent("guided_destination_set", { placeId: place.placeId });
 
   // Real user gesture (a tap or voice-confirm) just happened right above —
@@ -4683,6 +4745,7 @@ function stopGuidedDestination() {
   if (!activeDestination) return;
   logEvent("guided_destination_stopped", { placeId: activeDestination.placeId, reason: "user_cancelled" });
   activeDestination = null;
+  clearDestinationMarker();
   clearInterval(destinationCheckInterval);
   destinationCheckInterval = null;
   // Compass tracking deliberately NOT stopped here (map rotation should
@@ -4709,6 +4772,7 @@ async function checkDestinationArrival() {
       }
     }
     activeDestination = null;
+    clearDestinationMarker();
     clearInterval(destinationCheckInterval);
     destinationCheckInterval = null;
     // Compass tracking deliberately NOT stopped here — see
@@ -5681,6 +5745,7 @@ pauseBtn.addEventListener("click", (event) => {
 
 drawerHandle.addEventListener("click", () => {
   playerCard.classList.add("is-open");
+  playerCard.scrollTop = 0; // item 5 — every open starts at the top, including a manual reopen of unchanged content
 });
 drawerClose.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -5723,6 +5788,40 @@ function buildRecentNarrationContextForCamera() {
   return { placeName: currentPlaceName, minutesAgo: Math.round(minutesAgo * 10) / 10 };
 }
 
+// Real bug this fixes: no width/height constraint was ever requested, so
+// the browser was free to negotiate whatever default stream resolution it
+// wanted (often well below the camera's actual capability) — the canvas
+// capture itself was already faithfully sized to the video's real
+// resolution, so the ceiling was the unconstrained getUserMedia call, not
+// the capture/compression step. `ideal` (not `min`/exact) so devices that
+// genuinely can't do 1080p still get their own best available stream
+// rather than failing outright. Real cost, stated plainly: a materially
+// bigger base64 payload to /api/identify (pixel count scales as the
+// square of resolution — roughly 640x480 today vs. up to 1920x1080 here
+// is a real several-times increase), meaning more upload time on cellular
+// — an explicit, accepted trade for actually-readable vision analysis.
+const CAMERA_IDEAL_WIDTH = 1920;
+const CAMERA_IDEAL_HEIGHT = 1080;
+
+// Real bug this fixes: native pinch-zoom was never disabled anywhere, so
+// pinch-zooming the camera preview (a very natural gesture while framing a
+// photo) triggers the BROWSER'S OWN viewport zoom — which is not app
+// state closeCameraOverlay() (or anything else) could reset, since it
+// isn't an app-controlled CSS transform. Toggling the viewport meta tag's
+// user-scalable/maximum-scale only while the camera overlay is open is
+// the actual mechanism that needs touching, restored the instant the
+// overlay closes so the rest of the app keeps normal pinch-zoom-to-read
+// behavior.
+function disablePinchZoomForCamera() {
+  if (!viewportMetaEl) return;
+  viewportMetaEl.dataset.prevContent = viewportMetaEl.getAttribute("content") || "";
+  viewportMetaEl.setAttribute("content", "width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover");
+}
+function restorePinchZoomAfterCamera() {
+  if (!viewportMetaEl || viewportMetaEl.dataset.prevContent === undefined) return;
+  viewportMetaEl.setAttribute("content", viewportMetaEl.dataset.prevContent);
+}
+
 async function handleCameraTap() {
   if (!CAMERA_ENABLED) {
     showToast("Camera feature is unavailable");
@@ -5734,9 +5833,16 @@ async function handleCameraTap() {
   }
 
   try {
-    cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    cameraStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: "environment",
+        width: { ideal: CAMERA_IDEAL_WIDTH },
+        height: { ideal: CAMERA_IDEAL_HEIGHT },
+      },
+    });
     cameraVideo.srcObject = cameraStream;
     if (cameraPermissionDenied) cameraPermissionDenied.classList.add("hidden");
+    disablePinchZoomForCamera();
     cameraOverlay.classList.remove("hidden");
   } catch (error) {
     showCameraPermissionDenied(error);
@@ -5788,6 +5894,7 @@ function closeCameraOverlay() {
   cameraOverlay.classList.add("hidden");
   if (cameraPermissionDenied) cameraPermissionDenied.classList.add("hidden");
   if (cameraLoading) cameraLoading.classList.add("hidden");
+  restorePinchZoomAfterCamera();
   if (cameraStream) {
     cameraStream.getTracks().forEach((track) => track.stop());
     cameraStream = null;
@@ -5846,6 +5953,18 @@ async function sendPhotoForIdentification(imageBase64) {
     });
     const data = await response.json();
 
+    // Real bug this fixes: closeCameraOverlay() used to run in the click
+    // handler BEFORE this function ever started — hiding the whole
+    // overlay (and cameraLoading, its own DOM child) before the loading
+    // state was ever shown, so "Sabri is looking..." was toggled visible
+    // only while its ancestor was already display:none. Closing here
+    // instead, once a real result exists, means the overlay + loading
+    // spinner stay visible for the entire wait. For the interrupt/defer
+    // paths the overlay is already closed by this point (see the click
+    // handler) — this is then just a harmless no-op (classList.add is
+    // idempotent, cameraStream is already null).
+    closeCameraOverlay();
+
     if (!response.ok || !data.narration) {
       handleIdentifyFailure();
       return;
@@ -5858,10 +5977,19 @@ async function sendPhotoForIdentification(imageBase64) {
     // about the photo.
     locationName.textContent = "Narration about image captured";
     placeName.textContent = "Sabri";
+    placeName.classList.remove("story-title--question"); // item 10 — this card type never uses the lighter question-echo styling
     placeDescription.textContent = data.narration;
     placeDescription.classList.remove("story-description--fallback");
+    // Item 6, case 1 — always the actual photo just taken, never a Places
+    // substitute (a data: URI works fine as applyHomePhoto's background-
+    // image source, same as any other URL).
+    applyHomePhoto(imageBase64);
     playerCard.classList.remove("hidden");
     playerCard.classList.add("is-open");
+    // Item 5 — see startStory's comment; this path hand-duplicates
+    // startStory's class toggles rather than calling it, so needs its own
+    // reset too.
+    playerCard.scrollTop = 0;
     appEl.classList.add("has-player");
     startPrompt.classList.add("hidden");
     tourControls.classList.remove("hidden");
@@ -5869,6 +5997,7 @@ async function sendPhotoForIdentification(imageBase64) {
     logEvent("camera_identify_used", { resultSnippet: data.narration.slice(0, 80) });
     await speakNarration(data.narration);
   } catch (error) {
+    closeCameraOverlay();
     handleIdentifyFailure();
   } finally {
     isIdentifying = false;
@@ -5920,9 +6049,15 @@ if (cameraIdentifyBtn) {
     const context = cameraCanvas.getContext("2d");
     context.drawImage(cameraVideo, 0, 0, videoWidth, videoHeight);
     const imageBase64 = cameraCanvas.toDataURL("image/jpeg", 0.85);
-    closeCameraOverlay();
 
     if (isNarrating) {
+      // These two paths show their own UI elsewhere (the interrupt banner,
+      // or just waiting silently) — the camera overlay should close right
+      // away here. The immediate (nothing-else-playing) path below is
+      // different: it deliberately keeps the overlay open, with the
+      // loading state visible, until sendPhotoForIdentification itself
+      // closes it once a real result exists — see that function's comment.
+      closeCameraOverlay();
       // Another confirm already active (avoid stacking two banners) — the
       // safe default here is to defer rather than silently drop the photo.
       if (isConversing || pendingGoldenCirclePlace || destinationRerouteCandidate || needsSuggestionPending || pendingMidTourDestination) {
@@ -6042,6 +6177,7 @@ playerCard.addEventListener("touchend", (event) => {
   const deltaY = event.changedTouches[0].clientY - drawerTouchStartY;
   if (deltaY < -40) {
     playerCard.classList.add("is-open");
+    playerCard.scrollTop = 0; // item 5 — every open starts at the top, including a manual reopen of unchanged content
   } else if (deltaY > 40) {
     playerCard.classList.remove("is-open");
   }
@@ -6736,6 +6872,18 @@ async function checkForNarration(latitude, longitude, heading) {
     }
   }
 
+  // Item 8 — a single (non-follow-up) question still falls through to a
+  // normal override below, unchanged. Only a real follow-up thread
+  // (currentPlaceConversation.length > 1: at least a second question in a
+  // row about the current place) gets a check-in instead of an abrupt cut-in,
+  // and only once per thread (conversationCheckInOffered resets whenever a
+  // new question is asked — see askSabri).
+  if (currentPlaceConversation.length > 1 && !conversationCheckInOffered) {
+    conversationCheckInOffered = true;
+    offerConversationCheckIn(latitude, longitude, heading);
+    return;
+  }
+
   const needsOrientation =
     !orientationCenter || distanceInMeters(orientationCenter, { latitude, longitude }) > ORIENTATION_RADIUS_METERS;
 
@@ -6751,6 +6899,48 @@ async function checkForNarration(latitude, longitude, heading) {
 
   await runSpecificZoomIn(latitude, longitude, heading);
 }
+
+// Item 8 — speaks + shows the check-in prompt, holding off any further
+// geographic-narration attempt (via isConversing, same convention every
+// other confirm banner in this app uses) until the user says whether
+// they're done. "Yes" reuses the existing mic flow directly (no second
+// question-capture UI); "No" resumes exactly where checkForNarration would
+// have gone next, by simply calling it again — conversationCheckInOffered
+// is already true by then, so it falls straight through the check-in gate
+// into the real orientation/zoom-in logic.
+function offerConversationCheckIn(latitude, longitude, heading) {
+  pendingConversationCheckIn = { latitude, longitude, heading };
+  isConversing = true;
+  showConversationCheckInBanner();
+  enqueueTtsSentence("Anything else you'd like to know, or should we keep walking?");
+  waitForTtsQueueDrain().catch(() => {});
+}
+
+function showConversationCheckInBanner() {
+  if (!conversationCheckInBanner) return;
+  conversationCheckInBanner.classList.remove("hidden");
+}
+function hideConversationCheckInBanner() {
+  if (!conversationCheckInBanner) return;
+  conversationCheckInBanner.classList.add("hidden");
+}
+function handleConversationCheckInYes() {
+  pendingConversationCheckIn = null;
+  hideConversationCheckInBanner();
+  // isConversing is left true here — startListening() manages it itself
+  // (idempotent if already true) and calls interruptPlayback(), which is
+  // a safe no-op since nothing is playing right now.
+  startListening();
+}
+function handleConversationCheckInNo() {
+  const resume = pendingConversationCheckIn;
+  pendingConversationCheckIn = null;
+  hideConversationCheckInBanner();
+  isConversing = false;
+  if (resume) checkForNarration(resume.latitude, resume.longitude, resume.heading);
+}
+if (conversationCheckInYesBtn) conversationCheckInYesBtn.addEventListener("click", handleConversationCheckInYes);
+if (conversationCheckInNoBtn) conversationCheckInNoBtn.addEventListener("click", handleConversationCheckInNo);
 
 // STEP 1 - orient the user to the neighborhood they've just arrived in.
 // Sorted by actual distance (not prominence) so we never grab a famous but
@@ -7012,11 +7202,14 @@ async function narrateAndSpeak({
     narratingPlaceId = focusedPlace.placeId;
     upsertPlaceMarker(focusedPlace);
     refreshAllPlaceMarkers();
-    const photoUrl = focusedPlace.photoReference
-      ? `/api/photo?ref=${encodeURIComponent(focusedPlace.photoReference)}&maxwidth=800`
-      : null;
-    applyHomePhoto(photoUrl);
-    startStory(focusedPlace.name, "");
+    // Item 6 — topic-specific photo when the narration's own subject has
+    // one, generic neighborhood photo otherwise (never no photo at all
+    // just because this specific place lacks one, and never an unrelated
+    // nearby business substituted in). Fire-and-forget — doesn't block
+    // startStory()/hiding the loading overlay on the fallback fetch.
+    const photoUrl = photoUrlFromReference(focusedPlace.photoReference);
+    applyPlacePhotoWithFallback(focusedPlace.photoReference, focusedPlace);
+    startStory(focusedPlace.name, ""); // also resets playerCard's scroll position — see startStory's comment
     updateMediaSessionMetadata(focusedPlace.name, currentNeighborhoodName, photoUrl);
     hideTourLoadingOverlay();
     logEvent("narration_started", { placeId: focusedPlace.placeId, placeType: focusedPlace.primaryType, tier });
@@ -7284,6 +7477,55 @@ function summarizeForHistory(text) {
   return text.length > 150 ? `${text.slice(0, 150)}...` : text;
 }
 
+// Item 6 — image source hierarchy for the swipe-up drawer's photo header:
+// 1. User-captured photo (photo-triggered narration) — handled directly
+//    in sendPhotoForIdentification with the real captured image, never
+//    touches this.
+// 2/3. Topic-specific Places photo when the narration genuinely centers
+//    on a real place with its own photoReference, else a generic
+//    neighborhood Places photo — reusing the exact same /api/photo proxy
+//    (server.js), never a second image-fetching path, and never an
+//    unrelated nearby business passed off as the subject itself (the
+//    "local pizza store" problem this replaces) — presented as ambient
+//    neighborhood context, not a claim about what's being discussed.
+//    Never a manually-curated per-city image either — doesn't scale
+//    globally, per explicit product direction.
+function photoUrlFromReference(photoReference) {
+  return photoReference ? `/api/photo?ref=${encodeURIComponent(photoReference)}&maxwidth=800` : null;
+}
+
+// Prefers an already-fetched nearby-places list (lastContextPlaces — free,
+// no extra network call, populated by the narration pipeline itself just
+// before this typically runs) and only falls back to a fresh /api/context
+// call if that's empty/stale (e.g. a Q&A happening well after the last
+// narration fetch).
+async function resolveAreaPhotoReference(latitude, longitude) {
+  const cached = lastContextPlaces.find((p) => p.photoReference);
+  if (cached) return cached.photoReference;
+  if (typeof latitude !== "number" || typeof longitude !== "number") return null;
+  try {
+    const response = await fetch(`/api/context?lat=${latitude}&lng=${longitude}`);
+    const data = await response.json();
+    const match = (data.places || []).find((p) => p.photoReference);
+    return match ? match.photoReference : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+// The actual hierarchy entry point cases 2/3 share: try the specific
+// place's own photo first, fall back to a generic area photo, apply
+// whichever resolves (or null — applyHomePhoto already handles that
+// gracefully, same as it always has for a place with no photo at all).
+async function applyPlacePhotoWithFallback(specificPhotoReference, fallbackPosition) {
+  let url = photoUrlFromReference(specificPhotoReference);
+  if (!url && fallbackPosition) {
+    const genericRef = await resolveAreaPhotoReference(fallbackPosition.latitude, fallbackPosition.longitude);
+    url = photoUrlFromReference(genericRef);
+  }
+  applyHomePhoto(url);
+}
+
 // Crossfades the home-screen background photo in once it's actually
 // loaded, so there's no flash of a broken image mid-transition.
 function applyHomePhoto(url) {
@@ -7496,9 +7738,17 @@ function distanceInMeters(a, b) {
 
 function startStory(title, description) {
   placeName.textContent = title;
+  placeName.classList.remove("story-title--question"); // item 10 — real narration titles always use the standard (not question-echo) styling
   placeDescription.textContent = description;
   placeDescription.classList.remove("story-description--fallback");
   playerCard.classList.remove("hidden");
+  // Item 5 — always render this view with any image at the top and text
+  // from the top, never landed mid-scroll from whatever was open earlier
+  // in the session (playerCard's scrollTop is otherwise retained across
+  // the hidden/is-open toggle). Single shared choke point for every
+  // narration-opening call (geographic and planned-tour stops both route
+  // through here).
+  playerCard.scrollTop = 0;
 
   // Playback controls (pause/resume, speed) live on the main screen, never
   // trapped inside the drawer — the drawer is for reading the text only.
@@ -7900,16 +8150,20 @@ if (askEditInput) {
   });
 }
 
-// Alongside the mic, not a replacement — for noisy/windy conditions where
-// speaking isn't practical. A typed question skips the voice confirm-
-// window entirely (typing it out already IS the review step) and mirrors
-// startListening()'s own interrupt-then-proceed pattern rather than going
-// through SabriSpeechRecognition at all.
-if (askTypeBtn) {
-  askTypeBtn.addEventListener("click", () => {
-    const opening = askTypeRow.classList.contains("hidden");
-    askTypeRow.classList.toggle("hidden");
-    if (opening) askTypeInput.focus();
+// Item 9 — reachable only from within the active-listening state (see
+// startListening showing this button, finishListening/cancelListening
+// hiding it) rather than a second permanently-visible affordance next to
+// the mic. Cancels the in-progress voice capture the same way tapping
+// listeningHint would, then reveals the typed-input row — a typed
+// question still skips the voice confirm-window entirely (typing it out
+// already IS the review step) and mirrors startListening()'s own
+// interrupt-then-proceed pattern rather than going through
+// SabriSpeechRecognition at all.
+if (askTypeSwitchBtn) {
+  askTypeSwitchBtn.addEventListener("click", () => {
+    if (isListening) cancelListening();
+    askTypeRow.classList.remove("hidden");
+    askTypeInput.focus();
   });
 }
 
@@ -7947,6 +8201,7 @@ function startListening() {
   askEditInput.classList.add("hidden");
   listeningHint.classList.remove("hidden");
   listeningHint.textContent = "Tap to cancel";
+  if (askTypeSwitchBtn) askTypeSwitchBtn.classList.remove("hidden");
   statusText.textContent = "Listening...";
 
   const resetSilenceTimer = (duration) => {
@@ -7960,6 +8215,7 @@ function startListening() {
     isListening = false;
     micBtn.classList.remove("is-listening");
     listeningHint.classList.add("hidden");
+    if (askTypeSwitchBtn) askTypeSwitchBtn.classList.add("hidden");
 
     if (isCancelledListening) {
       isCancelledListening = false;
@@ -8024,6 +8280,7 @@ function startListening() {
       isCancelledListening = false;
       micBtn.classList.remove("is-listening");
       listeningHint.classList.add("hidden");
+      if (askTypeSwitchBtn) askTypeSwitchBtn.classList.add("hidden");
       askSubtitle.classList.add("hidden");
       if (info?.reason === "permission-denied") {
         statusText.textContent = "Keep walking, discovering...";
@@ -8075,10 +8332,24 @@ async function askSabri(question) {
     answerShown = true;
     askSubtitle.classList.add("hidden");
     placeName.textContent = isFollowUp ? `Following up: "${question}"` : `You asked: "${question}"`;
+    // Item 10 — lighter, smaller, quote-toned treatment for the echoed
+    // question specifically, so a full sentence-length question doesn't
+    // carry the same heavy visual weight as a real narration's short
+    // place-name title (part of what read as cluttered).
+    placeName.classList.add("story-title--question");
     placeDescription.textContent = "";
     placeDescription.classList.remove("story-description--fallback");
+    // Item 6, case 2 — generic neighborhood photo, never a specific place
+    // (passing null for the specific reference skips straight to the
+    // area fallback) — ambient context for the conversation, not a claim
+    // about what's being discussed.
+    applyPlacePhotoWithFallback(null, lastPosition);
     playerCard.classList.remove("hidden");
     playerCard.classList.add("is-open");
+    // Item 5 — see startStory's comment; this path hand-duplicates
+    // startStory's class toggles rather than calling it, so needs its own
+    // reset too.
+    playerCard.scrollTop = 0;
     appEl.classList.add("has-player");
     startPrompt.classList.add("hidden");
     tourControls.classList.remove("hidden");
@@ -8164,6 +8435,11 @@ async function askSabri(question) {
     // consistent turn-to-turn (see buildPlaceConversationGuidance).
     currentPlaceConversation.push({ question, answer: answerText.length > 500 ? `${answerText.slice(0, 500)}...` : answerText });
     if (currentPlaceConversation.length > 6) currentPlaceConversation.shift();
+    // Item 8 — a fresh question re-arms the check-in gate, so if the user
+    // keeps going after being asked "anything else?", a LATER lull in the
+    // same thread still gets its own check-in rather than silently never
+    // firing again for the rest of this place's conversation.
+    conversationCheckInOffered = false;
     totalQuestionsThisSession += 1;
     saveQuestionToSupabase(question, answerText);
     logEvent("voice_question_asked", { placeId: currentPlaceId, questionLength: question.length });
