@@ -192,6 +192,16 @@ async function trackedFetch(url, options, { provider, endpoint, userId } = {}) {
 // untouched, not just left in place.
 const TTS_PROVIDER = process.env.TTS_PROVIDER || "inworld";
 
+// Same rollback pattern as TTS_PROVIDER above, one level down: which Inworld
+// model speakWithInworld actually requests. Switched to inworld-tts-2 after
+// a real side-by-side (short pronunciation clips AND a full narration-length
+// comparison) confirmed it fixes Hebrew-loanword pronunciation with no
+// measured regression on speed/latency/format/voice-catalog parity — see
+// the parity-check investigation this shipped after. Flipping this env var
+// back to "inworld-tts-1.5-max" is the entire rollback path if a real-world
+// issue turns up that this testing didn't catch.
+const INWORLD_TTS_MODEL = process.env.INWORLD_TTS_MODEL || "inworld-tts-2";
+
 // --- 3-pillar conversational guide system: proactive depth, relationship
 // continuity, needs-aware routing ---
 // All three default OFF. Each pillar's new code is called ALONGSIDE the
@@ -302,34 +312,13 @@ function resolveDefaultVoiceGender(language) {
   return (TTS_PROVIDER === "inworld" ? INWORLD_VOICE_GENDER[voice] : VOICE_GENDER[voice]) || "female";
 }
 
-const HEBREW_PRONUNCIATION_GUIDE = {
-  Nachlaot: "Nakh-lah-OHT",
-  Shuk: "SHOOK",
-  "Machane Yehuda": "Mah-khah-NEH Yeh-HOO-dah",
-  Shabbat: "Shah-BAHT",
-  Kotel: "KOH-tel",
-  Knesset: "KNESS-et",
-  Mamilla: "Mah-MILL-ah",
-  Jaffa: "YAH-fah",
-  Tzahal: "Tsah-HAHL",
-  Rehavia: "Reh-hah-VEE-ah",
-  Talpiot: "Tahl-pee-OHT",
-  Katamon: "Kah-tah-MOHN",
-  Beit: "BAYT",
-  "Ein Kerem": "AYN Keh-REM",
-  "Yemin Moshe": "Yeh-MEEN Moh-SHEH",
-};
-
-const PRONUNCIATION_GUIDE_TEXT = Object.entries(HEBREW_PRONUNCIATION_GUIDE)
-  .map(([word, phonetic]) => `${word} = "${phonetic}"`)
-  .join("\n");
-
-// Real-world field report, distinct from HEBREW_PRONUNCIATION_GUIDE above:
-// that guide works by getting Claude to spell place names phonetically IN
-// the narration text itself, which is fine there because the phonetic
-// spelling is meant to be seen too. This glossary is for the opposite
-// situation — foreign-origin terms (religious/cultural vocabulary, place
-// names) embedded inside narration that the WRITTEN word is correct for
+// Real-world field report, distinct from buildPronunciationGuidance below:
+// that function tells Claude how to WRITE Hebrew/Israeli terms in narration
+// text (now: naturally, in their normal spelling — see its own comment for
+// why the old fake-phonetic-spelling version of that instruction is gone).
+// This glossary is for the opposite situation — foreign-origin terms
+// (religious/cultural vocabulary, place names) embedded inside narration
+// that the WRITTEN word is correct for
 // (should stay on screen exactly as written) but the active TTS voice
 // mispronounces badly (confirmed cringe-bad in real listening, for
 // Hebrew/Jewish terms in English narration specifically). Substitution is
@@ -376,6 +365,17 @@ const PRONUNCIATION_GLOSSARY = {
     // it's just been curated from real mispronunciation reports so far,
     // and this is the first ordinary-English one.
     hostel: "HOSS-tel",
+    // Added after switching to inworld-tts-2 (see INWORLD_TTS_MODEL):
+    // these were the two names that prompted the whole cross-lingual
+    // investigation and had NO entry here before — 1.5-max had no glossary
+    // fix for them at all, the hyphenated-respelling approach above never
+    // got a chance to cover them. Real Hebrew script, not a Latin
+    // respelling, because tts-2 does script-based cross-lingual synthesis
+    // (confirmed live: same voice reads the Hebrew natively without
+    // carrying over its English accent) — a fake Latin respelling would be
+    // a step backward from what the model can now do with the real word.
+    nachlaot: "נחלאות",
+    "machane yehuda": "מחנה יהודה",
   },
   // Hebrew-script narration already handles Hebrew/Jewish terms correctly
   // on its own (see buildLanguageGuidance's Hebrew branch) — this is only
@@ -458,20 +458,35 @@ function applyPronunciationGlossary(text, language) {
   });
 }
 
-// Only relevant when the narration itself is in English (or another
-// non-Hebrew/Arabic language) — the point is spelling Hebrew place names
-// phonetically so an English-reading TTS voice pronounces them correctly.
-// If the narration is already being written natively in Hebrew or Arabic,
-// there's nothing to transliterate; the words are already correctly
-// spelled in their own script.
+// Real reversal, not a tweak: this used to instruct Claude to spell Hebrew/
+// Israeli place names phonetically IN the narration text itself (e.g.
+// "Shah-BAHT" in place of "Shabbat") so an English-reading TTS voice would
+// pronounce them correctly — necessary back when the TTS engine could only
+// read the real word wrong. Confirmed via real audio (both short isolated
+// clips and a full narration-length comparison) that inworld-tts-2 (see
+// INWORLD_TTS_MODEL) pronounces the real word/script correctly on its own,
+// via script-based cross-lingual synthesis — so the fake spelling is now
+// actively counterproductive: it's neither the real word (wrong on screen,
+// looks broken) nor a useful pronunciation hint anymore (tts-2 wasn't
+// trained to read "Shah-BAHT" as "Shabbat", it just reads the fake spelling
+// literally). The instruction now is the opposite: write the term
+// naturally, the same as any other word, in whichever script the current
+// narration language already uses — English narration writes it in normal
+// English spelling ("Shabbat"), Hebrew narration already writes native
+// Hebrew script on its own (see buildLanguageGuidance's Hebrew branch).
+// Remaining TTS-only mispronunciation cases (a script-correct word the
+// voice still says wrong) are handled separately and invisibly by
+// PRONUNCIATION_GLOSSARY/applyPronunciationGlossary below — that mechanism
+// is unaffected by this change.
 function buildPronunciationGuidance(languageName) {
   if (languageName === "Hebrew" || languageName === "Arabic") return null;
 
   return (
-    "When you write Hebrew or Israeli place names, spell them phonetically for " +
-    "English text-to-speech so they are pronounced correctly. Use the " +
-    "pronunciation guide provided.\n\n" +
-    `Pronunciation guide:\n${PRONUNCIATION_GUIDE_TEXT}`
+    "When you write Hebrew or Israeli place names and terms (like Shabbat, " +
+    "Machane Yehuda, Nachlaot), write them in their normal, correct spelling — " +
+    "the same as you would write any other word. Do NOT spell them out " +
+    "phonetically or in broken syllables (e.g. do not write \"Shah-BAHT\" or " +
+    "\"Mah-khah-NEH Yeh-HOO-dah\"). Just write the real word naturally."
   );
 }
 
@@ -4649,10 +4664,13 @@ async function speakWithOpenAI({ text, speed, voice, language }) {
 // no conversion step needed for normalizeWavLoudness to work on Inworld's
 // output exactly the same way it does on OpenAI's.
 //
-// Voice/model: inworld-tts-1.5-max (their top-quality model, per real-world
-// side-by-side testing not meaningfully slower than OpenAI's tts-1 for a
-// single-sentence request — see the self-review notes in the commit this
-// shipped in). Voice IDs come from INWORLD_LANGUAGE_VOICE_MAP, confirmed
+// Voice/model: INWORLD_TTS_MODEL (see its own comment — inworld-tts-2 by
+// default as of the cross-lingual pronunciation switch; was hardcoded to
+// inworld-tts-1.5-max before that, per real-world side-by-side testing not
+// meaningfully slower than OpenAI's tts-1 for a single-sentence request —
+// see the self-review notes in the commit this originally shipped in;
+// re-measured not meaningfully slower on tts-2 either, see the parity-check
+// investigation). Voice IDs come from INWORLD_LANGUAGE_VOICE_MAP, confirmed
 // against Inworld's live /tts/v1/voices catalog for all 6 languages Sabri
 // supports — no per-user Settings override for now (see
 // INWORLD_LANGUAGE_VOICE_MAP's own comment for why), and no speed/rate
@@ -4679,7 +4697,7 @@ async function speakWithInworld({ text, language }) {
     body: JSON.stringify({
       text: resolvedText,
       voiceId,
-      modelId: "inworld-tts-1.5-max",
+      modelId: INWORLD_TTS_MODEL,
       audioConfig: { audioEncoding: "LINEAR16" },
     }),
   });
@@ -4701,7 +4719,7 @@ async function speakWithInworld({ text, language }) {
     endpoint: "speak",
     units: data.usage?.processedCharactersCount ?? resolvedText.length,
     costUsd: 0, // no confirmed Inworld pricing to compute this against yet — tracked as a real request either way
-    meta: { voiceId, modelId: data.usage?.modelId || "inworld-tts-1.5-max" },
+    meta: { voiceId, modelId: data.usage?.modelId || INWORLD_TTS_MODEL },
   });
 
   return normalizeWavLoudness(Buffer.from(data.audioContent, "base64"));
