@@ -286,19 +286,109 @@ const VOICE_GENDER = { onyx: "male", echo: "male", nova: "female", shimmer: "fem
 // unconditionally while Inworld is active — no per-user override, unlike
 // the OpenAI path where English respects the user's Settings choice. See
 // speakWithInworld below.
+// Expanded 2026-09-10 from the original 6 to all 15 of Inworld's GA
+// languages, plus 2 extra regional-variant codes for Spanish/Portuguese
+// (see LANGUAGE_CATALOG below for the UI side of this). Same selection
+// method as the original 6, not a fixed gender quota: picked the single
+// voice per language whose real catalog description best fits a warm,
+// knowledgeable tour-guide narrator (preferring an explicit "narration"
+// tag/description where the catalog offered one), confirmed directly
+// against Inworld's live /tts/v1/voices endpoint. "es" (Marta, Castilian)
+// and "fr" (Hélène) are unchanged from the original picks — kept for
+// backward compatibility with already-saved "es"/"fr" user profiles, not
+// re-picked.
 const INWORLD_LANGUAGE_VOICE_MAP = {
   en: "Graham", // "Profound, authoritative British male voice, perfect for historical documentaries... educational content"
   he: "Yael", // the only female Hebrew voice Inworld offers
   ar: "Nour", // the only female Arabic voice Inworld offers
-  es: "Marta", // Castilian Spanish female, "ideal for education, narration, and business"
+  es: "Marta", // Castilian Spanish female, "ideal for education, narration, and business" — unchanged, bare "es" stays Castilian for backward compatibility
+  "es-MX": "Sofia", // "fast-paced, clear, and engaging... neutral Latin American Spanish accent" — picked over the catalog's Mexican-tagged voices specifically for the neutral-LatAm framing (South America relevance), not a Mexico-specific accent
   fr: "Hélène", // the only female-coded voice among Inworld's 4 French options
   ru: "Nikolai", // "Deep, resonant male voice... clear, theatrical, and narrative quality"
+  zh: "Xinyi", // "A Chinese woman with a neutral tone, perfect for narrations"
+  nl: "Lore", // "Clear, calm Dutch female voice, great for narrations and professional use cases"
+  de: "Annika", // "Warm, engaging German female voice, ideal for business, e-learning, and narration"
+  hi: "Manoj", // "Clear, professional Hindi male voice. Great for narrations, news anchors, and customer service"
+  it: "Orietta", // "Calm adult female Italian voice, with a soothing cadence" — chosen over Gianni (Italian's only other option), whose "speaks rapidly" reads worse for a walking tour
+  ja: "Hina", // "smooth, clear voice speaking in a formal, narrative tone"
+  ko: "Seojun", // "Clear, deep mature Korean male voice" — authoritative narrator fit, matching the Graham/Nikolai pattern
+  pl: "Szymon", // "Polish adult male voice with a warm, friendly quality" — chosen over Wojciech (Polish's only other option) for the warmer, friendlier tone
+  "pt-BR": "Bruna", // "Warm, conversational Brazilian Portuguese female voice, ideal for... narration"
+  "pt-PT": "Matilde", // "Warm, melodic European Portuguese female voice, ideal for... narration"
 };
-const INWORLD_VOICE_GENDER = { Graham: "male", Yael: "female", Nour: "female", Marta: "female", Hélène: "female", Nikolai: "male" };
+const INWORLD_VOICE_GENDER = {
+  Graham: "male",
+  Yael: "female",
+  Nour: "female",
+  Marta: "female",
+  Sofia: "female",
+  Hélène: "female",
+  Nikolai: "male",
+  Xinyi: "female",
+  Lore: "female",
+  Annika: "female",
+  Manoj: "male",
+  Orietta: "female",
+  Hina: "female",
+  Seojun: "male",
+  Szymon: "male",
+  Bruna: "female",
+  Matilde: "female",
+};
 
 function resolveInworldVoice(language) {
   return INWORLD_LANGUAGE_VOICE_MAP[language] || INWORLD_LANGUAGE_VOICE_MAP.en;
 }
+
+// Single source of truth for the language dropdown's contents, injected
+// into the client as window.LANGUAGE_CATALOG (see renderIndexHtml) and
+// used by app.js to populate both the Settings and Edit Preferences
+// language selects at runtime — replaces what used to be two hand-written
+// <option> lists in index.html that had to be kept in sync by hand.
+// Restricted to Inworld's 15 formally-tested (Generally Available)
+// languages, not its wider experimental tier — consistent with the
+// standing practice of not trusting untested language coverage without
+// real-audio verification first (see the "test new language pairs with
+// real audio" entry in ARCHITECTURE_DECISIONS.md). `code` is what actually
+// gets written to settings.language/userProfile.language for a
+// single-voice language. For Spanish and Portuguese, `code` is just the
+// DEFAULT variant (so selecting the top-level entry alone is still a valid
+// choice) and `variants` lists the real regional options — the only two
+// languages in the current catalog with more than one real accent choice,
+// given the catalog check (34 Spanish voices, 14 Portuguese voices) and
+// near-term relevance (South America trip). Every other language keeps a
+// single voice per language, same as the original 6.
+const LANGUAGE_CATALOG = [
+  { code: "ar", label: "Arabic" },
+  { code: "zh", label: "Chinese" },
+  { code: "nl", label: "Dutch" },
+  { code: "en", label: "English" },
+  { code: "fr", label: "French" },
+  { code: "de", label: "German" },
+  { code: "he", label: "Hebrew" },
+  { code: "hi", label: "Hindi" },
+  { code: "it", label: "Italian" },
+  { code: "ja", label: "Japanese" },
+  { code: "ko", label: "Korean" },
+  { code: "pl", label: "Polish" },
+  {
+    code: "pt-BR",
+    label: "Portuguese",
+    variants: [
+      { code: "pt-BR", label: "Brazilian" },
+      { code: "pt-PT", label: "European" },
+    ],
+  },
+  { code: "ru", label: "Russian" },
+  {
+    code: "es",
+    label: "Spanish",
+    variants: [
+      { code: "es", label: "Castilian" },
+      { code: "es-MX", label: "Latin American" },
+    ],
+  },
+];
 
 // Provider-aware — used by persona generation (see /api/get-persona) to
 // match a newly generated name's gender to whichever voice the user will
@@ -788,13 +878,35 @@ const DEPTH_GUIDANCE = {
   deep: "Give this narration real depth: 5-6 paragraphs of full history, connections, and deep dives.",
 };
 
+// Expanded from the original 6 to Inworld's 15 formally-tested (GA)
+// languages — see LANGUAGE_CATALOG below for the full story on why these
+// 15 specifically, and INWORLD_LANGUAGE_VOICE_MAP for the voice pick per
+// language. Deliberately kept at the GENERIC language name even for
+// es/pt-BR/pt-PT (all three read "Spanish"/"Portuguese", not "Castilian
+// Spanish" etc.) — buildGenderConsistencyGuidance and other callers do
+// exact string comparisons against these names (e.g. `languageName ===
+// "Spanish"`), so a per-variant display name would silently break that
+// matching. Regional steering (Mexican vs Castilian, Brazilian vs
+// European) is instead layered on top in buildLanguageGuidance, keyed off
+// the raw language CODE, not this name.
 const LANGUAGE_NAMES = {
   en: "English",
   he: "Hebrew",
   ar: "Arabic",
   es: "Spanish",
+  "es-MX": "Spanish",
   fr: "French",
   ru: "Russian",
+  zh: "Chinese",
+  nl: "Dutch",
+  de: "German",
+  hi: "Hindi",
+  it: "Italian",
+  ja: "Japanese",
+  ko: "Korean",
+  pl: "Polish",
+  "pt-BR": "Portuguese",
+  "pt-PT": "Portuguese",
 };
 
 const PLACE_TYPE_LABELS = {
@@ -938,6 +1050,7 @@ function renderIndexHtml() {
     `  window.SUPABASE_ANON_KEY = ${JSON.stringify(safeAnonKey)};\n` +
     `  window.TTS_PROVIDER = ${JSON.stringify(TTS_PROVIDER)};\n` +
     `  window.INWORLD_LANGUAGE_VOICE_MAP = ${JSON.stringify(INWORLD_LANGUAGE_VOICE_MAP)};\n` +
+    `  window.LANGUAGE_CATALOG = ${JSON.stringify(LANGUAGE_CATALOG)};\n` +
     // 3-pillar system flags + tunables — see their declarations above for
     // why these are real env vars read here rather than hardcoded, and why
     // app.js (browser code, no process.env) needs them injected this way.
@@ -1935,7 +2048,7 @@ app.post("/api/needs-suggestion", async (req, res) => {
     buildPersonaGuidance(persona, false, false),
     SPOKEN_LANGUAGE_RULES,
   ].filter(Boolean);
-  const languageGuidance = buildLanguageGuidance(languageName);
+  const languageGuidance = buildLanguageGuidance(languageName, language);
   if (languageGuidance) systemPromptParts.push(languageGuidance);
   const genderConsistencyGuidance = buildGenderConsistencyGuidance(languageName, language);
   if (genderConsistencyGuidance) systemPromptParts.push(genderConsistencyGuidance);
@@ -3273,7 +3386,12 @@ function buildFirstNarrationContext(isFirstNarrationOfSession, firstVisitToCity,
 // Shared by /api/narrate and /api/ask — non-English languages need more than
 // "translate this"; Hebrew in particular sounds stilted/transliterated if
 // Claude isn't told explicitly to write native, spoken Hebrew.
-function buildLanguageGuidance(languageName) {
+// Takes the raw language CODE too (not just the display name) so the
+// regional-variant branches below (es vs es-MX, pt-BR vs pt-PT) can key off
+// the specific variant — LANGUAGE_NAMES deliberately collapses those to the
+// same generic "Spanish"/"Portuguese" string (see its own comment), so
+// languageName alone can't distinguish them.
+function buildLanguageGuidance(languageName, language) {
   if (!languageName || languageName === "English") return null;
   const parts = [
     `Narrate entirely and naturally in ${languageName}. Write as a native ` +
@@ -3312,6 +3430,39 @@ function buildLanguageGuidance(languageName) {
         "news broadcast."
     );
   }
+  // Same reasoning as the Arabic MSA lock above, applied to the two
+  // languages that now have real regional voice variants — without an
+  // explicit steer, Claude has no signal about which regional vocabulary/
+  // register to write in, and a Latin-American-accented voice reading
+  // Peninsular-Spanish vocabulary (or vice versa) would be a real
+  // mismatch, not just a missed nicety. Untested by ear as of this
+  // writing — flagged in the language-expansion report as spot-check-only,
+  // not full round-trip-verified the way the original 6 were.
+  if (language === "es-MX") {
+    parts.push(
+      "Write in Latin American Spanish — vocabulary, verb forms (\"ustedes\", " +
+        "not \"vosotros\"), and register a Latin American audience expects, " +
+        "not Peninsular/Castilian Spanish."
+    );
+  }
+  if (language === "es") {
+    parts.push(
+      "Write in Peninsular/Castilian Spanish — vocabulary and register " +
+        "(\"vosotros\" is natural here), not Latin American Spanish."
+    );
+  }
+  if (language === "pt-BR") {
+    parts.push(
+      "Write in Brazilian Portuguese — vocabulary, \"você\", and register, " +
+        "not European Portuguese."
+    );
+  }
+  if (language === "pt-PT") {
+    parts.push(
+      "Write in European Portuguese — vocabulary and register (\"tu\" is " +
+        "natural here), not Brazilian Portuguese."
+    );
+  }
   return parts.join("\n\n");
 }
 
@@ -3323,11 +3474,21 @@ function buildLanguageGuidance(languageName) {
 // no TTS engine can fix it — it has to be fixed in the generated text.
 // Same underlying grammatical category (gendered verb/adjective
 // conjugation) genuinely applies to Arabic and Russian too, not just
-// Hebrew, so the same fix is applied there. French/Spanish only get the
-// lighter self-reference-only version, since their 2nd-person address
-// ("tu"/"vous", "tú"/"usted") doesn't conjugate by the LISTENER's gender
-// the way Hebrew/Arabic "you" verb forms do — see the per-language
-// comments below for why each is scoped the way it is.
+// Hebrew, so the same fix is applied there. French/Spanish/Portuguese only
+// get the lighter self-reference-only version, since their 2nd-person
+// address ("tu"/"vous", "tú"/"usted", "tu"/"você") doesn't conjugate by the
+// LISTENER's gender the way Hebrew/Arabic "you" verb forms do — see the
+// per-language comments below for why each is scoped the way it is.
+// Portuguese added 2026-09-10 alongside the language expansion — same
+// well-established self-reference adjective/participle gender agreement as
+// French/Spanish (e.g. "estou cansado" vs "estou cansada"), same family of
+// language. Italian has the same real grammatical pattern too but wasn't
+// added here without empirical/native-speaker confirmation first (see the
+// language-expansion report) — a real gap, flagged rather than guessed at,
+// per the standing "empirical testing over assumption" practice. Hindi
+// verb conjugation by speaker gender is closer to the Hebrew/Arabic
+// pattern than the French/Spanish one and was also left uninvestigated for
+// the same reason.
 //
 // selfGender reuses resolveDefaultVoiceGender(language) — the exact same
 // function persona generation already uses to pick a name that matches
@@ -3375,7 +3536,7 @@ function buildGenderConsistencyGuidance(languageName, language) {
     );
   }
 
-  if (languageName === "French" || languageName === "Spanish") {
+  if (languageName === "French" || languageName === "Spanish" || languageName === "Portuguese") {
     return (
       `GRAMMATICAL GENDER AGREEMENT (${languageName}): adjectives and certain past participles describing ` +
         `YOURSELF (the guide) agree in grammatical gender. Stay consistent with ${selfGenderWord} forms ` +
@@ -3507,7 +3668,7 @@ app.get("/api/get-directions", async (req, res) => {
       TOURIST_ORIENTATION_GUIDANCE,
       SAFETY_GUIDANCE,
       SPOKEN_LANGUAGE_RULES,
-      buildLanguageGuidance(languageName),
+      buildLanguageGuidance(languageName, language),
       buildGenderConsistencyGuidance(languageName, language),
     ].filter(Boolean);
 
@@ -4167,7 +4328,7 @@ app.post("/api/narrate", async (req, res) => {
     SAFETY_GUIDANCE,
     SPOKEN_LANGUAGE_RULES,
     buildPronunciationGuidance(languageName),
-    buildLanguageGuidance(languageName),
+    buildLanguageGuidance(languageName, language),
     buildGenderConsistencyGuidance(languageName, language),
     TIER_GUIDANCE[resolvedTier],
     DEPTH_GUIDANCE[resolvedDepth],
@@ -4290,7 +4451,7 @@ app.post("/api/narrate-proactive", async (req, res) => {
     SPOKEN_LANGUAGE_RULES,
   ].filter(Boolean);
 
-  const languageGuidance = buildLanguageGuidance(languageName);
+  const languageGuidance = buildLanguageGuidance(languageName, language);
   if (languageGuidance) systemPromptParts.push(languageGuidance);
   const pronunciationGuidance = buildPronunciationGuidance(languageName);
   if (pronunciationGuidance) systemPromptParts.push(pronunciationGuidance);
@@ -4428,7 +4589,7 @@ app.post("/api/ask", async (req, res) => {
       `not a correction of where they currently ARE.`
   );
 
-  const languageGuidance = buildLanguageGuidance(languageName);
+  const languageGuidance = buildLanguageGuidance(languageName, language);
   if (languageGuidance) systemPromptParts.push(languageGuidance);
 
   const pronunciationGuidance = buildPronunciationGuidance(languageName);
@@ -4900,7 +5061,7 @@ app.post("/api/identify", async (req, res) => {
   // Same per-user language preference narration/ask already respect — a
   // non-English speaker pointing the camera at something should get the
   // answer in their language too, not always English.
-  const languageGuidance = buildLanguageGuidance(LANGUAGE_NAMES[language]);
+  const languageGuidance = buildLanguageGuidance(LANGUAGE_NAMES[language], language);
   // Real field bug this fixes: before this, /api/identify received NO
   // location context at all — not even city/neighborhood — so a photo was
   // identified purely from the image with zero grounding. Investigated
@@ -4949,7 +5110,12 @@ const ONBOARDING_CHAT_SYSTEM_PROMPT =
   "first tour — not filling out a form. Your goal is to naturally gather these profile fields through " +
   "conversation:\n" +
   "- name (what to call them)\n" +
-  "- language (which language they want tours narrated in — map to exactly one of: en, he, ar, es, fr, ru)\n" +
+  "- language (which language they want tours narrated in — map to exactly one of: en, he, ar, es, " +
+  "es-MX, fr, ru, zh, nl, de, hi, it, ja, ko, pl, pt-BR, pt-PT. Use es-MX for Latin American Spanish, es " +
+  "for Spain/Castilian Spanish; pt-BR for Brazilian Portuguese, pt-PT for European Portuguese. If they " +
+  "just say \"Spanish\" or \"Portuguese\" with no region mentioned, default to es-MX or pt-BR " +
+  "respectively unless something else in the conversation (where they're from/traveling, how they " +
+  "phrase things) points the other way)\n" +
   "- interests (what they love learning about when they travel — map loosely to one or more of: 'Deep " +
   "history', 'Faith & spirituality', 'Hidden stories', 'Architecture & beauty', 'Food & living culture', " +
   "'People & community', 'Politics & society', 'Art & creativity', 'Nature & landscape', 'Markets & " +

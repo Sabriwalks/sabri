@@ -74,6 +74,7 @@ const settingsClose = document.getElementById("settings-close");
 const voiceCards = document.querySelectorAll("#settings-drawer .voice-card");
 const depthPills = document.querySelectorAll("#settings-drawer .depth-pill");
 const languageSelect = document.getElementById("language-select");
+const languageVariantSelect = document.getElementById("language-variant-select");
 
 const preferencesDrawer = document.getElementById("preferences-drawer");
 const preferencesOverlay = document.getElementById("preferences-overlay");
@@ -91,6 +92,7 @@ const preferencesArchetypeContainer = document.getElementById("preferences-arche
 const preferencesVoiceCards = document.querySelectorAll("#preferences-drawer .voice-card");
 const preferencesDepthPills = document.querySelectorAll("#preferences-drawer .depth-pill");
 const preferencesLanguageSelect = document.getElementById("preferences-language");
+const preferencesLanguageVariantSelect = document.getElementById("preferences-language-variant");
 const preferencesSaveBtn = document.getElementById("preferences-save-btn");
 
 const reportProblemBtn = document.getElementById("report-problem-btn");
@@ -2072,13 +2074,29 @@ if (deleteAccountConfirmBtn) {
 
 const SETTINGS_STORAGE_KEY = "sabri-settings";
 const DEFAULT_SETTINGS = { voice: "onyx", depth: "standard", language: "en" };
+// Expanded alongside the 15-language dropdown (LANGUAGE_CATALOG in
+// server.js) — not named in that investigation's file list, but a real gap
+// found while tracing settings.language's actual call sites: without an
+// entry here, voice input for any new language would silently try to
+// recognize speech as English instead of erroring or falling back sensibly.
 const SPEECH_RECOGNITION_LANGS = {
   en: "en-US",
   he: "he-IL",
   ar: "ar-SA",
   es: "es-ES",
+  "es-MX": "es-MX",
   fr: "fr-FR",
   ru: "ru-RU",
+  zh: "zh-CN",
+  nl: "nl-NL",
+  de: "de-DE",
+  hi: "hi-IN",
+  it: "it-IT",
+  ja: "ja-JP",
+  ko: "ko-KR",
+  pl: "pl-PL",
+  "pt-BR": "pt-BR",
+  "pt-PT": "pt-PT",
 };
 
 function loadSettings() {
@@ -2099,13 +2117,85 @@ function saveSettings() {
   }
 }
 
+// Nested language→variant selection (Settings and Edit Preferences both use
+// this — see #language-select/#language-variant-select and
+// #preferences-language/#preferences-language-variant in index.html).
+// window.LANGUAGE_CATALOG (injected by renderIndexHtml in server.js) is the
+// single source of truth for what's in the dropdown, replacing what used
+// to be two hand-written <option> lists that had to be kept in sync by
+// hand. Only Spanish/Portuguese currently have `variants` — everything
+// else behaves exactly like the flat single-level list this replaces, one
+// <option> per language, no second step.
+//
+// Populates the primary select's options from the catalog, figures out
+// which top-level entry the CURRENT language code belongs to (a saved code
+// might be a variant's own code, e.g. "es-MX", not the group's primary
+// code "es"), and shows/hides+populates the variant select accordingly.
+function populateLanguageSelect(selectEl, variantSelectEl, currentLanguageCode) {
+  if (!selectEl) return;
+  const catalog = window.LANGUAGE_CATALOG || [];
+  if (catalog.length === 0) return; // window global not injected yet — leave the static English fallback option in place
+
+  selectEl.innerHTML = "";
+  catalog.forEach((entry) => {
+    const option = document.createElement("option");
+    option.value = entry.code;
+    option.textContent = entry.label;
+    selectEl.appendChild(option);
+  });
+
+  const activeEntry =
+    catalog.find((entry) => entry.code === currentLanguageCode) ||
+    catalog.find((entry) => (entry.variants || []).some((variant) => variant.code === currentLanguageCode)) ||
+    catalog.find((entry) => entry.code === "en") ||
+    catalog[0];
+
+  selectEl.value = activeEntry.code;
+  updateLanguageVariantSelect(variantSelectEl, activeEntry, currentLanguageCode);
+}
+
+// Shows+populates the variant select for a multi-variant language (keeping
+// whichever variant currentVariantCode already names, if it's a real
+// option), or clears+hides it entirely for a single-voice language — the
+// "no dead-end variant screen with only one option" requirement.
+function updateLanguageVariantSelect(variantSelectEl, catalogEntry, currentVariantCode) {
+  if (!variantSelectEl) return;
+  const variants = catalogEntry.variants || [];
+  if (variants.length === 0) {
+    variantSelectEl.innerHTML = "";
+    variantSelectEl.classList.add("hidden");
+    return;
+  }
+  variantSelectEl.innerHTML = "";
+  variants.forEach((variant) => {
+    const option = document.createElement("option");
+    option.value = variant.code;
+    option.textContent = variant.label;
+    variantSelectEl.appendChild(option);
+  });
+  variantSelectEl.value = variants.some((variant) => variant.code === currentVariantCode)
+    ? currentVariantCode
+    : variants[0].code;
+  variantSelectEl.classList.remove("hidden");
+}
+
+// The real, effective language code to save — the variant select's value
+// when it's showing (multi-variant language), otherwise the primary
+// select's own value directly (single-voice language, no second step).
+function effectiveLanguageValue(selectEl, variantSelectEl) {
+  if (variantSelectEl && !variantSelectEl.classList.contains("hidden") && variantSelectEl.value) {
+    return variantSelectEl.value;
+  }
+  return selectEl ? selectEl.value : DEFAULT_SETTINGS.language;
+}
+
 const settings = loadSettings();
 applySettingsToUI();
 
 function applySettingsToUI() {
   voiceCards.forEach((card) => card.classList.toggle("is-active", card.dataset.voice === settings.voice));
   depthPills.forEach((pill) => pill.classList.toggle("is-active", pill.dataset.depth === settings.depth));
-  if (languageSelect) languageSelect.value = settings.language;
+  populateLanguageSelect(languageSelect, languageVariantSelect, settings.language);
   applyActiveVoiceProviderUI();
 }
 
@@ -2175,7 +2265,23 @@ depthPills.forEach((pill) => {
 
 if (languageSelect) {
   languageSelect.addEventListener("change", () => {
-    settings.language = languageSelect.value;
+    // Primary select just changed to a different top-level language —
+    // re-derive its catalog entry and reveal/hide+repopulate the variant
+    // select accordingly, defaulting to that language's own default variant
+    // (its catalog `code`) rather than trying to carry over the previous
+    // language's variant selection.
+    const catalog = window.LANGUAGE_CATALOG || [];
+    const entry = catalog.find((e) => e.code === languageSelect.value) || catalog.find((e) => e.code === "en");
+    updateLanguageVariantSelect(languageVariantSelect, entry, entry.code);
+    settings.language = effectiveLanguageValue(languageSelect, languageVariantSelect);
+    saveSettings();
+    applyActiveVoiceProviderUI();
+  });
+}
+
+if (languageVariantSelect) {
+  languageVariantSelect.addEventListener("change", () => {
+    settings.language = effectiveLanguageValue(languageSelect, languageVariantSelect);
     saveSettings();
     applyActiveVoiceProviderUI();
   });
@@ -2280,7 +2386,7 @@ function populatePreferencesForm() {
   preferencesVoiceCards.forEach((card) => card.classList.toggle("is-active", card.dataset.voice === settings.voice));
   const currentDepth = userProfile?.depth || settings.depth;
   preferencesDepthPills.forEach((pill) => pill.classList.toggle("is-active", pill.dataset.depth === currentDepth));
-  if (preferencesLanguageSelect) preferencesLanguageSelect.value = settings.language;
+  populateLanguageSelect(preferencesLanguageSelect, preferencesLanguageVariantSelect, settings.language);
   applyActiveVoiceProviderUI();
   const currentArchetype = userProfile?.preferredArchetype || "local_friend";
   if (preferencesArchetypeContainer) {
@@ -2320,7 +2426,17 @@ preferencesVoiceCards.forEach((card) => {
 
 if (preferencesLanguageSelect) {
   preferencesLanguageSelect.addEventListener("change", () => {
-    applyActiveVoiceProviderUI(preferencesLanguageSelect.value);
+    const catalog = window.LANGUAGE_CATALOG || [];
+    const entry =
+      catalog.find((e) => e.code === preferencesLanguageSelect.value) || catalog.find((e) => e.code === "en");
+    updateLanguageVariantSelect(preferencesLanguageVariantSelect, entry, entry.code);
+    applyActiveVoiceProviderUI(effectiveLanguageValue(preferencesLanguageSelect, preferencesLanguageVariantSelect));
+  });
+}
+
+if (preferencesLanguageVariantSelect) {
+  preferencesLanguageVariantSelect.addEventListener("change", () => {
+    applyActiveVoiceProviderUI(effectiveLanguageValue(preferencesLanguageSelect, preferencesLanguageVariantSelect));
   });
 }
 
@@ -2348,7 +2464,9 @@ if (preferencesSaveBtn) {
     const activeDepthPill = Array.from(preferencesDepthPills).find((pill) => pill.classList.contains("is-active"));
     const voice = activeVoiceCard ? activeVoiceCard.dataset.voice : settings.voice;
     const depth = activeDepthPill ? activeDepthPill.dataset.depth : settings.depth;
-    const language = preferencesLanguageSelect ? preferencesLanguageSelect.value : settings.language;
+    const language = preferencesLanguageSelect
+      ? effectiveLanguageValue(preferencesLanguageSelect, preferencesLanguageVariantSelect)
+      : settings.language;
     const activeArchetypeOption = preferencesArchetypeContainer
       ? preferencesArchetypeContainer.querySelector(".onboarding-pace-option.is-selected")
       : null;

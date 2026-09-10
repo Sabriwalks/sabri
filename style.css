@@ -1707,6 +1707,10 @@ body {
   font-size: 14px;
 }
 
+.language-variant-select {
+  margin-top: 8px;
+}
+
 .account-name {
   font-size: 15px;
   font-weight: 600;
