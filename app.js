@@ -7757,6 +7757,11 @@ function startStory(title, description) {
   appEl.classList.add("has-player");
   startPrompt.classList.add("hidden");
   tourControls.classList.remove("hidden");
+  // Safety net for the same askTypeRow dismissal gap fixed in
+  // startListening(): a new narration starting is another point where a
+  // typed-input row left open (via askTypeSwitchBtn, never submitted)
+  // should close rather than linger over the new content.
+  if (askTypeRow) askTypeRow.classList.add("hidden");
 }
 
 function play() {
@@ -8202,6 +8207,16 @@ function startListening() {
   listeningHint.classList.remove("hidden");
   listeningHint.textContent = "Tap to cancel";
   if (askTypeSwitchBtn) askTypeSwitchBtn.classList.remove("hidden");
+  // Real bug this fixes, caught on review (not in the original testing
+  // pass): askTypeRow was only ever hidden by actually submitting a typed
+  // question — structurally the same unresolved gap the original report
+  // was really describing. If the user opened it (via askTypeSwitchBtn)
+  // and then switched back to voice instead of typing, it stayed open
+  // indefinitely, invisible-bug style, alongside the now-active listening
+  // UI. Voice and typed input are mutually exclusive — starting to listen
+  // should close the other one, symmetric with askTypeSwitchBtn's own
+  // cancelListening() call when switching the other direction.
+  if (askTypeRow) askTypeRow.classList.add("hidden");
   statusText.textContent = "Listening...";
 
   const resetSilenceTimer = (duration) => {
