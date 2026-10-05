@@ -4908,6 +4908,15 @@ app.post("/api/speak", async (req, res) => {
     res.setHeader("Content-Type", "audio/wav");
     res.send(normalized);
   } catch (error) {
+    // Real gap this fixes: found during a production incident investigation
+    // (2026-10-05) — this catch previously never logged anything server-side,
+    // so a transient TTS failure (confirmed: one real 502 from Inworld that
+    // didn't reproduce on retry seconds later) left zero trail in Vercel
+    // logs. The client-facing message stays generic ("Failed to generate
+    // speech.") on purpose — never echo a raw upstream error to the client —
+    // but the real reason now reaches the logs so a recurrence is
+    // diagnosable without re-running live reproduction by hand.
+    console.error(`[speak] failed (language=${language || "unspecified"}):`, error.message);
     res.status(error.statusCode || 502).json({ error: error.statusCode === 500 ? error.message : "Failed to generate speech." });
   }
 });
