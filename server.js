@@ -2535,6 +2535,11 @@ app.post("/api/get-persona", async (req, res) => {
     }
     res.json({ persona: inserted, cached: false });
   } catch (error) {
+    // Same gap as /api/speak had before a4517f0: this caught every error
+    // (including a slow/failed anthropic.messages.create call — the actual
+    // suspect in a real "Meeting your guide" hang investigated 2026-10-05)
+    // with zero server-side trail, only a generic message to the client.
+    console.error(`[get-persona] failed (city=${city}, archetype=${archetype}, language=${resolvedLanguage}):`, error.message || error);
     res.status(502).json({ error: "Failed to get a guide persona." });
   }
 });
@@ -2584,6 +2589,7 @@ app.post("/api/check-persona-introduction", async (req, res) => {
 
     res.json({ isFirstMeeting: true });
   } catch (error) {
+    console.error(`[check-persona-introduction] failed (city=${city}, archetype=${archetype}):`, error.message || error);
     res.json({ isFirstMeeting: false });
   }
 });

@@ -6769,19 +6769,22 @@ const PERSONA_INTRO_STORAGE_KEY = "sabri_persona_introductions";
 // same guest/signed-in split already used for profile/settings elsewhere
 // in this app. Both paths converge on the same guarantee: once ever per
 // city+archetype, not once per session.
-async function checkIsFirstPersonaMeeting(city, archetype, language) {
+async function checkIsFirstPersonaMeeting(city, archetype, language, signal) {
   if (currentUser) {
     try {
       const response = await fetch("/api/check-persona-introduction", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId: currentUser.id, city, archetype, language }),
+        signal,
       });
       const data = await response.json();
       return response.ok ? !!data.isFirstMeeting : false;
     } catch (error) {
       // Fail safe toward "no introduction" rather than risk repeating a
       // multi-sentence intro every narration if this call keeps failing.
+      // Also where an aborted (timed-out) request lands — see
+      // ensurePersonaForCity's shared AbortController/timeout.
       return false;
     }
   }
@@ -6808,6 +6811,23 @@ function updatePersonaChip() {
   }
 }
 
+// Real incident this guards against (2026-10-05): a brand-new user's very
+// first persona generation is a genuine cache-miss (a live Claude call plus
+// a Supabase upsert — measured ~10-11s even in the NORMAL case) with zero
+// timeout anywhere in this chain or in checkIsFirstPersonaMeeting's own
+// fetch below it. A slow/stuck upstream call had nothing bounding it, so
+// narrateAndSpeak's `await ensurePersonaForCity(...)` — the very first line
+// of the very first narration — just hung, with the "Meeting your guide..."
+// overlay stuck on screen indefinitely (observed: ~20 minutes, real device,
+// first-run path, never actually resolved). One AbortController/timeout
+// shared across BOTH fetches in this function (get-persona and, inside
+// checkIsFirstPersonaMeeting, check-persona-introduction) guarantees this
+// can never block the tour for more than PERSONA_FETCH_TIMEOUT_MS again —
+// on timeout the existing catch below already does exactly the right thing
+// (fail open: narration proceeds as generic Sabri, no persona identity),
+// it just never used to get a chance to fire.
+const PERSONA_FETCH_TIMEOUT_MS = 12000;
+
 // Folds into the existing tour-loading overlay (advanceTourLoadingStage is
 // a no-op once that overlay is already hidden, so this only visibly shows
 // "Meeting your guide..." during the very first narration of a tour — a
@@ -6820,6 +6840,9 @@ async function ensurePersonaForCity(city, country) {
 
   advanceTourLoadingStage("meeting_guide");
 
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => timeoutController.abort(), PERSONA_FETCH_TIMEOUT_MS);
+
   personaFetchPromise = (async () => {
     try {
       const archetype = userProfile?.preferredArchetype || "local_friend";
@@ -6827,6 +6850,7 @@ async function ensurePersonaForCity(city, country) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ city, country, archetype, language }),
+        signal: timeoutController.signal,
       });
       const data = await response.json();
       if (response.ok && data.persona) {
@@ -6842,12 +6866,19 @@ async function ensurePersonaForCity(city, country) {
         currentPersonaLanguage = language;
         updatePersonaChip();
         logEvent("persona_selected", { archetype, city, language, cached: data.cached === true });
-        isFirstPersonaMeetingForNextNarration = await checkIsFirstPersonaMeeting(city, archetype, language);
+        isFirstPersonaMeetingForNextNarration = await checkIsFirstPersonaMeeting(
+          city,
+          archetype,
+          language,
+          timeoutController.signal
+        );
       }
     } catch (error) {
       // Non-fatal — narration just proceeds as generic Sabri, no persona
-      // identity, rather than blocking the tour.
+      // identity, rather than blocking the tour. Also where a timeout abort
+      // (AbortError) lands — see PERSONA_FETCH_TIMEOUT_MS above.
     } finally {
+      clearTimeout(timeoutId);
       personaFetchPromise = null;
     }
   })();
